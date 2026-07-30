@@ -1,0 +1,4 @@
+interface:
+  display_name: "TimerMeet EasyPHP Builder"
+  short_description: "Implement TimerMeet on PHP 5.4"
+  default_prompt: "Use $timermeet-easyphp-builder to implement and verify a TimerMeet feature without breaking EasyPHP compatibility."

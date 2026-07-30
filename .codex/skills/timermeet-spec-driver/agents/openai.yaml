@@ -1,0 +1,4 @@
+interface:
+  display_name: "TimerMeet Spec Driver"
+  short_description: "Keep SDD and scope aligned"
+  default_prompt: "Use $timermeet-spec-driver to update the spec and acceptance criteria for the next TimerMeet change."

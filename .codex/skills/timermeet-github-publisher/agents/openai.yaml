@@ -1,0 +1,4 @@
+interface:
+  display_name: "TimerMeet GitHub Publisher"
+  short_description: "Commit and publish safely"
+  default_prompt: "Use $timermeet-github-publisher to commit, push, or create the GitHub repo for TimerMeet with the authenticated gh account."

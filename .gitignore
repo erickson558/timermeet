@@ -1,0 +1,20 @@
+# TimerMeet – .gitignore
+# Keep personal meeting data and runtime artifacts out of source control.
+
+# ─── Personal data (real meeting titles, notes, Teams links) ────────────────
+/data/meetings.json
+
+# ─── OS generated ────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ─── IDE / editor ────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ─── PHP temp files ──────────────────────────────────────────────────────────
+*.tmp
+*.log

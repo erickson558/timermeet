@@ -3,6 +3,10 @@
 
 # ─── Personal data (real meeting titles, notes, Teams links) ────────────────
 /data/meetings.json
+/data/settings.json
+/data/*.lock
+/data/*.corrupt-*
+/data/.tmp-*
 
 # ─── OS generated ────────────────────────────────────────────────────────────
 .DS_Store
@@ -15,6 +19,22 @@ desktop.ini
 *.swp
 *.swo
 
-# ─── PHP temp files ──────────────────────────────────────────────────────────
+# ─── Legacy PHP temp files ───────────────────────────────────────────────────
 *.tmp
 *.log
+
+# ─── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# ─── PyInstaller build artifacts (TimerMeet.exe itself IS committed) ────────
+/build/
+/dist/
+*.spec
+
+# ─── Claude Code local session state (agents/skills below ARE committed) ───
+.claude/settings.local.json

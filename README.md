@@ -1,71 +1,82 @@
 # TimerMeet
 
-Sitio local para EasyPHP que permite guardar varios timers de reuniones de Microsoft Teams.
+Recordatorios de escritorio para tus reuniones de Microsoft Teams, con alarmas sonoras y visuales que **no dependen de tener un navegador abierto**.
+
+TimerMeet nació como un sitio local en PHP y se reescribió por completo en Python (`v2.0.0`) porque los avisos basados en navegador dejaban de sonar si la pestaña se cerraba, perdía el foco, o el navegador limitaba los temporizadores en segundo plano. La versión de escritorio corre como un proceso normal de Windows: mientras esté abierta, sus alarmas se disparan sin importar qué más esté pasando en el navegador.
 
 ## Qué hace
 
-- Guarda reuniones por trabajo o empresa.
-- Muestra cuenta regresiva para cada reunión.
-- Lanza aviso previo con alarma sonora, parpadeo visual y notificación del navegador.
-- Permite abrir el enlace de Teams desde cada timer.
-- Guarda la información en `data/meetings.json` mediante PHP y deja una copia de respaldo en `localStorage`.
-- Permite crear series repetitivas diarias, de semana laboral, semanales, quincenales o mensuales.
-- Cada viernes (a partir de las 18:00 hora local), o al abrir la pestaña después de esa hora, TimerMeet extiende automáticamente cada serie recurrente activa para cubrir la semana siguiente, para que una daily o standup nunca deje de recordarse silenciosamente.
-- Sincroniza periódicamente con el servidor (y al volver a la pestaña) para que una pestaña abierta por varios días no pierda ni sobreescriba reuniones agregadas desde otra pestaña o dispositivo.
-- Usa MP3 locales más agresivos para `Sirena invasiva` y `Sirena de bomberos`, con fallback al tono sintético si el navegador no carga el audio.
-- Incluye interfaz en español e inglés.
+- Guarda timers de reuniones por trabajo o empresa, con título, fecha/hora, minutos de aviso, sonido de alerta, enlace de Teams y notas.
+- Dispara un aviso previo (X minutos antes) y otro al momento exacto de inicio, cada uno de forma redundante: sonido en bucle + overlay visual que parpadea y se mantiene siempre encima hasta silenciarlo + notificación nativa de Windows.
+- 5 perfiles de sonido (Suave, Urgente, Alarma fuerte, Sirena invasiva, Sirena de bomberos); los dos últimos usan archivos MP3 reales y caen automáticamente a un tono sintético si el audio no carga -- nunca se queda en silencio.
+- Series repetitivas: diaria, semana laboral (lunes a viernes), semanal, quincenal o mensual, con un motor que las renueva solas cada semana para que nunca dejen de sonar por quedarse sin ocurrencias futuras.
+- Guarda todo en `data/meetings.json`. Si usas la app desde más de una computadora sincronizada por OneDrive, fusiona los cambios de ambas en vez de que una sobrescriba a la otra.
+- Interfaz completa en español e inglés, con botón para cambiar de idioma.
+- Botón de donación ("Cómprame una cerveza") hacia PayPal.
 
-## Cómo usarlo en EasyPHP
+## Instalación y uso
 
-1. Inicia EasyPHP.
-2. Asegúrate de que esta carpeta exista dentro de `www/monitoreos/timermeet`.
-3. Abre en tu navegador:
-   - `http://127.0.0.1/monitoreos/timermeet/`
-   - o la URL local equivalente que uses en EasyPHP.
-4. Presiona `Activar notificaciones`.
-5. Deja la pestaña abierta para que los recordatorios se disparen.
-6. Si no ves cambios, recarga con `Ctrl + F5` para forzar la nueva versión `1.3.0`.
+### Opción 1: ejecutable ya compilado
+
+Descarga o clona este repositorio; `TimerMeet.exe` ya está en la raíz junto con las carpetas `assets/` y `data/` que necesita. Ejecuta `TimerMeet.exe` directamente -- no requiere instalar Python.
+
+### Opción 2: desde el código fuente
+
+Requiere Python 3.9 o superior.
+
+```powershell
+pip install -r requirements.txt
+python timermeet.py
+```
+
+### Compilar tu propio .exe
+
+```powershell
+pip install -r requirements-dev.txt
+python build_exe.py
+```
+
+Esto genera `TimerMeet.exe` en la raíz del proyecto, junto a `timermeet.py`, usando el ícono `computer_pc_10894.ico`. Ver `.claude/skills/timermeet-exe-packager/SKILL.md` para el detalle de cada flag de PyInstaller.
+
+## Dependencias
+
+| Paquete | Para qué |
+|---|---|
+| [`customtkinter`](https://github.com/TomSchimansky/CustomTkinter) | Interfaz gráfica moderna sobre Tkinter (incluido en Python). |
+| [`pygame`](https://www.pygame.org/) | Reproducción de los sonidos de alarma en MP3. |
+| [`plyer`](https://github.com/kivy/plyer) | Notificaciones nativas de Windows (mejor esfuerzo; nunca es el único canal de alerta). |
+| [`pyinstaller`](https://pyinstaller.org/) *(solo para compilar)* | Empaqueta la app como un `.exe` de un solo archivo. |
+
+Ver `requirements.txt` (runtime) y `requirements-dev.txt` (incluye lo anterior más lo necesario para compilar/probar: `pyinstaller`, `bandit`, `pip-audit`).
 
 ## Archivos principales
 
-- `index.php`: estructura del sitio.
-- `assets/styles.css`: diseño responsive.
-- `assets/app.js`: lógica de timers, notificaciones, idioma, alarmas y almacenamiento.
-- `api/meetings.php`: endpoint PHP compatible con EasyPHP 14.1 / PHP 5.4.
-- `data/meetings.json`: archivo físico donde quedan guardados los timers.
+- `timermeet.py`: punto de entrada de la aplicación.
+- `timermeet_app/`: paquete de la app -- modelo de datos (`models.py`), recurrencia y renovación (`recurrence.py`), persistencia (`storage.py`), audio (`audio.py`), notificaciones (`notifications.py`), alarmas (`alarm_ui.py`), interfaz (`main_window.py`), control (`app.py`), idiomas (`i18n.py`), seguridad (`security.py`).
+- `tests/`: pruebas automatizadas -- `python -m unittest discover -s tests`.
+- `build_exe.py`: script para compilar `TimerMeet.exe`.
+- `data/meetings.json`: timers guardados (no se sube al repositorio, ver `.gitignore`).
+- `legacy-php/`: versión anterior en PHP/JS (`1.3.0`), conservada como referencia -- ver `legacy-php/README.md`.
 
 ## Gestión del proyecto
 
 - `SDD.md`: especificación viva y criterios de aceptación.
-- `AGENTS.md`: agentes recomendados para analizar, construir y publicar el proyecto.
-- `.codex/skills/`: skills versionadas del proyecto para spec, implementación EasyPHP y publicación en GitHub.
+- `AGENTS.md`: agentes de Claude Code (y, para el baseline histórico, de Codex) recomendados para este proyecto.
+- `.claude/skills/`: skills versionadas para spec, implementación, comentarios de código, empaquetado del `.exe`, publicación en GitHub, revisión de seguridad, y el flujo de corrección de bugs con versionado.
+- `SECURITY.md`: alcance de soporte y cómo reportar un problema.
 
-## Nota importante
+## Privacidad y seguridad
 
-Los recordatorios dependen de que el navegador siga abierto en esta pestaña. Si luego quieres avisos aunque el navegador esté cerrado, el siguiente paso sería crear una app de escritorio o un servicio en segundo plano.
-
-### Por qué antes fallaban algunos recordatorios
-
-Hasta la versión `1.2.4`, cada serie recurrente (daily, weekly, etc.) se creaba con una cantidad fija de eventos (por ejemplo, 5 ocurrencias para "Semana laboral"). Al agotarse esa cantidad, la reunión desaparecía del calendario sin ningún aviso y dejaba de recordarse, aunque en la realidad la reunión seguía ocurriendo cada semana. Además, la pestaña solo leía `data/meetings.json` una vez al cargar, así que una pestaña abierta por varios días nunca se enteraba de reuniones agregadas desde otra pestaña o dispositivo, y su siguiente autoguardado podía sobreescribir esos cambios. Desde `1.3.0`, TimerMeet extiende las series activas automáticamente y vuelve a sincronizar con el servidor de forma periódica, así que ambos escenarios quedan cubiertos.
+- `data/meetings.json` guarda el contenido real de tus reuniones (títulos, notas, enlaces de Teams) y está excluido del repositorio mediante `.gitignore`; nunca lo subas a un repositorio público.
+- La app solo abre enlaces (de Teams o el botón de donación) con esquema `http://` o `https://`; cualquier otro esquema se rechaza.
+- No hay servidor ni puerto de red: toda la app corre como un proceso local de un solo usuario.
+- Ver `SECURITY.md` para el proceso de reporte de vulnerabilidades y el checklist de hardening.
 
 ## Créditos de audio
 
 - `Sirena invasiva`: `Siren Noise` de `KevanGC`, obtenido desde SoundBible bajo dominio público.
 - `Sirena de bomberos`: `Fire Engine Siren Yelps And Wails` de `Alexander`, obtenido desde Orange Free Sounds bajo `CC BY 4.0`.
 - Detalle y enlaces en `assets/audio/ATTRIBUTION.md`.
-
-## Requisitos
-
-- `EasyPHP-Webserver-14.1b2` o cualquier stack Apache + `PHP >= 5.4` sin dependencias externas ni base de datos.
-- Sin dependencias de Composer, npm ni build step: `index.php`, `assets/app.js` y `assets/styles.css` se sirven tal cual.
-
-## Privacidad y seguridad
-
-- `data/meetings.json` guarda el contenido real de tus reuniones (títulos, notas, enlaces de Teams) y está excluido del repositorio mediante `.gitignore`; nunca lo subas a un repositorio público.
-- `data/.htaccess` bloquea el acceso HTTP directo a esa carpeta (`Require all denied`).
-- La app solo abre enlaces de Teams con esquema `http://` o `https://`; cualquier otro esquema se rechaza al guardar y al abrir.
-- El endpoint `api/meetings.php` valida el tipo de cada campo y limita el tamaño del payload antes de escribir en disco.
-- Esta app está pensada para uso local de un solo usuario (`127.0.0.1`); no incluye autenticación porque no está diseñada para exponerse a internet.
 
 ## Licencia
 

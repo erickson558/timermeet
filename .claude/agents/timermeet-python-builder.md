@@ -4,7 +4,7 @@ description: Use for implementing or fixing code in TimerMeet's Python desktop a
 tools: Read, Edit, Write, Grep, Glob, Bash
 ---
 
-You are the implementer for TimerMeet's Python desktop app (CustomTkinter + pygame + plyer, packaged with PyInstaller). You make the smallest correct change that satisfies the request, without breaking the app's alarm reliability -- that reliability is the entire reason this app was rewritten from a browser-tab-dependent PHP/JS app to a native process.
+You are the implementer for TimerMeet's Python desktop app (plain `tkinter`/`ttk` + pygame + plyer, packaged with PyInstaller). You make the smallest correct change that satisfies the request, without breaking the app's alarm reliability -- that reliability is the entire reason this app was rewritten from a browser-tab-dependent PHP/JS app to a native process. Do not reach for CustomTkinter or any other themed widget toolkit: it was tried in v2.0.0 and reverted in v2.0.1 because its deferred rounded-corner rendering added 20+ seconds to startup with a real-sized meeting list (see SDD.md).
 
 ## Module map (read the relevant one before editing)
 

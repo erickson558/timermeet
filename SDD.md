@@ -2,11 +2,11 @@
 
 ## Product Goal
 
-Recordar al usuario sus reuniones de Microsoft Teams con avisos visibles, sonoros y persistentes, sin depender de que un navegador permanezca abierto. La versión activa (`2.0.0`) es una app de escritorio en Python (CustomTkinter); la versión `1.3.0` en PHP/JS queda congelada en `legacy-php/` como referencia.
+Recordar al usuario sus reuniones de Microsoft Teams con avisos visibles, sonoros y persistentes, sin depender de que un navegador permanezca abierto. La versión activa (`2.0.1`) es una app de escritorio en Python (Tkinter puro); la versión `1.3.0` en PHP/JS queda congelada en `legacy-php/` como referencia.
 
 ## Current Baseline
 
-- Versión actual: `2.0.0` (Python, escritorio).
+- Versión actual: `2.0.1` (Python, escritorio).
 - Punto de entrada: [timermeet.py](./timermeet.py).
 - Paquete de la app: [timermeet_app/](./timermeet_app/) (`models.py`, `recurrence.py`, `storage.py`, `audio.py`, `notifications.py`, `alarm_ui.py`, `main_window.py`, `app.py`, `i18n.py`, `security.py`).
 - Persistencia: archivo compartido [data/meetings.json](./data/meetings.json) (mismo esquema que la versión PHP; se lee y escribe con fusión ante posibles ediciones desde otra PC vía OneDrive, ver `timermeet_app/storage.py`).
@@ -19,10 +19,19 @@ Recordar al usuario sus reuniones de Microsoft Teams con avisos visibles, sonoro
 
 La versión web dependía de que una pestaña del navegador permaneciera abierta y enfocada para disparar avisos (permiso de `Notification`, temporizadores de la pestaña, ahorro de batería/throttling del navegador). Ese fue el motivo explícito para migrar ("no me alerta como debe"). Un proceso nativo de escritorio elimina esa dependencia por completo y, de paso, elimina toda la superficie de red de la versión anterior (ya no hay endpoint PHP ni servidor HTTP).
 
+## Por qué v2.0.1 dejó de usar CustomTkinter
+
+Al probar `v2.0.0` con datos reales (41 reuniones), la ventana tardaba entre 20 y 26 segundos en volverse interactiva y parecía "no abrir". La causa raíz, confirmada con mediciones (ver `tests/` y el historial de commits): CustomTkinter difiere el renderizado de bordes redondeados de cada widget (imagen PIL por widget) hasta que Tk procesa su cola de tareas en espera; con las ~40-50 widgets de la interfaz más las tarjetas de reuniones, ese primer vaciado de cola tomaba decenas de segundos. Se reescribió toda la interfaz (`timermeet_app/main_window.py`, `alarm_ui.py`) con widgets `tkinter`/`ttk` planos, que no tienen ese costo. Además:
+- Las tarjetas de reuniones dejaron de reconstruirse por completo en cada latido de 1 segundo (solo se re-renderizan si su contenido visible cambió).
+- La inicialización de `pygame.mixer` se volvió perezosa y se ejecuta en un hilo de fondo, no de forma síncrona al arrancar.
+- El recálculo del área de scroll de la lista de reuniones se agrupa (debounce) en vez de recalcularse en cada widget insertado.
+- Se corrigió un bug real de arranque bajo `--windowed` de PyInstaller: `sys.stdout`/`sys.stderr` son `None` sin consola adjunta, lo que hacía fallar en silencio la primera impresión de `pygame` y dejaba la ventana creada pero nunca mostrada.
+
 ## Technical Constraints
 
 - Windows 10/11, Python 3.9+ (probado con 3.12).
-- Dependencias runtime: `customtkinter`, `pygame` (audio), `plyer` (notificaciones nativas, mejor esfuerzo). Ver `requirements.txt`.
+- Interfaz gráfica: `tkinter`/`ttk` puro (sin CustomTkinter, ver arriba).
+- Dependencias runtime: `pygame` (audio), `plyer` (notificaciones nativas, mejor esfuerzo). Ver `requirements.txt`.
 - Sin base de datos; persistencia en un único archivo JSON compartido.
 - Esta carpeta del proyecto vive dentro de OneDrive y puede ejecutarse desde más de una PC: la capa de persistencia debe seguir soportando fusión (merge-on-save) en vez de sobrescritura simple — ver el docstring de `timermeet_app/storage.py`.
 - Español como idioma inicial (`i18n.DEFAULT_LANGUAGE = "es"`), inglés soportado por completo; ambos diccionarios deben tener exactamente las mismas claves (verificado en `tests/test_i18n.py`).

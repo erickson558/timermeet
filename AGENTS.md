@@ -2,7 +2,7 @@
 
 Esta carpeta usa dos convenciones de agentes/skills en paralelo:
 
-- **`.claude/`** — agentes y skills para Claude Code, activos para el desarrollo actual (app de escritorio en Python, `2.0.0`).
+- **`.claude/`** — agentes y skills para Claude Code, activos para el desarrollo actual (app de escritorio en Python, `2.0.x`).
 - **`.codex/`** — agentes y skills para Codex CLI, congelados junto con el baseline PHP (`legacy-php/`, `1.3.0`). Se conservan como referencia para quien siga usando esa herramienta sobre el código histórico; no se actualizan con los cambios de la versión Python.
 
 ## Claude Code — agentes activos (`.claude/agents/`)

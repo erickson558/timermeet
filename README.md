@@ -42,10 +42,12 @@ Esto genera `TimerMeet.exe` en la raíz del proyecto, junto a `timermeet.py`, us
 
 | Paquete | Para qué |
 |---|---|
-| [`customtkinter`](https://github.com/TomSchimansky/CustomTkinter) | Interfaz gráfica moderna sobre Tkinter (incluido en Python). |
+| `tkinter` / `ttk` | Interfaz gráfica (incluida en la instalación estándar de Python; no se agrega como dependencia). |
 | [`pygame`](https://www.pygame.org/) | Reproducción de los sonidos de alarma en MP3. |
 | [`plyer`](https://github.com/kivy/plyer) | Notificaciones nativas de Windows (mejor esfuerzo; nunca es el único canal de alerta). |
 | [`pyinstaller`](https://pyinstaller.org/) *(solo para compilar)* | Empaqueta la app como un `.exe` de un solo archivo. |
+
+> La interfaz se construyó con `tkinter`/`ttk` puro en vez de CustomTkinter: en pruebas con datos reales, CustomTkinter tardaba 20+ segundos en volverse interactiva por el renderizado diferido de sus bordes redondeados, lo que hacía parecer que la app no abría. Ver `SDD.md` para el detalle de esa corrección (`v2.0.1`).
 
 Ver `requirements.txt` (runtime) y `requirements-dev.txt` (incluye lo anterior más lo necesario para compilar/probar: `pyinstaller`, `bandit`, `pip-audit`).
 

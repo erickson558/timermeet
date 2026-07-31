@@ -1,6 +1,6 @@
 ---
 name: timermeet-python-builder
-description: Implement and modify the TimerMeet Python desktop app (CustomTkinter + pygame + plyer). Use when changing timers, alarms, recurrence, persistence, translations, or UI behavior in timermeet_app/, timermeet.py, or tests/.
+description: Implement and modify the TimerMeet Python desktop app (plain tkinter/ttk + pygame + plyer). Use when changing timers, alarms, recurrence, persistence, translations, or UI behavior in timermeet_app/, timermeet.py, or tests/.
 ---
 
 # TimerMeet Python Builder

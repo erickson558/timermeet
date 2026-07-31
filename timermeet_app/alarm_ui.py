@@ -4,14 +4,18 @@ whenever a meeting's reminder or start alert fires (see
 ``app.py::TimerMeetApp._notify_meeting``), mirroring the original web app's
 redundant "can't miss it" design (modal dialog + full-page overlay + OS
 notification, all at once, see ``legacy-php/assets/app.js::notifyMeeting``).
+
+Built with plain ``tkinter`` (not CustomTkinter) so an alarm firing for the
+first time is never delayed by CustomTkinter's deferred widget-realization
+cost (see ``main_window.py``'s module docstring) -- an alarm must appear
+instantly, every time.
 """
 
 from __future__ import annotations
 
+import tkinter as tk
 import webbrowser
 from typing import Callable, Optional
-
-import customtkinter as ctk
 
 from . import audio, i18n, notifications, security
 
@@ -20,6 +24,24 @@ _FLASH_INTERVAL_MS = 700
 _RELIFT_INTERVAL_MS = 2000
 _TITLE_BLINK_INTERVAL_MS = 850
 
+_TEXT_ON_RED = "white"
+_MUTED_ON_RED = "#fecaca"
+_BUTTON_BG = "#3b82f6"
+_BUTTON_HOVER = "#2563eb"
+_DANGER_BG = "#7f1d1d"
+_DANGER_HOVER = "#991b1b"
+
+
+def _alarm_button(parent, text: str, command, bg: str, hover: str, state: str = "normal") -> tk.Button:
+    btn = tk.Button(
+        parent, text=text, command=command, bg=bg, fg="white", activebackground=hover, activeforeground="white",
+        relief="flat", borderwidth=0, padx=14, pady=8, cursor="hand2", font=("Segoe UI", 11, "bold"), state=state,
+    )
+    if state != "disabled":
+        btn.bind("<Enter>", lambda _e: btn.configure(bg=hover))
+        btn.bind("<Leave>", lambda _e: btn.configure(bg=bg))
+    return btn
+
 
 class AlarmController:
     """Owns the single active alarm (if any) for the whole app: the sound
@@ -27,13 +49,13 @@ class AlarmController:
     blink. Firing a new alert always replaces whatever is currently active
     rather than stacking, matching the original app."""
 
-    def __init__(self, root: ctk.CTk, get_language: Callable[[], str]):
+    def __init__(self, root: tk.Tk, get_language: Callable[[], str]):
         self._root = root
         self._get_language = get_language
         self._player = audio.AlarmPlayer()
 
-        self._dialog: Optional[ctk.CTkToplevel] = None
-        self._overlay: Optional[ctk.CTkToplevel] = None
+        self._dialog: Optional[tk.Toplevel] = None
+        self._overlay: Optional[tk.Toplevel] = None
         self._flash_container = None
         self._flash_state = False
         self._flash_job = None
@@ -50,6 +72,12 @@ class AlarmController:
 
     def is_active(self) -> bool:
         return self._overlay is not None
+
+    def warm_cache(self) -> None:
+        """Preload the siren/fire MP3s into this controller's own player so
+        the first real alarm doesn't stall on disk I/O. Safe to call from a
+        background thread (touches only pygame, never a Tkinter widget)."""
+        audio.preload(self._player)
 
     def test_play(self, profile_id: str) -> None:
         """One-shot preview for the form's "Probar sonido" button. Reuses
@@ -134,50 +162,43 @@ class AlarmController:
     # -- window construction -------------------------------------------------
 
     def _show_overlay(self, language, tag_key, title_text, body_text, meta_text) -> None:
-        overlay = ctk.CTkToplevel(self._root)
+        overlay = tk.Toplevel(self._root)
         overlay.title(i18n.t("alarmOverlayTag", language))
         overlay.geometry("560x340")
         overlay.attributes("-topmost", True)
         overlay.protocol("WM_DELETE_WINDOW", self.dismiss)
 
-        container = ctk.CTkFrame(overlay, fg_color=_FLASH_COLORS[0], corner_radius=0)
+        container = tk.Frame(overlay, bg=_FLASH_COLORS[0])
         container.pack(fill="both", expand=True)
 
-        ctk.CTkLabel(
-            container, text=i18n.t(tag_key, language), font=("Segoe UI", 14, "bold"), text_color="white"
+        tk.Label(
+            container, text=i18n.t(tag_key, language), font=("Segoe UI", 14, "bold"),
+            fg=_TEXT_ON_RED, bg=_FLASH_COLORS[0],
         ).pack(pady=(28, 4))
-        ctk.CTkLabel(
-            container, text=title_text, font=("Segoe UI", 22, "bold"), text_color="white", wraplength=480
+        tk.Label(
+            container, text=title_text, font=("Segoe UI", 22, "bold"), fg=_TEXT_ON_RED, bg=_FLASH_COLORS[0],
+            wraplength=480,
         ).pack(pady=(0, 8))
-        ctk.CTkLabel(
-            container, text=body_text, font=("Segoe UI", 14), text_color="white", wraplength=480
+        tk.Label(
+            container, text=body_text, font=("Segoe UI", 14), fg=_TEXT_ON_RED, bg=_FLASH_COLORS[0], wraplength=480,
         ).pack(pady=(0, 4))
         if meta_text:
-            ctk.CTkLabel(
-                container, text=meta_text, font=("Segoe UI", 12), text_color="#fecaca"
+            tk.Label(
+                container, text=meta_text, font=("Segoe UI", 12), fg=_MUTED_ON_RED, bg=_FLASH_COLORS[0],
             ).pack(pady=(0, 4))
-        ctk.CTkLabel(
-            container,
-            text=i18n.t("alarmOverlayHint", language),
-            font=("Segoe UI", 11),
-            text_color="#fecaca",
-            wraplength=480,
+        tk.Label(
+            container, text=i18n.t("alarmOverlayHint", language), font=("Segoe UI", 11),
+            fg=_MUTED_ON_RED, bg=_FLASH_COLORS[0], wraplength=480,
         ).pack(pady=(4, 18))
 
-        buttons = ctk.CTkFrame(container, fg_color="transparent")
+        buttons = tk.Frame(container, bg=_FLASH_COLORS[0])
         buttons.pack(pady=(0, 24))
-        ctk.CTkButton(
-            buttons,
-            text=i18n.t("openTeams", language),
-            command=self.open_link,
+        _alarm_button(
+            buttons, i18n.t("openTeams", language), self.open_link, _BUTTON_BG, _BUTTON_HOVER,
             state="normal" if self._current_url else "disabled",
         ).pack(side="left", padx=8)
-        ctk.CTkButton(
-            buttons,
-            text=i18n.t("dismissAlarm", language),
-            fg_color="#7f1d1d",
-            hover_color="#991b1b",
-            command=self.dismiss,
+        _alarm_button(
+            buttons, i18n.t("dismissAlarm", language), self.dismiss, _DANGER_BG, _DANGER_HOVER,
         ).pack(side="left", padx=8)
 
         self._overlay = overlay
@@ -187,27 +208,32 @@ class AlarmController:
         self._relift()
 
     def _show_dialog(self, language, tag_key, title_text, body_text) -> None:
-        dialog = ctk.CTkToplevel(self._root)
+        dialog = tk.Toplevel(self._root)
         dialog.title(i18n.t(tag_key, language))
         dialog.geometry("420x220")
+        dialog.configure(bg="#1c1f26")
         dialog.attributes("-topmost", True)
         dialog.protocol("WM_DELETE_WINDOW", self.dismiss)
 
-        ctk.CTkLabel(dialog, text=i18n.t(tag_key, language), font=("Segoe UI", 12, "bold")).pack(pady=(20, 4))
-        ctk.CTkLabel(dialog, text=title_text, font=("Segoe UI", 16, "bold"), wraplength=360).pack(pady=(0, 8))
-        ctk.CTkLabel(dialog, text=body_text, wraplength=360).pack(pady=(0, 16))
+        tk.Label(
+            dialog, text=i18n.t(tag_key, language), font=("Segoe UI", 12, "bold"), bg="#1c1f26", fg="#f2f3f5"
+        ).pack(pady=(20, 4))
+        tk.Label(
+            dialog, text=title_text, font=("Segoe UI", 16, "bold"), wraplength=360, bg="#1c1f26", fg="#f2f3f5"
+        ).pack(pady=(0, 8))
+        tk.Label(
+            dialog, text=body_text, wraplength=360, bg="#1c1f26", fg="#f2f3f5", font=("Segoe UI", 10)
+        ).pack(pady=(0, 16))
 
-        buttons = ctk.CTkFrame(dialog, fg_color="transparent")
+        buttons = tk.Frame(dialog, bg="#1c1f26")
         buttons.pack(pady=(0, 16))
-        ctk.CTkButton(
-            buttons,
-            text=i18n.t("alertDialogOpen", language),
-            command=self.open_link,
+        _alarm_button(
+            buttons, i18n.t("alertDialogOpen", language), self.open_link, _BUTTON_BG, _BUTTON_HOVER,
             state="normal" if self._current_url else "disabled",
         ).pack(side="left", padx=8)
-        ctk.CTkButton(buttons, text=i18n.t("alertDialogClose", language), command=self.dismiss).pack(
-            side="left", padx=8
-        )
+        _alarm_button(
+            buttons, i18n.t("alertDialogClose", language), self.dismiss, "#2a2e37", "#343a45",
+        ).pack(side="left", padx=8)
 
         try:
             dialog.grab_set()
@@ -222,7 +248,7 @@ class AlarmController:
             return
         self._flash_state = not self._flash_state
         try:
-            self._flash_container.configure(fg_color=_FLASH_COLORS[int(self._flash_state)])
+            self._flash_container.configure(bg=_FLASH_COLORS[int(self._flash_state)])
         except Exception:
             return
         self._flash_job = self._root.after(_FLASH_INTERVAL_MS, self._flash_overlay)

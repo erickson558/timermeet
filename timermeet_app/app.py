@@ -12,13 +12,13 @@ from __future__ import annotations
 
 import colorsys
 import logging
+import threading
+import tkinter as tk
 import webbrowser
 from datetime import datetime, timedelta
 from typing import List, Optional
 
-import customtkinter as ctk
-
-from . import audio, i18n, models, notifications, recurrence, security, storage
+from . import i18n, models, notifications, recurrence, security, storage
 from .alarm_ui import AlarmController
 from .main_window import Callbacks, MainWindow, MeetingCardData
 
@@ -122,9 +122,21 @@ def _color_for_work_name(name: str) -> str:
 
 class TimerMeetApp:
     def __init__(self) -> None:
-        self.root = ctk.CTk()
+        self.root = tk.Tk()
         self.root.geometry("1180x760")
         self.root.minsize(960, 640)
+        # Belt-and-suspenders against a packaged build ever ending up with a
+        # window that exists but never gets shown (observed once under
+        # PyInstaller --windowed, root-caused to sys.stdout/stderr being
+        # None -- see timermeet.py).
+        self.root.after(0, self._force_show_window)
+
+        # Cheap, immediate feedback while the real UI builds underneath.
+        loading_label = tk.Label(
+            self.root, text="Cargando TimerMeet…", font=("Segoe UI", 14), bg="#1a1a1a", fg="#f5f5f5"
+        )
+        loading_label.place(relx=0.5, rely=0.5, anchor="center")
+        self.root.update()
 
         settings = storage.load_settings()
         saved_language = settings.get("language")
@@ -134,6 +146,7 @@ class TimerMeetApp:
         self.storage_ok = True
         self._dirty = False
         self._resync_accumulator_ms = 0
+        self._last_rendered_signature = None
 
         callbacks = Callbacks(
             on_save=self.handle_save,
@@ -156,12 +169,33 @@ class TimerMeetApp:
         self.root.bind("<FocusIn>", self._on_focus_in)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        audio.preload()
         self._refresh_all()
         self.root.after(HEARTBEAT_MS, self._heartbeat)
+        self.root.update_idletasks()
+        loading_label.destroy()
+
+        # Run on a background thread, not via root.after(): pygame.mixer
+        # initialization (inside AlarmPlayer._ensure_mixer) measurably slows
+        # down Tk's own idle-task/event processing on some systems even when
+        # scheduled through Tk's own timer, so it has to stay off the Tk
+        # thread entirely for the window to be responsive immediately.
+        # warm_cache() only touches pygame, never a Tkinter widget, so it's
+        # safe to run concurrently with the UI thread. The alarm system
+        # works fine in the meantime either way -- it lazily loads/falls
+        # back to a synth tone on demand (see audio.py).
+        threading.Thread(target=self.alarms.warm_cache, daemon=True).start()
 
     def run(self) -> None:
         self.root.mainloop()
+
+    def _force_show_window(self) -> None:
+        try:
+            self.root.deiconify()
+            self.root.state("normal")
+            self.root.lift()
+            self.root.focus_force()
+        except Exception as exc:  # nosec B110 - defensive nicety, must never block startup
+            logger.warning("Could not force-show the main window: %s", exc)
 
     # -- persistence ----------------------------------------------------------
 
@@ -317,7 +351,26 @@ class TimerMeetApp:
             )
             for meeting in sorted(self._visible_meetings(), key=_meeting_sort_key)
         ]
-        self.view.render_meeting_list(cards)
+
+        # Rebuilding every CustomTkinter card widget from scratch is
+        # expensive (each card is ~8 canvas-based widgets), and _refresh_all
+        # runs every second from the heartbeat. Skip the rebuild whenever
+        # nothing a card actually displays has changed -- countdown text
+        # only changes once a minute (see _format_relative's minute
+        # flooring), so with a real-sized meeting list this is what keeps
+        # the UI thread from falling behind and the window from appearing
+        # to hang. Mirrors the original web app's own "skip re-render if
+        # nothing changed" optimization in its merge path.
+        signature = (
+            self.language,
+            tuple(
+                (c.meeting.id, c.status_key, c.countdown_text, c.recurrence_text, c.meeting.updatedAt)
+                for c in cards
+            ),
+        )
+        if signature != self._last_rendered_signature:
+            self.view.render_meeting_list(cards)
+            self._last_rendered_signature = signature
 
     def _find_meeting(self, meeting_id: str) -> Optional[models.Meeting]:
         return next((m for m in self.meetings if m.id == meeting_id), None)

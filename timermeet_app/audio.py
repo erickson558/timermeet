@@ -133,19 +133,29 @@ class AlarmPlayer:
     sound first -- alarms replace rather than stack, matching the original."""
 
     def __init__(self) -> None:
-        self._mixer_ready = False
-        if pygame is not None:
-            try:
-                pygame.mixer.init()
-                self._mixer_ready = True
-            except Exception as exc:  # audio device issues must never crash the app
-                logger.warning("Could not initialize audio mixer: %s", exc)
+        self._mixer_ready: Optional[bool] = None  # None = not yet attempted (lazy, see _ensure_mixer)
         self._sounds: Dict[str, "pygame.mixer.Sound"] = {}
         self._active_channel = None
         self._synth_stop_event: Optional[threading.Event] = None
 
+    def _ensure_mixer(self) -> bool:
+        """Initialize pygame's mixer on first actual use rather than at
+        construction time. `pygame.mixer.init()` measurably slows down
+        Tkinter's idle-task processing on some systems (observed ~3s of
+        extra startup delay) -- deferring it until a sound is genuinely
+        needed keeps the window responsive immediately on launch."""
+        if self._mixer_ready is None:
+            self._mixer_ready = False
+            if pygame is not None:
+                try:
+                    pygame.mixer.init()
+                    self._mixer_ready = True
+                except Exception as exc:  # audio device issues must never crash the app
+                    logger.warning("Could not initialize audio mixer: %s", exc)
+        return self._mixer_ready
+
     def _load_sound(self, profile: SoundProfile):
-        if not self._mixer_ready or not profile.asset_key:
+        if not profile.asset_key or not self._ensure_mixer():
             return None
         if profile.asset_key in self._sounds:
             return self._sounds[profile.asset_key]
@@ -205,10 +215,12 @@ class AlarmPlayer:
         threading.Thread(target=_run, daemon=True).start()
 
 
-def preload(profile_ids: Optional[List[str]] = None) -> None:
+def preload(player: "AlarmPlayer", profile_ids: Optional[List[str]] = None) -> None:
     """Best-effort warm-up so the first real alarm doesn't stall on disk I/O.
-    Failures are swallowed -- `AlarmPlayer.play()` already falls back safely."""
-    player = AlarmPlayer()
+    Warms the *same* player instance that will actually play alarms (its
+    ``_sounds`` cache is per-instance) -- call with the AlarmController's own
+    player, not a throwaway one. Failures are swallowed -- `AlarmPlayer.play()`
+    already falls back safely."""
     for profile_id in profile_ids or ("siren", "fire"):
         profile = SOUND_PROFILES.get(profile_id)
         if profile and profile.asset_key:

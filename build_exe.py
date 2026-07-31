@@ -3,7 +3,7 @@
 Usage: ``python build_exe.py``
 
 Requires the dev dependencies (see requirements-dev.txt): PyInstaller, plus
-the app's own runtime dependencies (customtkinter, pygame, plyer). See
+the app's own runtime dependencies (pygame, plyer). See
 ``.claude/skills/timermeet-exe-packager/SKILL.md`` for the reasoning behind
 each flag below.
 """
@@ -36,11 +36,6 @@ def main() -> None:
         APP_NAME,
         "--icon",
         str(ICON_PATH),
-        # CustomTkinter ships its own theme JSON + font files that it looks
-        # up relative to its installed package path -- without bundling
-        # them explicitly, a frozen build renders a blank/broken window.
-        "--collect-all",
-        "customtkinter",
         # plyer picks its OS backend (plyer.platforms.win.notification) via
         # a runtime string import that PyInstaller's static analysis can't
         # see, so it has to be told to include all of plyer's submodules.

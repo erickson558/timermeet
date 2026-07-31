@@ -16,7 +16,7 @@ Produce a single-file Windows executable (`TimerMeet.exe`) at the repository roo
    ```powershell
    python build_exe.py
    ```
-   This runs PyInstaller with `--onefile --windowed --icon computer_pc_10894.ico --collect-all customtkinter --collect-submodules plyer`, then copies `dist/TimerMeet.exe` to the repo root.
+   This runs PyInstaller with `--onefile --windowed --icon computer_pc_10894.ico --collect-submodules plyer`, then copies `dist/TimerMeet.exe` to the repo root.
 3. Launch `TimerMeet.exe` once to confirm it starts without an immediate crash (check `data/timermeet.log` for exceptions), then close it.
 4. Clean up intermediate build output (do **not** commit these):
    ```powershell
@@ -28,8 +28,9 @@ Produce a single-file Windows executable (`TimerMeet.exe`) at the repository roo
 
 - `--onefile --windowed`: a single double-clickable exe with no console window (this is a GUI app; the console would just be a stray black window, and the crash handler in `timermeet.py` already shows a message box on failure).
 - `--icon computer_pc_10894.ico`: the icon already checked into the repo root; keep using this same file unless the user provides a new one.
-- `--collect-all customtkinter`: CustomTkinter looks up its own theme JSON and font files relative to its installed package path; without this flag a frozen build renders a blank or broken window.
 - `--collect-submodules plyer`: `plyer` picks its OS notification backend (`plyer.platforms.win.notification`) via a runtime string import PyInstaller's static analysis can't see on its own.
+
+Note: the UI is plain `tkinter`/`ttk` (no CustomTkinter, no `--collect-all` needed for it) -- see SDD.md's "Por qué v2.0.1 dejó de usar CustomTkinter" for why that dependency was removed (it added 20+ seconds to startup with a real-sized meeting list).
 
 ## What to commit vs ignore
 

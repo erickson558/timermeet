@@ -165,6 +165,10 @@ translations = {
         "gadgetRestoreButton": "Completo",
         "gadgetCloseButton": "×",
         "gadgetModeBlockedToast": "No se puede cambiar de modo mientras suena una alarma.",
+        "trayModeButton": "Bandeja",
+        "trayShowMenuItem": "Mostrar TimerMeet",
+        "trayModeToast": "TimerMeet sigue activo en la bandeja del sistema.",
+        "trayModeUnavailableToast": "No se pudo activar el modo bandeja en este equipo.",
     },
     "en": {
         "appTitle": "TimerMeet",
@@ -313,6 +317,10 @@ translations = {
         "gadgetRestoreButton": "Full",
         "gadgetCloseButton": "×",
         "gadgetModeBlockedToast": "Can't switch modes while an alarm is sounding.",
+        "trayModeButton": "Tray",
+        "trayShowMenuItem": "Show TimerMeet",
+        "trayModeToast": "TimerMeet is still running in the system tray.",
+        "trayModeUnavailableToast": "Could not enable tray mode on this computer.",
     },
 }
 

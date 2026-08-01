@@ -21,6 +21,7 @@ from typing import List, Optional
 from . import i18n, models, notifications, recurrence, retention, security, storage
 from .alarm_ui import AlarmController
 from .main_window import Callbacks, MainWindow, MeetingCardData
+from .tray_icon import TrayIcon
 
 logger = logging.getLogger(__name__)
 
@@ -225,6 +226,7 @@ class TimerMeetApp:
             on_add_company=self.handle_add_company,
             on_remove_company=self.handle_remove_company,
             on_toggle_gadget_mode=self.handle_toggle_gadget_mode,
+            on_enter_tray_mode=self.handle_enter_tray_mode,
         )
         self.view = MainWindow(self.root, callbacks)
         self.view.apply_translations(self.language)
@@ -234,6 +236,19 @@ class TimerMeetApp:
 
         self.alarms = AlarmController(self.root, get_language=lambda: self.language)
         self.alarms.set_base_title(i18n.t("appTitle", self.language))
+
+        # Cheap to construct (no pystray/Pillow import happens until the
+        # first real show() call, see tray_icon.py) -- callbacks are wrapped
+        # in root.after(0, ...) here, not inside TrayIcon itself, since they
+        # fire from pystray's own background thread and Tkinter widgets may
+        # only ever be touched from the main thread.
+        self.tray_mode = False
+        self.tray = TrayIcon(
+            icon_path=storage.base_dir() / "computer_pc_10894.ico",
+            tooltip=i18n.t("trayModeToast", self.language),
+            on_restore=lambda: self.root.after(0, self.handle_restore_from_tray),
+            on_exit=lambda: self.root.after(0, self._on_close),
+        )
 
         self.root.bind("<FocusIn>", self._on_focus_in)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -332,6 +347,9 @@ class TimerMeetApp:
             # direct quit from gadget mode skips that path entirely.
             self._gadget_x, self._gadget_y = self.view.current_gadget_position()
             self._save_gadget_settings()
+        # Removes the tray icon immediately (NIM_DELETE) instead of leaving
+        # it for the OS to eventually notice the owning process died.
+        self.tray.stop()
         self.root.destroy()
 
     # -- heartbeat / alerts -----------------------------------------------------
@@ -632,6 +650,7 @@ class TimerMeetApp:
         storage.save_settings(settings)
         self.view.apply_translations(self.language)
         self.alarms.set_base_title(i18n.t("appTitle", self.language))
+        self.tray.set_tooltip(i18n.t("trayModeToast", self.language))
         self._refresh_all()
 
     def handle_test_notification(self) -> None:
@@ -703,3 +722,32 @@ class TimerMeetApp:
             settings["gadgetX"] = self._gadget_x
             settings["gadgetY"] = self._gadget_y
         storage.save_settings(settings)
+
+    # -- tray mode --------------------------------------------------------------
+
+    def handle_enter_tray_mode(self) -> None:
+        # Same guard as gadget mode, and for the same reason: this hides the
+        # one real window entirely, which must never happen while an
+        # AlarmController Toplevel is up.
+        if self.alarms.is_active():
+            self.view.show_toast(i18n.t("gadgetModeBlockedToast", self.language))
+            return
+        shown = self.tray.show(
+            restore_label=i18n.t("trayShowMenuItem", self.language),
+            exit_label=i18n.t("exitButton", self.language),
+        )
+        if not shown:
+            # Never hide the window if the tray icon couldn't actually be
+            # created -- that would strand the user with no visible UI and
+            # no way back.
+            self.view.show_toast(i18n.t("trayModeUnavailableToast", self.language))
+            return
+        self.tray_mode = True
+        self.root.withdraw()
+
+    def handle_restore_from_tray(self) -> None:
+        if not self.tray_mode:
+            return
+        self.tray_mode = False
+        self.tray.hide()
+        self._force_show_window()

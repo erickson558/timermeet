@@ -118,6 +118,15 @@ class MeetingCardData:
 
 
 @dataclass
+class _CardWidgets:
+    frame: tk.Frame
+    work_label: tk.Label
+    status_label: tk.Label
+    title_label: tk.Label
+    detail_label: tk.Label
+
+
+@dataclass
 class Callbacks:
     on_save: Callable[[dict], None]
     on_clear: Callable[[], None]
@@ -134,6 +143,7 @@ class Callbacks:
     on_add_company: Callable[[str], None]
     on_remove_company: Callable[[str], None]
     on_toggle_gadget_mode: Callable[[], None]
+    on_enter_tray_mode: Callable[[], None]
 
 
 def _button(parent, text: str, command, bg: str, fg: str, hover: Optional[str] = None, **extra) -> tk.Button:
@@ -168,6 +178,8 @@ class _ScrollablePanel(tk.Frame):
         self.body = tk.Frame(self.canvas, bg=bg)
         self._window = self.canvas.create_window((0, 0), window=self.body, anchor="nw")
         self._scrollregion_job = None
+        self._canvas_width_job = None
+        self._pending_canvas_width = None
 
         # Debounced via after_idle rather than recalculating on every single
         # <Configure> event: inserting N sibling widgets (e.g. one meeting
@@ -175,7 +187,12 @@ class _ScrollablePanel(tk.Frame):
         # scrollregion on every single one measured as a multi-second stall
         # once N was ~40 real meetings x ~8 widgets each.
         self.body.bind("<Configure>", self._schedule_scrollregion_update)
-        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfig(self._window, width=e.width))
+        # Same debounce applied to the canvas's own width sync: dragging a
+        # window border (or maximizing) fires a rapid burst of <Configure>
+        # events on the canvas -- collapsing that burst down to one
+        # itemconfig() call via after_idle keeps a live resize/move smooth
+        # instead of doing that call once per intermediate frame.
+        self.canvas.bind("<Configure>", self._schedule_canvas_width_update)
         self.canvas.configure(yscrollcommand=self.scrollbar.set)
         self.canvas.pack(side="left", fill="both", expand=True)
         self.scrollbar.pack(side="right", fill="y")
@@ -191,6 +208,17 @@ class _ScrollablePanel(tk.Frame):
     def _update_scrollregion(self) -> None:
         self._scrollregion_job = None
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _schedule_canvas_width_update(self, event) -> None:
+        self._pending_canvas_width = event.width
+        if self._canvas_width_job is not None:
+            return
+        self._canvas_width_job = self.after_idle(self._update_canvas_width)
+
+    def _update_canvas_width(self) -> None:
+        self._canvas_width_job = None
+        if self._pending_canvas_width is not None:
+            self.canvas.itemconfig(self._window, width=self._pending_canvas_width)
 
     def _on_mousewheel(self, event) -> None:
         self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
@@ -218,6 +246,9 @@ class MainWindow:
         self._pre_gadget_geometry: Optional[str] = None
         self._gadget_drag_offset_x = 0
         self._gadget_drag_offset_y = 0
+        self._card_widgets: Dict[str, _CardWidgets] = {}
+        self._card_language: Optional[str] = None
+        self._empty_state_frame: Optional[tk.Frame] = None
 
         self.root.configure(bg=WINDOW_BG)
         self._configure_ttk_style()
@@ -319,6 +350,8 @@ class MainWindow:
         self.language_button.pack(side="left", padx=4)
         self.gadget_button = _button(actions, "", self.callbacks.on_toggle_gadget_mode, GHOST_BG, GHOST_FG, GHOST_HOVER)
         self.gadget_button.pack(side="left", padx=4)
+        self.tray_button = _button(actions, "", self.callbacks.on_enter_tray_mode, GHOST_BG, GHOST_FG, GHOST_HOVER)
+        self.tray_button.pack(side="left", padx=4)
         self.donate_button = _button(actions, "", self._open_donate, GOLD_BG, GOLD_FG, GOLD_HOVER)
         self.donate_button.pack(side="left", padx=4)
         # A thin visual gap sets "Salir" apart from the utility buttons --
@@ -991,72 +1024,122 @@ class MainWindow:
         self._work_filter_var.set(selected_display)
 
     def render_meeting_list(self, cards: List[MeetingCardData]) -> None:
-        for child in self.meeting_list_frame.winfo_children():
-            child.destroy()
+        """Incremental: reuses each meeting's existing card widgets across
+        calls (keyed by meeting id) instead of destroying and rebuilding the
+        whole list every time this runs. Destroying a card with 3 bound
+        buttons is not free -- profiled at ~1.5s total for 24 real meetings
+        (each `tkinter.Widget.destroy()` deregisters every Tcl command the
+        widget's bindings created) -- and this ran synchronously on the UI
+        thread every time the heartbeat's skip-if-unchanged check let a
+        render through (at least once a minute, since countdown text changes
+        on the minute boundary), which was long enough to visibly stall the
+        window and make an in-progress resize/move look like it "snapped"
+        once Tk finally caught up. Only meetings that appear/disappear (a
+        save, delete, or filter change) still pay for real widget churn."""
+        if self._card_language != self.language:
+            # A language toggle is the one case a per-field .configure()
+            # can't reach cleanly (every label and all 3 button texts would
+            # need updating) -- rare enough (a deliberate user action, never
+            # a per-tick event) that a one-time full rebuild is simpler and
+            # cheap relative to how infrequently it happens.
+            for widgets in self._card_widgets.values():
+                widgets.frame.destroy()
+            self._card_widgets.clear()
+            self._card_language = self.language
+
+        new_ids = {card_data.meeting.id for card_data in cards}
+        for meeting_id in list(self._card_widgets.keys()):
+            if meeting_id not in new_ids:
+                self._card_widgets.pop(meeting_id).frame.destroy()
 
         self.meeting_count_label.configure(text=str(len(cards)))
 
         if not cards:
-            empty = tk.Frame(self.meeting_list_frame, bg=PANEL_BG)
-            empty.grid(row=0, column=0, sticky="ew", pady=24)
-            tk.Label(
-                empty, text=i18n.t("emptyTitle", self.language), font=(FONT_FAMILY, 13, "bold"), bg=PANEL_BG, fg=TEXT
-            ).pack()
-            tk.Label(
-                empty, text=i18n.t("emptyBody", self.language), wraplength=320, justify="center",
-                bg=PANEL_BG, fg=MUTED, font=(FONT_FAMILY, 10),
-            ).pack(pady=(4, 0))
+            if self._empty_state_frame is None:
+                empty = tk.Frame(self.meeting_list_frame, bg=PANEL_BG)
+                empty.grid(row=0, column=0, sticky="ew", pady=24)
+                tk.Label(
+                    empty, text=i18n.t("emptyTitle", self.language), font=(FONT_FAMILY, 13, "bold"),
+                    bg=PANEL_BG, fg=TEXT,
+                ).pack()
+                tk.Label(
+                    empty, text=i18n.t("emptyBody", self.language), wraplength=320, justify="center",
+                    bg=PANEL_BG, fg=MUTED, font=(FONT_FAMILY, 10),
+                ).pack(pady=(4, 0))
+                self._empty_state_frame = empty
             return
 
-        for row_index, card_data in enumerate(cards):
-            self._render_card(row_index, card_data, _CARD_PALETTE)
+        if self._empty_state_frame is not None:
+            self._empty_state_frame.destroy()
+            self._empty_state_frame = None
 
-    def _render_card(self, row_index: int, card_data: MeetingCardData, palette: dict) -> None:
-        meeting = card_data.meeting
+        for row_index, card_data in enumerate(cards):
+            widgets = self._card_widgets.get(card_data.meeting.id)
+            if widgets is None:
+                widgets = self._create_card(card_data.meeting.id, _CARD_PALETTE)
+                self._card_widgets[card_data.meeting.id] = widgets
+            self._update_card(widgets, row_index, card_data, _CARD_PALETTE)
+
+    def _create_card(self, meeting_id: str, palette: dict) -> _CardWidgets:
+        """Widget construction only -- runs once per meeting's lifetime in
+        the visible list, not on every refresh. Button commands close over
+        `meeting_id`, which never changes for a given card, so they never
+        need rebuilding either."""
         card = tk.Frame(self.meeting_list_frame, bg=palette["card_bg"])
-        card.grid(row=row_index, column=0, sticky="ew", pady=6)
         card.grid_columnconfigure(0, weight=1)
 
         top = tk.Frame(card, bg=palette["card_bg"])
         top.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 2))
         top.grid_columnconfigure(1, weight=1)
-        tk.Label(
-            top, text=f" {meeting.workName or '-'} ", bg=card_data.color, fg="black", font=(FONT_FAMILY, 10),
-        ).grid(row=0, column=0, sticky="w")
-        tk.Label(
-            top, text=f" {i18n.t(card_data.status_key, self.language)} ", bg=palette["status_bg"],
-            fg=palette["muted_fg"], font=(FONT_FAMILY, 10),
-        ).grid(row=0, column=1, sticky="e")
+        work_label = tk.Label(top, fg="black", font=(FONT_FAMILY, 10))
+        work_label.grid(row=0, column=0, sticky="w")
+        status_label = tk.Label(top, bg=palette["status_bg"], fg=palette["muted_fg"], font=(FONT_FAMILY, 10))
+        status_label.grid(row=0, column=1, sticky="e")
 
-        tk.Label(
-            card, text=meeting.title or "-", font=(FONT_FAMILY, 14, "bold"), anchor="w",
-            bg=palette["card_bg"], fg=palette["title_fg"],
-        ).grid(row=1, column=0, sticky="ew", padx=12)
+        title_label = tk.Label(
+            card, font=(FONT_FAMILY, 14, "bold"), anchor="w", bg=palette["card_bg"], fg=palette["title_fg"],
+        )
+        title_label.grid(row=1, column=0, sticky="ew", padx=12)
 
         # Countdown + recurrence share one line (instead of two separate
         # labels) -- one less widget per card and a less cluttered card.
-        detail_text = card_data.countdown_text
-        if card_data.recurrence_text:
-            detail_text = f"{detail_text}  ·  {card_data.recurrence_text}"
-        tk.Label(
-            card, text=detail_text, anchor="w", bg=palette["card_bg"], fg=palette["muted_fg"],
-            font=(FONT_FAMILY, 10),
-        ).grid(row=2, column=0, sticky="ew", padx=12, pady=(2, 0))
+        detail_label = tk.Label(
+            card, anchor="w", bg=palette["card_bg"], fg=palette["muted_fg"], font=(FONT_FAMILY, 10),
+        )
+        detail_label.grid(row=2, column=0, sticky="ew", padx=12, pady=(2, 0))
 
         actions = tk.Frame(card, bg=palette["card_bg"])
         actions.grid(row=3, column=0, sticky="ew", padx=12, pady=(6, 10))
         _button(
-            actions, i18n.t("openTeams", self.language), lambda mid=meeting.id: self.callbacks.on_open_link(mid),
+            actions, i18n.t("openTeams", self.language), lambda mid=meeting_id: self.callbacks.on_open_link(mid),
             palette["button_bg"], palette["button_fg"], palette["button_hover"],
         ).pack(side="left", padx=(0, 6))
         _button(
-            actions, i18n.t("edit", self.language), lambda mid=meeting.id: self.callbacks.on_edit(mid),
+            actions, i18n.t("edit", self.language), lambda mid=meeting_id: self.callbacks.on_edit(mid),
             palette["ghost_bg"], palette["ghost_fg"], palette["ghost_hover"],
         ).pack(side="left", padx=(0, 6))
         _button(
-            actions, i18n.t("delete", self.language), lambda mid=meeting.id: self._confirm_delete(mid),
+            actions, i18n.t("delete", self.language), lambda mid=meeting_id: self._confirm_delete(mid),
             palette["danger_bg"], palette["danger_fg"], palette["danger_hover"],
         ).pack(side="left")
+
+        return _CardWidgets(
+            frame=card, work_label=work_label, status_label=status_label,
+            title_label=title_label, detail_label=detail_label,
+        )
+
+    def _update_card(self, widgets: _CardWidgets, row_index: int, card_data: MeetingCardData, palette: dict) -> None:
+        """Per-refresh: only re-configures text/color and the grid row --
+        no widget creation/destruction, so this is cheap even every second."""
+        meeting = card_data.meeting
+        widgets.frame.grid(row=row_index, column=0, sticky="ew", pady=6)
+        widgets.work_label.configure(text=f" {meeting.workName or '-'} ", bg=card_data.color)
+        widgets.status_label.configure(text=f" {i18n.t(card_data.status_key, self.language)} ")
+        widgets.title_label.configure(text=meeting.title or "-")
+        detail_text = card_data.countdown_text
+        if card_data.recurrence_text:
+            detail_text = f"{detail_text}  ·  {card_data.recurrence_text}"
+        widgets.detail_label.configure(text=detail_text)
 
     # -- translations -------------------------------------------------------------
 
@@ -1074,6 +1157,7 @@ class MainWindow:
         self.notify_button.configure(text=tr("enableNotifications"))
         self.language_button.configure(text="EN" if language == "es" else "ES")
         self.gadget_button.configure(text=tr("gadgetModeButton"))
+        self.tray_button.configure(text=tr("trayModeButton"))
         self.donate_button.configure(text=tr("buyBeer"))
         self.exit_button.configure(text=tr("exitButton"))
 

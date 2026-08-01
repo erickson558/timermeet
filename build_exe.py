@@ -21,6 +21,29 @@ ENTRY_POINT = ROOT / "timermeet.py"
 ICON_PATH = ROOT / "computer_pc_10894.ico"
 APP_NAME = "TimerMeet"
 
+# tray_icon.py only ever opens the app's own .ico file (which can contain
+# PNG- or BMP-encoded frames internally) -- these three PIL plugins are all
+# it can ever need.
+_NEEDED_PIL_IMAGE_PLUGINS = {"IcoImagePlugin", "BmpImagePlugin", "PngImagePlugin"}
+
+
+def _excluded_pil_plugins() -> list[str]:
+    """PyInstaller's bundled hook-PIL.Image.py collects EVERY `PIL.*ImagePlugin`
+    module (JPEG, TIFF, WEBP, ~47 total) by default, on the assumption any of
+    them might be needed -- that alone measured ~19MB/190+ extra files in this
+    app's onefile bundle, which is exactly the kind of per-launch extraction
+    cost this project has repeatedly had to hunt down and remove (see
+    audio.py's pygame->MCI rewrite, and the plyer --hidden-import below) to
+    hit the <5 second startup requirement. Computing the exclude list from
+    Pillow's own submodule list (instead of a hand-maintained static one)
+    keeps this correct if a future Pillow version adds/renames plugins."""
+    try:
+        from PyInstaller.utils.hooks import collect_submodules
+    except ImportError:
+        return []
+    all_plugins = collect_submodules("PIL", lambda name: "ImagePlugin" in name)
+    return [m for m in all_plugins if m.rsplit(".", 1)[-1] not in _NEEDED_PIL_IMAGE_PLUGINS]
+
 
 def main() -> None:
     if not ICON_PATH.exists():
@@ -54,8 +77,10 @@ def main() -> None:
         str(ROOT / "build"),
         "--specpath",
         str(ROOT),
-        str(ENTRY_POINT),
     ]
+    for plugin in _excluded_pil_plugins():
+        command.extend(["--exclude-module", plugin])
+    command.append(str(ENTRY_POINT))
     # nosec B603/B404 - `command` is a fixed argument list built entirely from
     # constants above (no shell, no untrusted/user-supplied input); this is
     # the documented safe subprocess pattern bandit expects to see reviewed.

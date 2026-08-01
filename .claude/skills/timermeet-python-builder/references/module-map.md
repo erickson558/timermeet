@@ -9,6 +9,7 @@
 | `timermeet_app/audio.py` | The 5 sound profiles, MP3 playback via Windows MCI (`winmm.dll` through `ctypes`) with `winsound.Beep` synth fallback | UI widgets |
 | `timermeet_app/notifications.py` | Best-effort native OS toast via `plyer` | Anything load-bearing -- this must never be relied on as the only alert channel |
 | `timermeet_app/alarm_ui.py` | The one-shot alert dialog + persistent alarm overlay + title-bar blink (`AlarmController`) | Business logic about which meeting fires next (that's `app.py`) |
+| `timermeet_app/tray_icon.py` | System tray icon (`TrayIcon`, built on `pystray`, imported lazily). Every callback it fires runs on pystray's own background thread -- callers (app.py) must wrap them in `root.after(0, ...)` before touching any Tkinter widget | Tkinter widget code, business logic |
 | `timermeet_app/main_window.py` | All widget construction and rendering (`MainWindow`) -- view layer only, including the gadget/skin mode (`set_gadget_mode`, `_build_gadget_view` -- reskins the same `root`, never a second `Tk()`/`Toplevel`) | Validation, persistence, stats computation |
 | `timermeet_app/app.py` | The controller: heartbeat (`root.after` every 1s), alert firing gate, stats/next-alert computation, save/edit/delete handlers, resync-from-disk | Widget construction |
 | `timermeet_app/i18n.py` | ES/EN translation dict, `t()`/`format_text()` | Anything not a translated string |

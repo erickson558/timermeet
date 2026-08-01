@@ -18,6 +18,8 @@ TimerMeet nació como un sitio local en PHP y se reescribió por completo en Pyt
 - Botón de donación ("Cómprame una cerveza") hacia PayPal.
 - `TimerMeet.exe` abre en menos de 5 segundos (medido; ver `SDD.md` v2.4.0 para el detalle de qué se optimizó).
 - Modo gadget/mini: un botón en el encabezado convierte la ventana en un panel flotante, sin bordes, siempre-encima y arrastrable (estilo "skin mode" de Windows Media Player) con el reloj y el siguiente aviso; un botón regresa a la vista completa. El modo y la posición se recuerdan entre reinicios.
+- Modo bandeja del sistema: otro botón en el encabezado oculta la ventana por completo y la reduce a un ícono en la bandeja; un clic o "Mostrar TimerMeet" desde su menú la restaura, "Salir" desde el mismo menú cierra la app.
+- La lista de reuniones se actualiza en su lugar (sin destruir y reconstruir las tarjetas en cada segundo), así que la ventana no se siente lenta ni "reordena" nada al maximizar, mover o simplemente dejarla abierta.
 
 ## Instalación y uso
 
@@ -50,6 +52,7 @@ Esto genera `TimerMeet.exe` en la raíz del proyecto, junto a `timermeet.py`, us
 | `tkinter` / `ttk` | Interfaz gráfica (incluida en la instalación estándar de Python; no se agrega como dependencia). |
 | `winmm.dll` (vía `ctypes`, stdlib) / `winsound` | Reproducción de los sonidos de alarma en MP3 (API MCI de Windows) y el tono sintético de respaldo; no se agrega como dependencia. |
 | [`plyer`](https://github.com/kivy/plyer) | Notificaciones nativas de Windows (mejor esfuerzo; nunca es el único canal de alerta). |
+| [`pystray`](https://github.com/moses-palmer/pystray) + [`Pillow`](https://python-pillow.org/) | Ícono de la bandeja del sistema (modo bandeja). `build_exe.py` excluye los plugins de imagen de Pillow que la app no usa, para no afectar el tiempo de arranque. |
 | [`pyinstaller`](https://pyinstaller.org/) *(solo para compilar)* | Empaqueta la app como un `.exe` de un solo archivo. |
 
 > La interfaz se construyó con `tkinter`/`ttk` puro en vez de CustomTkinter: en pruebas con datos reales, CustomTkinter tardaba 20+ segundos en volverse interactiva por el renderizado diferido de sus bordes redondeados, lo que hacía parecer que la app no abría. Ver `SDD.md` para el detalle de esa corrección (`v2.0.1`).
@@ -59,7 +62,7 @@ Ver `requirements.txt` (runtime) y `requirements-dev.txt` (incluye lo anterior m
 ## Archivos principales
 
 - `timermeet.py`: punto de entrada de la aplicación.
-- `timermeet_app/`: paquete de la app -- modelo de datos (`models.py`), recurrencia y renovación (`recurrence.py`), limpieza de reuniones vencidas (`retention.py`), persistencia (`storage.py`), audio (`audio.py`), notificaciones (`notifications.py`), alarmas (`alarm_ui.py`), interfaz (`main_window.py`), control (`app.py`), idiomas (`i18n.py`), seguridad (`security.py`).
+- `timermeet_app/`: paquete de la app -- modelo de datos (`models.py`), recurrencia y renovación (`recurrence.py`), limpieza de reuniones vencidas (`retention.py`), persistencia (`storage.py`), audio (`audio.py`), notificaciones (`notifications.py`), alarmas (`alarm_ui.py`), interfaz (`main_window.py`), ícono de bandeja (`tray_icon.py`), control (`app.py`), idiomas (`i18n.py`), seguridad (`security.py`).
 - `tests/`: pruebas automatizadas -- `python -m unittest discover -s tests`.
 - `build_exe.py`: script para compilar `TimerMeet.exe`.
 - `data/meetings.json`: timers guardados (no se sube al repositorio, ver `.gitignore`).

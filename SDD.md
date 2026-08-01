@@ -2,13 +2,13 @@
 
 ## Product Goal
 
-Recordar al usuario sus reuniones de Microsoft Teams con avisos visibles, sonoros y persistentes, sin depender de que un navegador permanezca abierto. La versión activa (`2.5.0`) es una app de escritorio en Python (Tkinter puro); la versión `1.3.0` en PHP/JS queda congelada en `legacy-php/` como referencia.
+Recordar al usuario sus reuniones de Microsoft Teams con avisos visibles, sonoros y persistentes, sin depender de que un navegador permanezca abierto. La versión activa (`2.6.0`) es una app de escritorio en Python (Tkinter puro); la versión `1.3.0` en PHP/JS queda congelada en `legacy-php/` como referencia.
 
 ## Current Baseline
 
-- Versión actual: `2.5.0` (Python, escritorio).
+- Versión actual: `2.6.0` (Python, escritorio).
 - Punto de entrada: [timermeet.py](./timermeet.py).
-- Paquete de la app: [timermeet_app/](./timermeet_app/) (`models.py`, `recurrence.py`, `retention.py`, `storage.py`, `audio.py`, `notifications.py`, `alarm_ui.py`, `main_window.py`, `app.py`, `i18n.py`, `security.py`).
+- Paquete de la app: [timermeet_app/](./timermeet_app/) (`models.py`, `recurrence.py`, `retention.py`, `storage.py`, `audio.py`, `notifications.py`, `alarm_ui.py`, `main_window.py`, `app.py`, `i18n.py`, `security.py`, `tray_icon.py`).
 - Persistencia: archivo compartido [data/meetings.json](./data/meetings.json) (mismo esquema que la versión PHP; se lee y escribe con fusión ante posibles ediciones desde otra PC vía OneDrive, ver `timermeet_app/storage.py`).
 - Preferencias locales: `data/settings.json` (idioma, lista de empresas).
 - Pruebas: [tests/](./tests/) (`unittest`).
@@ -110,11 +110,23 @@ El usuario pidió un segundo modo, flotante y compacto, "algo como lo hacía Win
 
 **Nota sobre el tiempo de arranque medido en esta sesión:** al recompilar el `.exe` con este cambio, el tiempo medido subió por encima de los 5 segundos en varias corridas. Se descartó como regresión de este cambio mediante una comparación directa: el `.exe` anterior (idéntico al ya publicado en v2.4.0, sin ningún código de esta versión) mostró el mismo aumento bajo las mismas condiciones del sistema en ese momento (varias sesiones de Claude Code y procesos `node` corriendo en paralelo en esa máquina). El tiempo de inicialización a nivel de código fuente (`TimerMeetApp.__init__`, medido con `time.perf_counter()`, no afectado por el antivirus ni por el arranque de PyInstaller) se mantuvo igual (~1.7-2.0s) antes y después de este cambio. Repetir la medición del `.exe` en una máquina menos ocupada es la validación pendiente antes de confiar en un número absoluto.
 
+## v2.6.0: el bug real detrás de "sigue lenta" + modo bandeja
+
+El usuario reportó que la UI seguía sintiéndose lenta, en particular que maximizar o mover la ventana se sentía lento y "reordenaba" los componentes, y pidió además un modo bandeja del sistema.
+
+**El bug real (no solo percepción):** perfilando `TimerMeetApp._refresh_all()` con los datos reales (24 reuniones) se encontró que un re-render completo de la lista de reuniones tomaba **entre 1.5 y 1.75 segundos** -- un bloqueo síncrono del hilo de la UI de esa duración, disparado cada vez que el heartbeat de 1 segundo detectaba un cambio real (como mínimo una vez por minuto, porque el texto de cuenta regresiva cambia en cada minuto exacto). La causa: `render_meeting_list()` destruía y reconstruía las ~10 widgets de **cada** tarjeta en **cada** render, y `tkinter.Widget.destroy()` no es barato cuando el widget tiene comandos vinculados (cada botón de tarjeta liga 3: `command=` más `<Enter>`/`<Leave>`) -- para 24 reuniones x ~3 botones, son ~72 comandos que Tcl debe desregistrar uno por uno. Un bloqueo síncrono de 1.5+ segundos, si coincide con que el usuario está arrastrando o maximizando la ventana, explica exactamente el síntoma reportado: la ventana "se congela" y luego, cuando el heartbeat termina, Tk pinta de golpe todo el trabajo de geometría acumulado -- lo que se percibe como que los componentes "se reordenan".
+
+**La corrección:** `render_meeting_list()` ahora reutiliza las widgets de cada tarjeta entre renders (indexadas por id de reunión) en vez de destruir y reconstruir todo -- solo actualiza el texto/color con `.configure()` y la fila con `.grid()`, y solo crea o destruye tarjetas para reuniones que realmente aparecen o desaparecen (guardar, borrar, cambiar el filtro). Un cambio de idioma sigue forzando una reconstrucción completa (es la única actualización que no se puede resolver con `.configure()` en cada campo), pero eso es una acción explícita del usuario, no algo que pasa cada segundo. Medido: el mismo re-render completo bajó de ~1.5-1.75s a **~18ms** (unas 85-95 veces más rápido). De paso se aplicó el mismo debounce vía `after_idle` que ya usaba el recálculo de `scrollregion` al ajuste de ancho del canvas en `_ScrollablePanel` (antes se recalculaba en cada evento `<Configure>` individual, que se dispara en ráfaga durante un arrastre/maximizado en vivo).
+
+**Modo bandeja del sistema:** nuevo botón "Bandeja" en el encabezado oculta la ventana por completo y deja solo un ícono en la bandeja del sistema (clic o "Mostrar TimerMeet" en su menú para regresar; "Salir" en el mismo menú cierra la app). Implementado con [`pystray`](https://github.com/moses-palmer/pystray) (no a mano vía `ctypes`/Win32 crudo como el audio MCI, esta vez sí se agregó una dependencia nueva -- pystray es una librería madura y ampliamente usada específicamente para esto, y reimplementar un mensaje-loop de Win32 a mano tenía más riesgo de bugs sutiles que reimplementar la reproducción de un MP3). `pystray.Icon.run()` **debe** llamarse desde el hilo principal según su propia documentación -- como Tkinter ya ocupa ese rol con su propio `mainloop()`, se usa `run_detached()` en su lugar (pensado exactamente para integrarse con el mainloop de otra librería), y todo callback que el ícono dispara (desde su propio hilo) se reenvía al hilo principal de Tk vía `root.after(0, ...)` antes de tocar cualquier widget. Igual que el modo gadget, cambiar a modo bandeja se bloquea mientras suena una alarma. `AlarmController` no necesitó ningún cambio -- se disparó una alarma real con la app en modo bandeja y el overlay/diálogo/sonido siguieron funcionando exactamente igual, por la misma razón que en modo gadget (sus Toplevels son independientes del estado de `root`).
+
+**Costo de la nueva dependencia, medido y mitigado:** `pystray` es minúsculo (0.2MB/26 archivos), pero depende de `Pillow` para cargar la imagen del ícono, y por defecto el hook de PyInstaller para Pillow empaqueta los ~47 módulos `PIL.*ImagePlugin` (JPEG, TIFF, WEBP, etc.), sumando ~19MB al `.exe` de un solo archivo. Medido en una comparación A/B controlada (mismo momento, misma carga del sistema): esto agregó ~0.8-1.1 segundos al arranque, suficiente para poner en riesgo el límite de 5 segundos. Como esta app solo necesita abrir su propio archivo `.ico` (que puede contener cuadros en PNG o BMP), `build_exe.py` ahora excluye explícitamente los ~44 plugins de PIL que no hacen falta (calculado dinámicamente contra la lista real de Pillow, no una lista fija a mano, para que siga siendo correcto si una versión futura de Pillow agrega o renombra plugins) -- esto bajó el `.exe` de ~30.8MB a ~26.0MB y, medido de nuevo en la misma comparación A/B, dejó el arranque prácticamente igual al de antes de agregar el modo bandeja.
+
 ## Technical Constraints
 
 - Windows 10/11, Python 3.9+ (probado con 3.12).
 - Interfaz gráfica: `tkinter`/`ttk` puro (sin CustomTkinter, ver arriba).
-- Dependencias runtime: `plyer` (notificaciones nativas, mejor esfuerzo). Ver `requirements.txt`. El audio (MP3 vía MCI, tono sintético vía `winsound`) usa solo la librería estándar y DLL del propio Windows -- no agrega dependencia.
+- Dependencias runtime: `plyer` (notificaciones nativas, mejor esfuerzo), `pystray` + `Pillow` (ícono de la bandeja del sistema, modo bandeja). Ver `requirements.txt`. El audio (MP3 vía MCI, tono sintético vía `winsound`) usa solo la librería estándar y DLL del propio Windows -- no agrega dependencia.
 - Sin base de datos; persistencia en un único archivo JSON compartido.
 - Esta carpeta del proyecto vive dentro de OneDrive y puede ejecutarse desde más de una PC: la capa de persistencia debe seguir soportando fusión (merge-on-save) en vez de sobrescritura simple — ver el docstring de `timermeet_app/storage.py`.
 - Español como idioma inicial (`i18n.DEFAULT_LANGUAGE = "es"`), inglés soportado por completo; ambos diccionarios deben tener exactamente las mismas claves (verificado en `tests/test_i18n.py`).
@@ -141,6 +153,8 @@ El usuario pidió un segundo modo, flotante y compacto, "algo como lo hacía Win
 16. Lista de empresas configurable desde "Gestionar empresas" (junto a la etiqueta del campo): agregar una empresa nueva o eliminar una existente de la lista, sin afectar las reuniones ya guardadas con ese nombre. Guardar un timer con un nombre no listado lo agrega automáticamente a la lista.
 17. La app debe volverse interactiva (ventana con contenido real, no solo el letrero de carga) en menos de 5 segundos al abrir `TimerMeet.exe`.
 18. Modo gadget/mini: un botón en el encabezado ("Modo gadget") reemplaza la ventana completa por un panel flotante, sin bordes, siempre-encima y arrastrable (280x130px) con reloj, siguiente aviso, y botones para volver a la vista completa o cerrar la app. El modo y la última posición se recuerdan entre reinicios. Cambiar de modo se bloquea mientras suena una alarma.
+19. Modo bandeja del sistema: un botón en el encabezado ("Bandeja") oculta la ventana por completo y deja solo un ícono en la bandeja del sistema; un clic o "Mostrar TimerMeet" en su menú restaura la ventana, y "Salir" en el mismo menú cierra la app de forma ordenada. No se recuerda entre reinicios (siempre inicia visible, en el modo completo o gadget que estuviera guardado). Cambiar a este modo se bloquea mientras suena una alarma.
+20. La lista de reuniones se actualiza sin reconstruir por completo las tarjetas visibles en cada latido del heartbeat -- solo el texto/color de cada tarjeta existente cambia, y solo se crean o destruyen tarjetas para reuniones que realmente aparecen o desaparecen.
 
 ## Non-Functional Requirements
 
@@ -173,6 +187,8 @@ El usuario pidió un segundo modo, flotante y compacto, "algo como lo hacía Win
 - El modo gadget se puede activar y desactivar repetidamente sin dejar la ventana fuera de la pantalla (el arrastre y la posición inicial siempre quedan dentro de los límites reales del escritorio, incluyendo monitores secundarios); una alarma real disparada durante el modo gadget sigue mostrando el overlay, el diálogo y el sonido con normalidad, y cambiar de modo se rechaza mientras esa alarma esté activa.
 - El botón "Eliminar eventos pasados" borra todos los eventos vencidos de todos los trabajos tras confirmar, y conserva la última ocurrencia de cada serie recurrente.
 - Una reunión borrada (individualmente, por "Eliminar eventos pasados", o por la purga automática) desaparece de la GUI de inmediato y sigue desaparecida después de guardar, recargar el archivo, o reiniciar la app -- nunca reaparece sola.
+- El modo bandeja oculta la ventana y muestra un ícono en la bandeja del sistema; mostrar desde el menú del ícono (o el clic por defecto) restaura la ventana con normalidad, y "Salir" desde ese mismo menú cierra la app sin dejar el ícono ni procesos colgados. Una alarma real disparada en modo bandeja sigue sonando y mostrando el overlay con normalidad, y cambiar a este modo se rechaza mientras esa alarma esté activa.
+- Un re-render completo de la lista de reuniones con datos reales toma milisegundos, no segundos (verificado con `time.perf_counter()`, no con una llamada a `update()`, que por sí sola fuerza un vaciado de cola que contaminaría la medición); mover o maximizar la ventana no se siente congelado ni "reordena" visualmente las tarjetas.
 
 ## SDD Workflow
 

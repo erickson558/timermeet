@@ -144,7 +144,8 @@ class TimerMeetApp:
         self.language = saved_language if saved_language in i18n.translations else i18n.DEFAULT_LANGUAGE
         self.work_filter = "all"
         self.meetings: List[models.Meeting] = storage.load_meetings()
-        self.meetings, purged_at_startup = retention.purge_stale_meetings(self.meetings)
+        self._pending_deleted_ids: set = set()
+        purged_at_startup = self._apply_meetings(retention.purge_stale_meetings(self.meetings)[0])
         self.storage_ok = True
         self._dirty = bool(purged_at_startup)
         self._resync_accumulator_ms = 0
@@ -213,9 +214,24 @@ class TimerMeetApp:
 
     # -- persistence ----------------------------------------------------------
 
+    def _apply_meetings(self, new_meetings: List[models.Meeting]) -> int:
+        """Replace ``self.meetings`` and record the ids of anything removed
+        so the next ``_persist()`` doesn't let a stale disk read resurrect
+        them (a disk-only meeting and a just-deleted-locally meeting are
+        otherwise indistinguishable -- see
+        ``storage.merge_meeting_lists``). Every deletion path (single
+        delete, "clear past events", the automatic retention purge) must go
+        through this instead of assigning ``self.meetings`` directly.
+        Returns how many meetings were removed."""
+        before_ids = {m.id for m in self.meetings}
+        self.meetings = new_meetings
+        removed_ids = before_ids - {m.id for m in new_meetings}
+        self._pending_deleted_ids |= removed_ids
+        return len(removed_ids)
+
     def _persist(self, silent: bool = True) -> None:
         try:
-            merged = storage.save_meetings(self.meetings)
+            merged = storage.save_meetings(self.meetings, deleted_ids=frozenset(self._pending_deleted_ids))
         except OSError as exc:
             logger.warning("Could not save meetings: %s", exc)
             self.storage_ok = False
@@ -224,6 +240,7 @@ class TimerMeetApp:
                 self.view.show_toast(i18n.t("storageFallbackToast", self.language))
             return
         self.meetings = merged
+        self._pending_deleted_ids.clear()
         self.storage_ok = True
         self._dirty = False
 
@@ -232,7 +249,9 @@ class TimerMeetApp:
             disk_meetings = storage.load_meetings()
         except OSError:
             return
-        merged = storage.merge_meeting_lists(disk_meetings, self.meetings)
+        merged = storage.merge_meeting_lists(
+            disk_meetings, self.meetings, deleted_ids=frozenset(self._pending_deleted_ids)
+        )
         before = sorted((m.to_dict() for m in self.meetings), key=lambda d: d["id"])
         after = sorted((m.to_dict() for m in merged), key=lambda d: d["id"])
         if before != after:
@@ -258,7 +277,7 @@ class TimerMeetApp:
         purged = 0
         if self._purge_accumulator_ms >= PURGE_MS:
             self._purge_accumulator_ms = 0
-            self.meetings, purged = retention.purge_stale_meetings(self.meetings, now)
+            purged = self._apply_meetings(retention.purge_stale_meetings(self.meetings, now)[0])
 
         if created or purged or fired_any or self._dirty:
             self._persist(silent=True)
@@ -490,9 +509,8 @@ class TimerMeetApp:
             self.view.populate_form(meeting)
 
     def handle_delete(self, meeting_id: str) -> None:
-        before = len(self.meetings)
-        self.meetings = [m for m in self.meetings if m.id != meeting_id]
-        if len(self.meetings) != before:
+        removed = self._apply_meetings([m for m in self.meetings if m.id != meeting_id])
+        if removed:
             self._persist(silent=False)
             self.view.show_toast(i18n.t("deleted", self.language))
             self._refresh_all()
@@ -502,7 +520,7 @@ class TimerMeetApp:
         across all work names right now (ignores the current filter and the
         automatic purge's grace period), but still keeps each recurring
         series' latest occurrence so it doesn't silently stop reminding."""
-        self.meetings, removed = retention.clear_past_meetings(self.meetings)
+        removed = self._apply_meetings(retention.clear_past_meetings(self.meetings)[0])
         if removed:
             self._persist(silent=False)
             self.view.show_toast(i18n.format_text("clearPastToast", self.language, count=removed))

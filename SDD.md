@@ -2,11 +2,11 @@
 
 ## Product Goal
 
-Recordar al usuario sus reuniones de Microsoft Teams con avisos visibles, sonoros y persistentes, sin depender de que un navegador permanezca abierto. La versión activa (`2.2.0`) es una app de escritorio en Python (Tkinter puro); la versión `1.3.0` en PHP/JS queda congelada en `legacy-php/` como referencia.
+Recordar al usuario sus reuniones de Microsoft Teams con avisos visibles, sonoros y persistentes, sin depender de que un navegador permanezca abierto. La versión activa (`2.3.0`) es una app de escritorio en Python (Tkinter puro); la versión `1.3.0` en PHP/JS queda congelada en `legacy-php/` como referencia.
 
 ## Current Baseline
 
-- Versión actual: `2.2.0` (Python, escritorio).
+- Versión actual: `2.3.0` (Python, escritorio).
 - Punto de entrada: [timermeet.py](./timermeet.py).
 - Paquete de la app: [timermeet_app/](./timermeet_app/) (`models.py`, `recurrence.py`, `retention.py`, `storage.py`, `audio.py`, `notifications.py`, `alarm_ui.py`, `main_window.py`, `app.py`, `i18n.py`, `security.py`).
 - Persistencia: archivo compartido [data/meetings.json](./data/meetings.json) (mismo esquema que la versión PHP; se lee y escribe con fusión ante posibles ediciones desde otra PC vía OneDrive, ver `timermeet_app/storage.py`).
@@ -14,6 +14,18 @@ Recordar al usuario sus reuniones de Microsoft Teams con avisos visibles, sonoro
 - Pruebas: [tests/](./tests/) (`unittest`).
 - Empaquetado: [build_exe.py](./build_exe.py) → `TimerMeet.exe` en la raíz del repo, junto a `timermeet.py` y `computer_pc_10894.ico`.
 - Baseline histórico (congelado): [legacy-php/](./legacy-php/) — sitio EasyPHP + JS, versión `1.3.0`, ver `legacy-php/README.md`.
+
+## Arquitectura: backend y frontend sí están separados
+
+TimerMeet ya sigue una separación tipo modelo-vista-controlador dentro de `timermeet_app/`, aunque todo viva en un mismo paquete (no en carpetas `backend/`/`frontend/` separadas):
+
+| Capa | Archivos | Regla |
+|---|---|---|
+| **Backend** (lógica pura, sin ventanas ni widgets) | `models.py`, `recurrence.py`, `retention.py`, `storage.py`, `audio.py`, `notifications.py`, `security.py`, `i18n.py` | No importan `tkinter` ni conocen la existencia de la ventana. Se pueden probar con `unittest` sin abrir ninguna GUI (ver `tests/`). |
+| **Frontend** (vista, sin lógica de negocio) | `main_window.py`, `alarm_ui.py` | Solo construyen/actualizan widgets y reenvían acciones del usuario a través de `Callbacks`; no validan datos, no deciden cuándo suena una alarma, no tocan `storage.py` directamente. |
+| **Controlador** (conecta ambos) | `app.py` | Único lugar que orquesta: cuándo guardar, cuándo disparar una alarma, qué mostrar en cada panel. Le pasa datos ya calculados al frontend; nunca al revés. |
+
+Esta separación ya existía antes de esta versión; lo que se agrega aquí es dejarlo explícito en la documentación para que sea fácil de verificar (`.claude/skills/timermeet-python-builder/references/module-map.md` tiene el detalle archivo por archivo).
 
 ## Por qué se reescribió a Python (v2.0.0)
 
@@ -47,6 +59,14 @@ El usuario reportó que seguía sintiendo la app lenta para abrir y para respond
 Además se agregaron dos controles pedidos directamente:
 - Botón **Salir** en el encabezado (usa el mismo cierre ordenado que el botón X de la ventana: silencia cualquier alarma activa y luego cierra).
 - Botón **Eliminar eventos pasados** en el panel de resumen: borra de inmediato todos los eventos ya pasados de **todos** los trabajos (ignora el filtro activo), sin la ventana de gracia de 7 días ni el requisito de "ambas alarmas ya dispararon" que sí aplica la purga automática — es una acción manual y explícita. Igual conserva la última ocurrencia de cada serie recurrente para no perder la referencia de renovación (`timermeet_app/retention.py::clear_past_meetings`).
+
+## v2.3.0: un bug real (borrar no se quedaba borrado) y arranque más liviano
+
+**Bug crítico encontrado y corregido:** el botón "Eliminar eventos pasados" (y también el botón individual de borrar, y la purga automática) quitaban la reunión de la lista en memoria, pero `storage.save_meetings()` vuelve a leer el disco y fusiona esa lectura con la memoria antes de escribir (`merge_meeting_lists`, pensado para que dos PCs sincronizadas por OneDrive no se pisen los datos). El problema: una reunión que acabas de borrar en memoria y una reunión que "otra PC agregó y todavía no hemos visto" se ven exactamente igual para la fusión (existe en el disco, no existe en memoria) — así que la fusión la volvía a agregar sola, deshaciendo el borrado en silencio. Esto afectaba **todo** lo que borra reuniones: el botón de borrar individual, "Eliminar eventos pasados", y la purga automática de `retention.py` (por eso el archivo real seguía creciendo en vez de quedarse en 30 reuniones tras la limpieza).
+
+**Corrección:** `merge_meeting_lists`/`save_meetings` ahora aceptan `deleted_ids` — los ids que *este mismo proceso* acaba de quitar a propósito — y nunca los revive desde esa lectura del disco. `TimerMeetApp` centraliza esto en `_apply_meetings()`: cualquier código que quite reuniones de `self.meetings` debe pasar por ahí, no asignar la lista directamente. Verificado contra el archivo real: sin la corrección, un borrado volvía a aparecer de inmediato; con ella, se queda borrado tanto en memoria como en el archivo.
+
+**Arranque más liviano:** `pygame` y `plyer` ahora se importan de forma perezosa (solo la primera vez que realmente se necesita un sonido o una notificación), no al arrancar la app. Antes, el simple hecho de importar `timermeet_app.app` ya cargaba `pygame` (~0.75s solo esa importación, más en el `.exe` empaquetado) aunque el sonido no se fuera a usar hasta más tarde. Medido: el tiempo de importar todo el paquete bajó de ~1.26s a ~0.19s.
 
 ## Technical Constraints
 
@@ -101,6 +121,7 @@ Además se agregaron dos controles pedidos directamente:
 - Una reunión pasada con ambos avisos ya disparados desaparece del archivo después de 7 días; una con algún aviso pendiente (aunque sea vieja) nunca desaparece sola.
 - El botón "Salir" cierra la app sin dejar procesos colgados ni perder cambios sin guardar.
 - El botón "Eliminar eventos pasados" borra todos los eventos vencidos de todos los trabajos tras confirmar, y conserva la última ocurrencia de cada serie recurrente.
+- Una reunión borrada (individualmente, por "Eliminar eventos pasados", o por la purga automática) desaparece de la GUI de inmediato y sigue desaparecida después de guardar, recargar el archivo, o reiniciar la app -- nunca reaparece sola.
 
 ## SDD Workflow
 

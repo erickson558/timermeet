@@ -35,6 +35,13 @@ Esta carpeta usa dos convenciones de agentes/skills en paralelo:
 - Archivos principales: `timermeet_app/security.py`, `requirements*.txt`, `SECURITY.md`.
 - Cuándo usarlo: antes de cada release, y tras tocar E/S de archivos, apertura de URLs, `subprocess` o dependencias.
 
+### TimerMeet UI Designer Agent
+
+- Propósito: mantener la interfaz simple, clara y rápida -- solo `tkinter`/`ttk` plano, nunca CustomTkinter ni otro toolkit con tema; nunca un `update_idletasks()` síncrono; cuidar el número de widgets por tarjeta de reunión.
+- Skill asociada: `.claude/skills/timermeet-ui-designer`
+- Archivos principales: `timermeet_app/main_window.py`, `timermeet_app/alarm_ui.py`.
+- Cuándo usarlo: cualquier pedido de simplificar, aclarar, reordenar o agregar algo a la interfaz.
+
 ### Skill adicional: proceso de fix estable
 
 - `.claude/skills/timermeet-stable-fix-release` — el flujo de "ingeniero senior Python + QA + DevOps" (análisis → corrección → validación → versionado → commit → push) para futuras correcciones de bugs. Cualquiera de los agentes de arriba puede invocarlo.

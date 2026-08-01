@@ -67,6 +67,24 @@ class MergeMeetingListsTests(unittest.TestCase):
         self.assertEqual(len(merged), 1)
         self.assertEqual(merged[0].title, "From disk")
 
+    def test_deleted_id_is_not_resurrected_from_a_stale_disk_read(self):
+        # Regression test: without `deleted_ids`, a meeting removed from
+        # memory but still present in the disk snapshot read just before
+        # the write (the normal case right after a user clicks "delete")
+        # looks identical to "another machine added this and we haven't
+        # seen it yet", and used to get silently added back.
+        disk = [_meeting("just-deleted", "2026-08-01T09:00:00")]
+        merged = storage.merge_meeting_lists(disk, [], deleted_ids={"just-deleted"})
+        self.assertEqual(merged, [])
+
+    def test_deleted_ids_does_not_affect_unrelated_disk_only_meetings(self):
+        disk = [
+            _meeting("just-deleted", "2026-08-01T09:00:00"),
+            _meeting("from-another-machine", "2026-08-01T09:00:00"),
+        ]
+        merged = storage.merge_meeting_lists(disk, [], deleted_ids={"just-deleted"})
+        self.assertEqual({m.id for m in merged}, {"from-another-machine"})
+
 
 if __name__ == "__main__":
     unittest.main()

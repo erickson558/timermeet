@@ -19,7 +19,7 @@ import sys
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, FrozenSet, List, Optional
 
 from . import models, security
 
@@ -156,19 +156,32 @@ def merge_meeting_lists(
     disk_meetings: List[models.Meeting],
     memory_meetings: List[models.Meeting],
     now: Optional[datetime] = None,
+    deleted_ids: Optional[FrozenSet[str]] = None,
 ) -> List[models.Meeting]:
     """Combine what's currently on disk (possibly edited on another machine
     since this process last loaded) with what's in memory. A meeting that
     exists only in memory survives the merge if it was created in the last
     ``SYNC_MERGE_GRACE`` seconds (it just hasn't reached disk yet); anything
     older that the disk no longer has is treated as a legitimate deletion
-    from another session."""
+    from another session.
+
+    ``deleted_ids`` names meetings *this process* just removed on purpose
+    (a delete button, the "clear past events" button, or the automatic
+    retention purge). Without it, a disk-only meeting and a
+    just-deleted-locally meeting look identical (present on disk, absent
+    from memory) and the merge can't tell them apart -- it would otherwise
+    silently resurrect every deletion from the disk copy read just before
+    the write. Callers that remove meetings must pass the ids they removed;
+    see ``TimerMeetApp._persist`` for the single place that tracks this."""
     now = now or datetime.now()
+    deleted_ids = deleted_ids or frozenset()
     memory_by_id: Dict[str, models.Meeting] = {m.id: m for m in memory_meetings}
     seen_ids = set()
     merged: List[models.Meeting] = []
 
     for disk_meeting in disk_meetings:
+        if disk_meeting.id in deleted_ids:
+            continue
         seen_ids.add(disk_meeting.id)
         memory_meeting = memory_by_id.get(disk_meeting.id)
         merged.append(
@@ -189,16 +202,24 @@ def _sort_key(meeting: models.Meeting):
     return parsed if parsed is not None else datetime.min
 
 
-def save_meetings(meetings: List[models.Meeting], now: Optional[datetime] = None) -> List[models.Meeting]:
+def save_meetings(
+    meetings: List[models.Meeting],
+    now: Optional[datetime] = None,
+    deleted_ids: Optional[FrozenSet[str]] = None,
+) -> List[models.Meeting]:
     """Merge the in-memory list with whatever is currently on disk and
     atomically write the result — the merge becomes the new source of truth,
     so the caller should replace its in-memory state with the returned list.
     Raises only on a genuine disk-write failure (permissions, disk full);
     callers are expected to catch that and retry later, exactly like the
-    original app's "saved locally, will retry" fallback."""
+    original app's "saved locally, will retry" fallback.
+
+    Pass ``deleted_ids`` (the ids of any meetings just removed from
+    ``meetings`` on purpose) so the merge doesn't resurrect them from the
+    disk read below -- see ``merge_meeting_lists`` for why this is needed."""
     with _same_machine_lock(data_dir()):
         disk_meetings = load_meetings()
-        merged = sorted(merge_meeting_lists(disk_meetings, meetings, now), key=_sort_key)
+        merged = sorted(merge_meeting_lists(disk_meetings, meetings, now, deleted_ids), key=_sort_key)
         payload = json.dumps([m.to_dict() for m in merged], indent=2, ensure_ascii=False)
         security.atomic_write_text(meetings_path(), payload + "\n")
     return merged

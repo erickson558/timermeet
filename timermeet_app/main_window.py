@@ -245,6 +245,10 @@ class MainWindow:
         self.language_button.pack(side="left", padx=4)
         self.donate_button = _button(actions, "", self._open_donate, GOLD_BG, GOLD_FG, GOLD_HOVER)
         self.donate_button.pack(side="left", padx=4)
+        # A thin visual gap sets "Salir" apart from the utility buttons --
+        # it's the one action in this row that ends the whole app, not just
+        # toggles a setting or opens a link, so it shouldn't blend in.
+        tk.Frame(actions, bg=PANEL_BG, width=12).pack(side="left")
         self.exit_button = _button(actions, "", self.callbacks.on_exit, DANGER, "#ffffff", DANGER_HOVER)
         self.exit_button.pack(side="left", padx=4)
 

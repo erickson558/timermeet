@@ -37,10 +37,25 @@ try:
 except ImportError:  # pragma: no cover - non-Windows dev environments
     winsound = None
 
-try:
-    import pygame
-except ImportError:  # pragma: no cover - optional dependency
-    pygame = None
+# pygame is imported lazily (on first real use, see _get_pygame() below),
+# not at module load time. Importing it eagerly measurably lengthens the
+# app's startup critical path (loading its bundled SDL2 DLLs takes real
+# time, worse once frozen by PyInstaller) even though sound is never needed
+# until the first alarm fires or the cache is warmed on a background thread.
+_pygame_module = None
+_pygame_import_failed = False
+
+
+def _get_pygame():
+    global _pygame_module, _pygame_import_failed
+    if _pygame_module is None and not _pygame_import_failed:
+        try:
+            import pygame as _pygame
+
+            _pygame_module = _pygame
+        except ImportError:  # pragma: no cover - optional dependency
+            _pygame_import_failed = True
+    return _pygame_module
 
 
 @dataclass(frozen=True)
@@ -139,13 +154,14 @@ class AlarmPlayer:
         self._synth_stop_event: Optional[threading.Event] = None
 
     def _ensure_mixer(self) -> bool:
-        """Initialize pygame's mixer on first actual use rather than at
-        construction time. `pygame.mixer.init()` measurably slows down
-        Tkinter's idle-task processing on some systems (observed ~3s of
-        extra startup delay) -- deferring it until a sound is genuinely
-        needed keeps the window responsive immediately on launch."""
+        """Import pygame and initialize its mixer on first actual use rather
+        than at construction/module-import time. Both the import itself and
+        `pygame.mixer.init()` measurably slow down Tkinter's idle-task
+        processing on some systems -- deferring them until a sound is
+        genuinely needed keeps the window responsive immediately on launch."""
         if self._mixer_ready is None:
             self._mixer_ready = False
+            pygame = _get_pygame()
             if pygame is not None:
                 try:
                     pygame.mixer.init()
@@ -161,7 +177,7 @@ class AlarmPlayer:
             return self._sounds[profile.asset_key]
         path = _asset_path(profile.asset_filename)
         try:
-            sound = pygame.mixer.Sound(str(path))
+            sound = _get_pygame().mixer.Sound(str(path))
         except Exception as exc:  # a bad/missing mp3 must fall back, never crash
             logger.warning("Could not load alarm asset %s: %s", path, exc)
             return None

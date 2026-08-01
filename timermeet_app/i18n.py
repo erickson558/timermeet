@@ -143,6 +143,11 @@ translations = {
         "soundCardLabel": "Sonido",
         "validationTeamsUrl": "El enlace de Teams debe iniciar con http:// o https://.",
         "renewalToast": "Se generaron {count} recordatorios nuevos para la próxima semana.",
+        "exitButton": "Salir",
+        "clearPastButton": "Eliminar eventos pasados",
+        "clearPastConfirm": "¿Eliminar todos los eventos pasados de todos los trabajos? Esta acción no se puede deshacer.",
+        "clearPastToast": "Se eliminaron {count} eventos pasados.",
+        "clearPastNone": "No había eventos pasados para eliminar.",
     },
     "en": {
         "appTitle": "TimerMeet",
@@ -269,6 +274,11 @@ translations = {
         "soundCardLabel": "Sound",
         "validationTeamsUrl": "The Teams link must start with http:// or https://.",
         "renewalToast": "{count} new reminders were generated for next week.",
+        "exitButton": "Exit",
+        "clearPastButton": "Delete past events",
+        "clearPastConfirm": "Delete all past events across all jobs? This cannot be undone.",
+        "clearPastToast": "{count} past events were deleted.",
+        "clearPastNone": "There were no past events to delete.",
     },
 }
 

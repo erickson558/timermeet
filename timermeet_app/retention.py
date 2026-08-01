@@ -64,3 +64,29 @@ def purge_stale_meetings(
             kept.append(meeting)
 
     return kept, purged
+
+
+def clear_past_meetings(
+    meetings: List[models.Meeting], now: datetime = None
+) -> Tuple[List[models.Meeting], int]:
+    """Explicit, immediate "delete all past events" for the manual button --
+    unlike ``purge_stale_meetings`` this has no grace period and doesn't
+    require both alerts to have fired (a past meeting's alerts are moot
+    either way; the user asked for this one, on purpose, right now). Still
+    keeps each recurring series' latest occurrence so an existing series
+    doesn't lose its renewal anchor and quietly stop reminding the user.
+    Return ``(kept, removed_count)``. Never mutates the input list."""
+    now = now or datetime.now()
+    keep_ids = _latest_occurrence_ids(meetings)
+
+    kept: List[models.Meeting] = []
+    removed = 0
+    for meeting in meetings:
+        when = meeting.local_datetime()
+        is_past = when is not None and when < now and meeting.id not in keep_ids
+        if is_past:
+            removed += 1
+        else:
+            kept.append(meeting)
+
+    return kept, removed

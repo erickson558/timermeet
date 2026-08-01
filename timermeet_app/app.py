@@ -162,6 +162,8 @@ class TimerMeetApp:
             on_toggle_language=self.handle_toggle_language,
             on_test_notification=self.handle_test_notification,
             on_filter_change=self.handle_filter_change,
+            on_clear_past=self.handle_clear_past,
+            on_exit=self._on_close,
         )
         self.view = MainWindow(self.root, callbacks)
         self.view.apply_translations(self.language)
@@ -494,6 +496,19 @@ class TimerMeetApp:
             self._persist(silent=False)
             self.view.show_toast(i18n.t("deleted", self.language))
             self._refresh_all()
+
+    def handle_clear_past(self) -> None:
+        """Manual "delete past events" button -- removes every past meeting
+        across all work names right now (ignores the current filter and the
+        automatic purge's grace period), but still keeps each recurring
+        series' latest occurrence so it doesn't silently stop reminding."""
+        self.meetings, removed = retention.clear_past_meetings(self.meetings)
+        if removed:
+            self._persist(silent=False)
+            self.view.show_toast(i18n.format_text("clearPastToast", self.language, count=removed))
+            self._refresh_all()
+        else:
+            self.view.show_toast(i18n.t("clearPastNone", self.language))
 
     def handle_open_link(self, meeting_id: str) -> None:
         meeting = self._find_meeting(meeting_id)

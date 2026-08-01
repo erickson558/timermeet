@@ -108,6 +108,8 @@ class Callbacks:
     on_toggle_language: Callable[[], None]
     on_test_notification: Callable[[], None]
     on_filter_change: Callable[[str], None]
+    on_clear_past: Callable[[], None]
+    on_exit: Callable[[], None]
 
 
 def _button(parent, text: str, command, bg: str, fg: str, hover: Optional[str] = None, **extra) -> tk.Button:
@@ -243,6 +245,8 @@ class MainWindow:
         self.language_button.pack(side="left", padx=4)
         self.donate_button = _button(actions, "", self._open_donate, GOLD_BG, GOLD_FG, GOLD_HOVER)
         self.donate_button.pack(side="left", padx=4)
+        self.exit_button = _button(actions, "", self.callbacks.on_exit, DANGER, "#ffffff", DANGER_HOVER)
+        self.exit_button.pack(side="left", padx=4)
 
     def _open_donate(self) -> None:
         if security.is_http_url(DONATE_URL):
@@ -424,6 +428,11 @@ class MainWindow:
         )
         self.filter_menu.pack(fill="x", pady=(2, 0))
 
+        self.clear_past_button = _button(
+            toolbar, "", self._confirm_clear_past, GHOST_BG, GHOST_FG, GHOST_HOVER,
+        )
+        self.clear_past_button.pack(anchor="w", pady=(8, 0))
+
         list_header = tk.Frame(panel, bg=PANEL_BG)
         list_header.grid(row=4, column=0, sticky="ew", padx=14, pady=(8, 4))
         self.list_title_label = tk.Label(list_header, text="", font=(FONT_FAMILY, 13, "bold"), bg=PANEL_BG, fg=TEXT)
@@ -500,6 +509,12 @@ class MainWindow:
     def _confirm_delete(self, meeting_id: str) -> None:
         if messagebox.askyesno(i18n.t("delete", self.language), i18n.t("deleteConfirm", self.language)):
             self.callbacks.on_delete(meeting_id)
+
+    def _confirm_clear_past(self) -> None:
+        if messagebox.askyesno(
+            i18n.t("clearPastButton", self.language), i18n.t("clearPastConfirm", self.language)
+        ):
+            self.callbacks.on_clear_past()
 
     @staticmethod
     def _set_entry(entry: tk.Entry, value: str) -> None:
@@ -686,6 +701,7 @@ class MainWindow:
         self.notify_button.configure(text=tr("enableNotifications"))
         self.language_button.configure(text="EN" if language == "es" else "ES")
         self.donate_button.configure(text=tr("buyBeer"))
+        self.exit_button.configure(text=tr("exitButton"))
 
         self.form_eyebrow.configure(text=tr("formEyebrow"))
         self.form_title_label.configure(text=tr("formTitle"))
@@ -723,6 +739,7 @@ class MainWindow:
         self.next_meeting_card["label"].configure(text=tr("activeMeetings"))
 
         self.filter_label.configure(text=tr("filterLabel"))
+        self.clear_past_button.configure(text=tr("clearPastButton"))
         self.list_title_label.configure(text=tr("listTitle"))
 
         self._rebuild_sound_options(language)

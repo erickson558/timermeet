@@ -12,6 +12,8 @@ TimerMeet nació como un sitio local en PHP y se reescribió por completo en Pyt
 - Series repetitivas: diaria, semana laboral (lunes a viernes), semanal, quincenal o mensual, con un motor que las renueva solas cada semana para que nunca dejen de sonar por quedarse sin ocurrencias futuras.
 - Guarda todo en `data/meetings.json`. Si usas la app desde más de una computadora sincronizada por OneDrive, fusiona los cambios de ambas en vez de que una sobrescriba a la otra.
 - Limpieza automática: una reunión pasada cuyos dos avisos ya sonaron se elimina sola después de 7 días, para que el archivo y la lista no crezcan para siempre. Si algún aviso quedó pendiente, nunca se borra sola aunque sea vieja.
+- Botón "Eliminar eventos pasados" para borrar de inmediato todos los eventos ya vencidos de todos los trabajos, sin esperar los 7 días de la limpieza automática.
+- Botón "Salir" para cerrar la app de forma ordenada.
 - Interfaz completa en español e inglés, con botón para cambiar de idioma.
 - Botón de donación ("Cómprame una cerveza") hacia PayPal.
 

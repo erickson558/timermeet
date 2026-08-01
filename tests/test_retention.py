@@ -70,5 +70,47 @@ class PurgeStaleMeetingsTests(unittest.TestCase):
         self.assertEqual(len(meetings), original_length)
 
 
+class ClearPastMeetingsTests(unittest.TestCase):
+    def test_removes_any_past_meeting_regardless_of_alert_flags(self):
+        now = datetime(2026, 8, 1, 9, 0)
+        # Even a meeting whose alerts never fired should go -- this is the
+        # explicit, manual "clear past events" button, not the conservative
+        # automatic purge.
+        past_pending = _meeting("m1", now - timedelta(days=1), reminder_sent=False, start_sent=False)
+        kept, removed = retention.clear_past_meetings([past_pending], now=now)
+        self.assertEqual(kept, [])
+        self.assertEqual(removed, 1)
+
+    def test_future_meeting_is_kept(self):
+        now = datetime(2026, 8, 1, 9, 0)
+        future = _meeting("m1", now + timedelta(days=1))
+        kept, removed = retention.clear_past_meetings([future], now=now)
+        self.assertEqual([m.id for m in kept], ["m1"])
+        self.assertEqual(removed, 0)
+
+    def test_keeps_latest_occurrence_of_a_series_even_if_past(self):
+        now = datetime(2026, 8, 1, 9, 0)
+        older = _meeting("m1", now - timedelta(days=20), series_id="s1")
+        latest = _meeting("m2", now - timedelta(days=1), series_id="s1")
+        kept, removed = retention.clear_past_meetings([older, latest], now=now)
+        self.assertEqual([m.id for m in kept], ["m2"])
+        self.assertEqual(removed, 1)
+
+    def test_ignores_work_name_removes_across_all_jobs(self):
+        now = datetime(2026, 8, 1, 9, 0)
+        acme_past = _meeting("m1", now - timedelta(days=1), workName="Acme")
+        other_past = _meeting("m2", now - timedelta(days=1), workName="Other Co")
+        kept, removed = retention.clear_past_meetings([acme_past, other_past], now=now)
+        self.assertEqual(kept, [])
+        self.assertEqual(removed, 2)
+
+    def test_does_not_mutate_input_list(self):
+        now = datetime(2026, 8, 1, 9, 0)
+        meetings = [_meeting("m1", now - timedelta(days=1))]
+        original_length = len(meetings)
+        retention.clear_past_meetings(meetings, now=now)
+        self.assertEqual(len(meetings), original_length)
+
+
 if __name__ == "__main__":
     unittest.main()

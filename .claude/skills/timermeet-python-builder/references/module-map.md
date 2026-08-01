@@ -4,7 +4,7 @@
 |---|---|---|
 | `timermeet_app/models.py` | `Meeting` dataclass, `normalize_meeting()`, `validate_meeting()` | UI text, persistence |
 | `timermeet_app/recurrence.py` | Occurrence generation (`add_recurrence_to_date`), the Friday-18:00 weekly renewal engine (`run_weekly_series_renewal`) | Persistence, UI |
-| `timermeet_app/retention.py` | Purging past+fully-alerted meetings after a grace period (`purge_stale_meetings`) -- always keeps a pending alert and each series' latest occurrence | Persistence, UI, anything about *when* an alert fires (that's `app.py`) |
+| `timermeet_app/retention.py` | Two cleanup functions: `purge_stale_meetings` (automatic, conservative -- 7-day grace, only fully-alerted) and `clear_past_meetings` (manual "delete past events" button -- immediate, ignores alert flags). Both always keep each series' latest occurrence | Persistence, UI, anything about *when* an alert fires (that's `app.py`) |
 | `timermeet_app/storage.py` | Atomic JSON read/write, the same-machine advisory lock, merge-on-save (`merge_meeting_lists`/`merge_meeting_pair`), settings persistence | Business rules about *when* to fire an alert (that's `app.py`) |
 | `timermeet_app/audio.py` | The 5 sound profiles, MP3 playback via pygame with `winsound.Beep` synth fallback | UI widgets |
 | `timermeet_app/notifications.py` | Best-effort native OS toast via `plyer` | Anything load-bearing -- this must never be relied on as the only alert channel |

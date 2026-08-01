@@ -2,11 +2,11 @@
 
 ## Product Goal
 
-Recordar al usuario sus reuniones de Microsoft Teams con avisos visibles, sonoros y persistentes, sin depender de que un navegador permanezca abierto. La versión activa (`2.1.0`) es una app de escritorio en Python (Tkinter puro); la versión `1.3.0` en PHP/JS queda congelada en `legacy-php/` como referencia.
+Recordar al usuario sus reuniones de Microsoft Teams con avisos visibles, sonoros y persistentes, sin depender de que un navegador permanezca abierto. La versión activa (`2.2.0`) es una app de escritorio en Python (Tkinter puro); la versión `1.3.0` en PHP/JS queda congelada en `legacy-php/` como referencia.
 
 ## Current Baseline
 
-- Versión actual: `2.1.0` (Python, escritorio).
+- Versión actual: `2.2.0` (Python, escritorio).
 - Punto de entrada: [timermeet.py](./timermeet.py).
 - Paquete de la app: [timermeet_app/](./timermeet_app/) (`models.py`, `recurrence.py`, `retention.py`, `storage.py`, `audio.py`, `notifications.py`, `alarm_ui.py`, `main_window.py`, `app.py`, `i18n.py`, `security.py`).
 - Persistencia: archivo compartido [data/meetings.json](./data/meetings.json) (mismo esquema que la versión PHP; se lee y escribe con fusión ante posibles ediciones desde otra PC vía OneDrive, ver `timermeet_app/storage.py`).
@@ -33,6 +33,21 @@ Después de `v2.0.1` el arranque seguía sintiéndose "congelado" (~10s sin resp
 
 De paso, esta versión responde a otra causa de lentitud: el archivo de datos crecía sin límite porque nada purgaba reuniones pasadas ya notificadas. Se agregó `timermeet_app/retention.py` (ver requisito funcional #12 abajo) que elimina esas reuniones "muertas" con una ventana de gracia de 7 días, revisado una vez por hora y también al arrancar.
 
+## v2.2.0: qué tan rápido puede abrir realmente, y dos botones nuevos
+
+El usuario reportó que seguía sintiendo la app lenta para abrir y para responder. Se validó de nuevo, esta vez comparando puntos de referencia concretos:
+
+- `python timermeet.py` (código fuente, sin empaquetar): se vuelve interactiva en ~2-3 segundos y nunca deja de responder — confirmado con mediciones repetidas.
+- `TimerMeet.exe` (`--onefile`): tarda entre 7 y 10 segundos en mostrar contenido, pero **nunca aparece como "Sin respuesta"** durante ese tiempo — es tiempo de arranque de PyInstaller (extraer el bundle a una carpeta temporal, cargar los DLL de `pygame`, posible inspección de un antivirus sobre un ejecutable poco visto) y no un bloqueo del código de la app.
+- Se probó una compilación `--onedir` (carpeta en vez de un solo archivo) como alternativa: no fue más rápida en esta máquina (de hecho un poco más lenta en su primera ejecución, probablemente por revisión de antivirus sobre más archivos nuevos), así que se mantiene `--onefile` tal como se pidió originalmente.
+- Se midió el tiempo de importar cada dependencia por separado: `pygame` es la más pesada (~0.75s en código fuente), el resto es insignificante.
+
+**Conclusión:** el bloqueo real (la ventana "congelada" sin responder) ya está resuelto desde v2.1.0 y sigue confirmado aquí. Los 7-10 segundos que quedan al abrir el `.exe` son un costo de arranque de PyInstaller/antivirus, no un bug de la aplicación, y no mejoraron al probar `--onedir` ni al relanzar el mismo ejecutable varias veces. Si en el futuro se necesita reducir esto más, la palanca disponible es aligerar dependencias (ej. quitar `pygame` y los MP3 de sirena/bomberos en favor de solo tonos sintéticos) — un cambio de *funcionalidad*, no solo de rendimiento, que debe decidirse explícitamente con el usuario antes de aplicarse.
+
+Además se agregaron dos controles pedidos directamente:
+- Botón **Salir** en el encabezado (usa el mismo cierre ordenado que el botón X de la ventana: silencia cualquier alarma activa y luego cierra).
+- Botón **Eliminar eventos pasados** en el panel de resumen: borra de inmediato todos los eventos ya pasados de **todos** los trabajos (ignora el filtro activo), sin la ventana de gracia de 7 días ni el requisito de "ambas alarmas ya dispararon" que sí aplica la purga automática — es una acción manual y explícita. Igual conserva la última ocurrencia de cada serie recurrente para no perder la referencia de renovación (`timermeet_app/retention.py::clear_past_meetings`).
+
 ## Technical Constraints
 
 - Windows 10/11, Python 3.9+ (probado con 3.12).
@@ -58,6 +73,8 @@ De paso, esta versión responde a otra causa de lentitud: el archivo de datos cr
 10. Interfaz completa en español e inglés, con selector de idioma que recuerda la preferencia entre sesiones (`data/settings.json`).
 11. Persistencia resiliente ante múltiples PCs sincronizadas por OneDrive: al guardar, se relee el disco y se fusiona con la memoria (gana el registro con `updatedAt` más reciente; `reminderSent`/`startSent` siempre se combinan con OR para no repetir una alarma ya silenciada en otra sesión); se refresca desde disco periódicamente y al recuperar el foco de la ventana.
 12. Retención automática (`timermeet_app/retention.py`): una reunión se elimina del archivo solo si ya pasó, sus dos avisos (`reminderSent` y `startSent`) ya se dispararon, y han pasado al menos 7 días desde entonces. Nunca se purga si algún aviso sigue pendiente (evita perder recordatorios silenciosamente) ni la ocurrencia más reciente de una serie recurrente (el motor de renovación la necesita como ancla). Se revisa al arrancar y luego una vez por hora.
+13. Botón "Salir" en el encabezado: cierra la app de forma ordenada (silencia cualquier alarma activa antes de cerrar), igual que el botón X de la ventana.
+14. Botón "Eliminar eventos pasados" en el panel de resumen: pide confirmación y luego elimina de inmediato todos los eventos ya pasados de todos los trabajos (sin importar el filtro activo ni si sus avisos ya dispararon), conservando siempre la última ocurrencia de cada serie recurrente.
 
 ## Non-Functional Requirements
 
@@ -82,6 +99,8 @@ De paso, esta versión responde a otra causa de lentitud: el archivo de datos cr
 - `TimerMeet.exe` arranca desde la raíz del repo usando `computer_pc_10894.ico` como ícono, con `assets/audio/` y `data/` presentes junto al ejecutable.
 - La ventana responde a eventos de Windows (no aparece "Sin respuesta") durante todo el arranque, incluso con decenas de reuniones guardadas.
 - Una reunión pasada con ambos avisos ya disparados desaparece del archivo después de 7 días; una con algún aviso pendiente (aunque sea vieja) nunca desaparece sola.
+- El botón "Salir" cierra la app sin dejar procesos colgados ni perder cambios sin guardar.
+- El botón "Eliminar eventos pasados" borra todos los eventos vencidos de todos los trabajos tras confirmar, y conserva la última ocurrencia de cada serie recurrente.
 
 ## SDD Workflow
 

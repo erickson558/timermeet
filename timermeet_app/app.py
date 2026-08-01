@@ -37,6 +37,19 @@ def _meeting_sort_key(meeting: models.Meeting):
     return parsed if parsed is not None else datetime.min
 
 
+def _coerce_gadget_coordinate(value) -> Optional[int]:
+    """A hand-edited or corrupted settings.json could put anything under
+    gadgetX/gadgetY (a string, a list, ...); only trust it if it's actually
+    numeric, otherwise fall back to the same "use the default position" path
+    an absent value already takes, the same way saved_language is validated
+    against i18n.translations before being trusted below."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    return None
+
+
 def _meeting_status(meeting: models.Meeting, now: datetime) -> str:
     when = meeting.local_datetime()
     if when is None:
@@ -124,32 +137,55 @@ def _color_for_work_name(name: str) -> str:
 class TimerMeetApp:
     def __init__(self) -> None:
         self.root = tk.Tk()
-        self.root.geometry("1180x760")
-        self.root.minsize(960, 640)
-        # Belt-and-suspenders against a packaged build ever ending up with a
-        # window that exists but never gets shown (observed once under
-        # PyInstaller --windowed, root-caused to sys.stdout/stderr being
-        # None -- see timermeet.py).
-        self.root.after(0, self._force_show_window)
 
-        # Cheap, immediate feedback while the real UI builds underneath.
-        loading_label = tk.Label(
-            self.root, text="Cargando TimerMeet…", font=("Segoe UI", 14), bg="#1a1a1a", fg="#f5f5f5"
-        )
-        loading_label.place(relx=0.5, rely=0.5, anchor="center")
-        # update_idletasks(), not update(): only the loading label exists at
-        # this point, so there's nothing but its own geometry/paint to flush
-        # -- cheap by construction (unlike the v2.1.0 bug, which called this
-        # *after* the whole widget tree existed). update() would additionally
-        # process the `after(0, self._force_show_window)` queued above,
-        # whose deiconify/lift/focus_force calls measured ~0.5s alone;
-        # deferring that to mainloop()'s own event processing keeps this
-        # paint-only flush cheap.
-        self.root.update_idletasks()
-
+        # Read settings before deciding what to show first: if the user was
+        # last in gadget mode, the full-size 1180x760 splash below must never
+        # be shown even briefly, or every resumed launch would flash exactly
+        # the large window this feature exists to avoid before shrinking
+        # back down (there's no update()/update_idletasks() call between here
+        # and mainloop() starting, so whatever geometry is set first is what
+        # actually gets painted).
         settings = storage.load_settings()
         saved_language = settings.get("language")
         self.language = saved_language if saved_language in i18n.translations else i18n.DEFAULT_LANGUAGE
+        self.gadget_mode = bool(settings.get("gadgetMode", False))
+        self._gadget_x = _coerce_gadget_coordinate(settings.get("gadgetX"))
+        self._gadget_y = _coerce_gadget_coordinate(settings.get("gadgetY"))
+
+        # Belt-and-suspenders against a packaged build ever ending up with a
+        # window that exists but never gets shown (observed once under
+        # PyInstaller --windowed, root-caused to sys.stdout/stderr being
+        # None -- see timermeet.py). Harmless either way it resolves below:
+        # deiconify/state/lift/focus_force never touch geometry/overrideredirect,
+        # so it just re-affirms whichever surface set_gadget_mode already made
+        # visible if the app is resuming into gadget mode.
+        self.root.after(0, self._force_show_window)
+
+        if self.gadget_mode:
+            # Skip the full-size splash entirely -- MainWindow builds
+            # full_view gridded by default, so leaving root withdrawn until
+            # set_gadget_mode(True, ...) runs (further down, once the view
+            # exists) means the large window is never mapped/painted at all.
+            self.root.withdraw()
+            loading_label = None
+        else:
+            self.root.geometry("1180x760")
+            self.root.minsize(960, 640)
+            # Cheap, immediate feedback while the real UI builds underneath.
+            loading_label = tk.Label(
+                self.root, text="Cargando TimerMeet…", font=("Segoe UI", 14), bg="#1a1a1a", fg="#f5f5f5"
+            )
+            loading_label.place(relx=0.5, rely=0.5, anchor="center")
+            # update_idletasks(), not update(): only the loading label exists
+            # at this point, so there's nothing but its own geometry/paint to
+            # flush -- cheap by construction (unlike the v2.1.0 bug, which
+            # called this *after* the whole widget tree existed). update()
+            # would additionally process the `after(0, self._force_show_window)`
+            # queued above, whose deiconify/lift/focus_force calls measured
+            # ~0.5s alone; deferring that to mainloop()'s own event processing
+            # keeps this paint-only flush cheap.
+            self.root.update_idletasks()
+
         self.work_filter = "all"
         self.meetings: List[models.Meeting] = storage.load_meetings()
         self._pending_deleted_ids: set = set()
@@ -188,10 +224,13 @@ class TimerMeetApp:
             on_exit=self._on_close,
             on_add_company=self.handle_add_company,
             on_remove_company=self.handle_remove_company,
+            on_toggle_gadget_mode=self.handle_toggle_gadget_mode,
         )
         self.view = MainWindow(self.root, callbacks)
         self.view.apply_translations(self.language)
         self.view.update_company_options(self.companies)
+        if self.gadget_mode:
+            self.view.set_gadget_mode(True, self._gadget_x, self._gadget_y)
 
         self.alarms = AlarmController(self.root, get_language=lambda: self.language)
         self.alarms.set_base_title(i18n.t("appTitle", self.language))
@@ -211,7 +250,8 @@ class TimerMeetApp:
         # through the same queue incrementally, interleaved with normal
         # event processing, is what keeps Windows from flagging the window
         # "Not Responding" during startup.
-        loading_label.destroy()
+        if loading_label is not None:
+            loading_label.destroy()
 
         # Run on a background thread rather than blocking startup on it:
         # warm_cache() only touches the filesystem/MCI, never a Tkinter
@@ -285,6 +325,13 @@ class TimerMeetApp:
 
     def _on_close(self) -> None:
         self.alarms.dismiss(run_callback=False)
+        if self.gadget_mode:
+            # Otherwise quitting directly from the gadget's own close button
+            # would lose whatever spot the user last dragged it to -- normal
+            # toggling back to the full window already flushes this, but a
+            # direct quit from gadget mode skips that path entirely.
+            self._gadget_x, self._gadget_y = self.view.current_gadget_position()
+            self._save_gadget_settings()
         self.root.destroy()
 
     # -- heartbeat / alerts -----------------------------------------------------
@@ -431,6 +478,11 @@ class TimerMeetApp:
         if signature != self._last_rendered_signature:
             self.view.render_meeting_list(cards)
             self._last_rendered_signature = signature
+
+        # A near-zero-cost no-op unless gadget mode is active; piggybacks on
+        # this existing 1s heartbeat instead of a separate self-rescheduling
+        # relift job (one less job lifecycle to start/cancel correctly).
+        self.view.keep_gadget_on_top(self.alarms.is_active())
 
     def _find_meeting(self, meeting_id: str) -> Optional[models.Meeting]:
         return next((m for m in self.meetings if m.id == meeting_id), None)
@@ -623,3 +675,31 @@ class TimerMeetApp:
             storage.save_companies(self.companies)
             self.view.update_company_options(self.companies)
             self.view.show_toast(i18n.t("companyRemovedToast", self.language))
+
+    # -- gadget mode ------------------------------------------------------------
+
+    def handle_toggle_gadget_mode(self) -> None:
+        # Refused while an alert is showing: not just belt-and-suspenders --
+        # switching modes reskins the one real window (see
+        # MainWindow.set_gadget_mode), and this guarantees that never happens
+        # while an AlarmController Toplevel is up, rather than relying only on
+        # its own grab_set() making the button physically unclickable.
+        if self.alarms.is_active():
+            self.view.show_toast(i18n.t("gadgetModeBlockedToast", self.language))
+            return
+        self.gadget_mode = not self.gadget_mode
+        if self.gadget_mode:
+            self.view.set_gadget_mode(True, self._gadget_x, self._gadget_y)
+        else:
+            self._gadget_x, self._gadget_y = self.view.current_gadget_position()
+            self.view.set_gadget_mode(False)
+        self._save_gadget_settings()
+        self._refresh_all()
+
+    def _save_gadget_settings(self) -> None:
+        settings = storage.load_settings()
+        settings["gadgetMode"] = self.gadget_mode
+        if self._gadget_x is not None and self._gadget_y is not None:
+            settings["gadgetX"] = self._gadget_x
+            settings["gadgetY"] = self._gadget_y
+        storage.save_settings(settings)

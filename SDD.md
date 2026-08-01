@@ -2,11 +2,11 @@
 
 ## Product Goal
 
-Recordar al usuario sus reuniones de Microsoft Teams con avisos visibles, sonoros y persistentes, sin depender de que un navegador permanezca abierto. La versión activa (`2.4.0`) es una app de escritorio en Python (Tkinter puro); la versión `1.3.0` en PHP/JS queda congelada en `legacy-php/` como referencia.
+Recordar al usuario sus reuniones de Microsoft Teams con avisos visibles, sonoros y persistentes, sin depender de que un navegador permanezca abierto. La versión activa (`2.5.0`) es una app de escritorio en Python (Tkinter puro); la versión `1.3.0` en PHP/JS queda congelada en `legacy-php/` como referencia.
 
 ## Current Baseline
 
-- Versión actual: `2.4.0` (Python, escritorio).
+- Versión actual: `2.5.0` (Python, escritorio).
 - Punto de entrada: [timermeet.py](./timermeet.py).
 - Paquete de la app: [timermeet_app/](./timermeet_app/) (`models.py`, `recurrence.py`, `retention.py`, `storage.py`, `audio.py`, `notifications.py`, `alarm_ui.py`, `main_window.py`, `app.py`, `i18n.py`, `security.py`).
 - Persistencia: archivo compartido [data/meetings.json](./data/meetings.json) (mismo esquema que la versión PHP; se lee y escribe con fusión ante posibles ediciones desde otra PC vía OneDrive, ver `timermeet_app/storage.py`).
@@ -86,6 +86,30 @@ El usuario reportó que el `.exe` seguía sintiéndose lento (medido: 6.13s hast
 
 De paso se corrigió un bug preexistente que este cambio habría hecho visible: `handle_toggle_language` sobrescribía `settings.json` completo con `{"language": ...}`, lo que habría borrado la lista de empresas cada vez que alguien cambiara de idioma. Ahora relee y fusiona antes de guardar.
 
+## v2.5.0: modo gadget/mini (estilo "skin mode" de Windows Media Player)
+
+El usuario pidió un segundo modo, flotante y compacto, "algo como lo hacía Windows Media Player en su modo máscara". Antes de implementar se corrió un panel de diseño (3 propuestas independientes) para decidir el mecanismo correcto en Tkinter/Windows; la síntesis eligió **reutilizar la misma ventana `root`** (nunca un segundo `Tk()`/`Toplevel` para toda la app) en vez de crear una ventana flotante separada, precisamente porque es la única opción que no exige tocar `alarm_ui.py` ni el arranque (`_force_show_window`).
+
+**Cómo funciona:**
+- `main_window.py` ahora construye dos marcos hermanos en la misma celda de `root`: `full_view` (el layout de siempre: encabezado + formulario + resumen, sin cambios visuales) y `gadget_view` (nuevo, 280x130px, sin bordes de Windows). Solo uno está `grid()`eado a la vez; `set_gadget_mode()` intercambia cuál.
+- El modo gadget usa `overrideredirect(True)` + `attributes("-topmost", True)` para lograr el look "sin marco, siempre encima" real (no solo una ventana chica con barra de título nativa). Cada cambio de modo envuelve el toggle de `overrideredirect` en un `withdraw()` inmediatamente antes y un `deiconify()` inmediatamente después -- evita un problema conocido de Windows/Tk donde ese atributo no se aplica de forma confiable en una ventana ya visible.
+- Arrastrar desde cualquier punto del gadget (etiquetas, franja superior) mueve la ventana; doble clic o el botón "Completo" regresa a la vista normal; el botón "×" cierra la app igual que "Salir".
+- El modo y la última posición se guardan en `settings.json` (`gadgetMode`, `gadgetX`, `gadgetY`) con el mismo patrón leer-fusionar-guardar que ya usan `language`/`companies` -- nunca sobrescribe esas otras claves.
+- `AlarmController` (`alarm_ui.py`) **no se modificó en absoluto**: su overlay y diálogo ya eran `Toplevel`s independientes, no-`transient()`, cuya visibilidad nunca dependió del tamaño/posición/decoración de `root` -- verificado disparando una alarma real con el modo gadget activo (overlay y diálogo siguen apareciendo, quedando encima, y funcionando igual). Cambiar de modo se bloquea explícitamente mientras `AlarmController.is_active()` sea verdadero (con aviso), como garantía adicional a que el `grab_set()` del diálogo ya hace esto físicamente imposible por la UI.
+
+**Validación exhaustiva antes de dar por terminado:** además de la validación manual de siempre, esta vez se corrió una revisión adversarial con paneles independientes (corrección/regresión, particularidades de Windows/Tkinter, consistencia de código) seguida de un intento de refutación por cada hallazgo. Se encontraron y corrigieron **8 bugs reales**, ninguno detectado por la batería de pruebas automatizadas existente (este proyecto no tiene pruebas de ventanas/geometría de Tkinter):
+
+1. **Arrastre sin límites** podía sacar el gadget completamente de la pantalla (sin barra de tareas ni Alt-Tab por ser `overrideredirect`, quedando inalcanzable). Corregido: cada evento de arrastre ahora se recorta con la misma lógica que ya usaba el posicionamiento inicial.
+2. **Doble clic para restaurar + un pequeño temblor de mouse** reposicionaba la ventana grande recién restaurada usando un offset de arrastre obsoleto (calculado cuando la ventana aún era el gadget chico). Corregido: los manejadores de arrastre ahora verifican que el modo gadget siga activo antes de mover nada.
+3. **Ventana de carga a tamaño completo** se alcanzaba a pintar antes de colapsar al gadget, en cada arranque que retomaba el modo gadget (las preferencias se leían después de fijar la geometría 1180x760). Corregido: ahora se leen primero, y si el modo gadget estaba activo, `root` nunca se muestra a tamaño completo.
+4. **Recorte a un solo monitor:** `winfo_screenwidth()/height()` en Windows solo reportan el monitor primario, no el escritorio virtual completo -- en una máquina con 2 monitores, esto regresaba el gadget al monitor primario cada vez que se reactivaba el modo, aunque el usuario lo hubiera dejado a propósito en el segundo. Corregido con `GetSystemMetrics` (vía `ctypes`) para los límites reales del escritorio virtual, con reserva al valor de Tk si esa llamada falla.
+5. **`gadgetX`/`gadgetY` sin validar** podían tumbar el arranque completo si `settings.json` tenía un valor no numérico (edición manual, corrupción). Corregido con la misma disciplina defensiva que ya se usa para `language`.
+6. **Texto de "siguiente aviso" sin límite de líneas** en una ventana de alto fijo (130px) podía recortarse a la mitad si el título de la reunión era largo. Corregido con un truncado específico para la vista gadget (no afecta la vista completa, que sí tiene espacio).
+7. **El botón "×"** no pasaba por el sistema de traducciones (i18n) como el resto de los textos del archivo. Corregido agregando la clave `gadgetCloseButton` (mismo glifo en ambos idiomas) y asignándola en `apply_translations()` igual que los demás.
+8. Un detalle de tipado (`-> tuple` en vez de `-> Tuple[int, int]`) para consistencia con el resto del archivo.
+
+**Nota sobre el tiempo de arranque medido en esta sesión:** al recompilar el `.exe` con este cambio, el tiempo medido subió por encima de los 5 segundos en varias corridas. Se descartó como regresión de este cambio mediante una comparación directa: el `.exe` anterior (idéntico al ya publicado en v2.4.0, sin ningún código de esta versión) mostró el mismo aumento bajo las mismas condiciones del sistema en ese momento (varias sesiones de Claude Code y procesos `node` corriendo en paralelo en esa máquina). El tiempo de inicialización a nivel de código fuente (`TimerMeetApp.__init__`, medido con `time.perf_counter()`, no afectado por el antivirus ni por el arranque de PyInstaller) se mantuvo igual (~1.7-2.0s) antes y después de este cambio. Repetir la medición del `.exe` en una máquina menos ocupada es la validación pendiente antes de confiar en un número absoluto.
+
 ## Technical Constraints
 
 - Windows 10/11, Python 3.9+ (probado con 3.12).
@@ -116,6 +140,7 @@ De paso se corrigió un bug preexistente que este cambio habría hecho visible: 
 15. El campo "Trabajo / Empresa" del formulario es un combobox editable (`ttk.Combobox`) con la lista de empresas guardadas como opciones, en vez de un campo de texto libre a escribir cada vez; sigue aceptando escribir un nombre nuevo directamente.
 16. Lista de empresas configurable desde "Gestionar empresas" (junto a la etiqueta del campo): agregar una empresa nueva o eliminar una existente de la lista, sin afectar las reuniones ya guardadas con ese nombre. Guardar un timer con un nombre no listado lo agrega automáticamente a la lista.
 17. La app debe volverse interactiva (ventana con contenido real, no solo el letrero de carga) en menos de 5 segundos al abrir `TimerMeet.exe`.
+18. Modo gadget/mini: un botón en el encabezado ("Modo gadget") reemplaza la ventana completa por un panel flotante, sin bordes, siempre-encima y arrastrable (280x130px) con reloj, siguiente aviso, y botones para volver a la vista completa o cerrar la app. El modo y la última posición se recuerdan entre reinicios. Cambiar de modo se bloquea mientras suena una alarma.
 
 ## Non-Functional Requirements
 
@@ -145,6 +170,7 @@ De paso se corrigió un bug preexistente que este cambio habría hecho visible: 
 - "Gestionar empresas" permite agregar o eliminar una empresa de la lista; eliminar una empresa no modifica ni borra las reuniones ya guardadas con ese nombre, y la lista persiste entre reinicios de la app.
 - Cambiar de idioma no borra la lista de empresas guardada (ni ninguna otra clave de `data/settings.json`).
 - El botón "Salir" cierra la app sin dejar procesos colgados ni perder cambios sin guardar.
+- El modo gadget se puede activar y desactivar repetidamente sin dejar la ventana fuera de la pantalla (el arrastre y la posición inicial siempre quedan dentro de los límites reales del escritorio, incluyendo monitores secundarios); una alarma real disparada durante el modo gadget sigue mostrando el overlay, el diálogo y el sonido con normalidad, y cambiar de modo se rechaza mientras esa alarma esté activa.
 - El botón "Eliminar eventos pasados" borra todos los eventos vencidos de todos los trabajos tras confirmar, y conserva la última ocurrencia de cada serie recurrente.
 - Una reunión borrada (individualmente, por "Eliminar eventos pasados", o por la purga automática) desaparece de la GUI de inmediato y sigue desaparecida después de guardar, recargar el archivo, o reiniciar la app -- nunca reaparece sola.
 

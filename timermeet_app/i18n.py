@@ -161,6 +161,10 @@ translations = {
         "companyRemovedToast": "Empresa eliminada de la lista.",
         "companyExistsError": "Esa empresa ya está en la lista.",
         "companyEmptyError": "Escribe un nombre antes de agregar.",
+        "gadgetModeButton": "Modo gadget",
+        "gadgetRestoreButton": "Completo",
+        "gadgetCloseButton": "×",
+        "gadgetModeBlockedToast": "No se puede cambiar de modo mientras suena una alarma.",
     },
     "en": {
         "appTitle": "TimerMeet",
@@ -305,6 +309,10 @@ translations = {
         "companyRemovedToast": "Company removed from the list.",
         "companyExistsError": "That company is already in the list.",
         "companyEmptyError": "Type a name before adding.",
+        "gadgetModeButton": "Gadget mode",
+        "gadgetRestoreButton": "Full",
+        "gadgetCloseButton": "×",
+        "gadgetModeBlockedToast": "Can't switch modes while an alarm is sounding.",
     },
 }
 

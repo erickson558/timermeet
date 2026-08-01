@@ -17,6 +17,7 @@ TimerMeet nació como un sitio local en PHP y se reescribió por completo en Pyt
 - Interfaz completa en español e inglés, con botón para cambiar de idioma.
 - Botón de donación ("Cómprame una cerveza") hacia PayPal.
 - `TimerMeet.exe` abre en menos de 5 segundos (medido; ver `SDD.md` v2.4.0 para el detalle de qué se optimizó).
+- Modo gadget/mini: un botón en el encabezado convierte la ventana en un panel flotante, sin bordes, siempre-encima y arrastrable (estilo "skin mode" de Windows Media Player) con el reloj y el siguiente aviso; un botón regresa a la vista completa. El modo y la posición se recuerdan entre reinicios.
 
 ## Instalación y uso
 

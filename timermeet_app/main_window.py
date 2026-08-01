@@ -24,7 +24,7 @@ import tkinter.messagebox as messagebox
 import webbrowser
 from dataclasses import dataclass
 from tkinter import ttk
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from . import __version__, i18n, models, security
 
@@ -52,6 +52,14 @@ GOLD_FG = "#402d00"
 
 FONT_FAMILY = "Segoe UI"
 
+# Gadget/skin mode: a small borderless always-on-top panel (see
+# `set_gadget_mode`), sized to fit a clock + one status line with a comfortable
+# margin above the Windows taskbar (winfo_screenheight() doesn't exclude it).
+GADGET_WIDTH = 280
+GADGET_HEIGHT = 130
+GADGET_MARGIN_X = 24
+GADGET_MARGIN_BOTTOM = 60
+
 _CARD_PALETTE = {
     "card_bg": "#20242c",
     "chip_bg": CHIP_BG,
@@ -77,6 +85,18 @@ _SOUND_LABEL_KEYS = [
     ("siren", "soundSiren"),
     ("fire", "soundFireSiren"),
 ]
+
+# The gadget's next-alert label wraps but never scrolls in its fixed 130px
+# height; the strip+clock above already claim most of that, leaving room for
+# only ~2 short lines before text would clip against the window's bottom edge.
+_GADGET_ALERT_MAX_CHARS = 72
+
+
+def _truncate_for_gadget(text: str) -> str:
+    if len(text) <= _GADGET_ALERT_MAX_CHARS:
+        return text
+    return text[: _GADGET_ALERT_MAX_CHARS - 1].rstrip() + "…"
+
 
 _RECURRENCE_LABEL_KEYS = [
     ("none", "recurrenceNone"),
@@ -113,6 +133,7 @@ class Callbacks:
     on_exit: Callable[[], None]
     on_add_company: Callable[[str], None]
     on_remove_company: Callable[[str], None]
+    on_toggle_gadget_mode: Callable[[], None]
 
 
 def _button(parent, text: str, command, bg: str, fg: str, hover: Optional[str] = None, **extra) -> tk.Button:
@@ -193,6 +214,10 @@ class MainWindow:
         self._companies: List[str] = []
         self._company_dialog = None
         self._company_listbox: Optional[tk.Listbox] = None
+        self._gadget_active = False
+        self._pre_gadget_geometry: Optional[str] = None
+        self._gadget_drag_offset_x = 0
+        self._gadget_drag_offset_y = 0
 
         self.root.configure(bg=WINDOW_BG)
         self._configure_ttk_style()
@@ -233,12 +258,22 @@ class MainWindow:
     # -- layout ---------------------------------------------------------------
 
     def _build_layout(self) -> None:
+        # root has exactly one grid cell, holding whichever of these two
+        # sibling frames is currently gridded -- full_view (today's whole
+        # header+form+summary layout, unchanged) or gadget_view (the
+        # borderless mini skin, see `_build_gadget_view`/`set_gadget_mode`).
+        # Only one is ever gridded at a time; the other sits ungridded.
         self.root.grid_columnconfigure(0, weight=1)
-        self.root.grid_rowconfigure(1, weight=1)
+        self.root.grid_rowconfigure(0, weight=1)
 
-        self._build_header()
+        self.full_view = tk.Frame(self.root, bg=WINDOW_BG)
+        self.full_view.grid(row=0, column=0, sticky="nsew")
+        self.full_view.grid_columnconfigure(0, weight=1)
+        self.full_view.grid_rowconfigure(1, weight=1)
 
-        body = tk.Frame(self.root, bg=WINDOW_BG)
+        self._build_header(self.full_view)
+
+        body = tk.Frame(self.full_view, bg=WINDOW_BG)
         body.grid(row=1, column=0, sticky="nsew", padx=16, pady=(0, 16))
         body.grid_columnconfigure(0, weight=1, minsize=340)
         body.grid_columnconfigure(1, weight=2)
@@ -247,8 +282,10 @@ class MainWindow:
         self._build_form(body)
         self._build_summary(body)
 
-    def _build_header(self) -> None:
-        header = tk.Frame(self.root, bg=PANEL_BG)
+        self._build_gadget_view()
+
+    def _build_header(self, parent) -> None:
+        header = tk.Frame(parent, bg=PANEL_BG)
         header.grid(row=0, column=0, sticky="ew", padx=16, pady=16)
         header.grid_columnconfigure(0, weight=1)
 
@@ -280,6 +317,8 @@ class MainWindow:
         self.notify_button.pack(side="left", padx=4)
         self.language_button = _button(actions, "EN", self.callbacks.on_toggle_language, GHOST_BG, GHOST_FG, GHOST_HOVER)
         self.language_button.pack(side="left", padx=4)
+        self.gadget_button = _button(actions, "", self.callbacks.on_toggle_gadget_mode, GHOST_BG, GHOST_FG, GHOST_HOVER)
+        self.gadget_button.pack(side="left", padx=4)
         self.donate_button = _button(actions, "", self._open_donate, GOLD_BG, GOLD_FG, GOLD_HOVER)
         self.donate_button.pack(side="left", padx=4)
         # A thin visual gap sets "Salir" apart from the utility buttons --
@@ -507,6 +546,183 @@ class MainWindow:
         value.pack(anchor="w", padx=10, pady=(0, 8))
         return {"label": label, "value": value}
 
+    # -- gadget mode --------------------------------------------------------------
+
+    def _build_gadget_view(self) -> None:
+        """The borderless mini skin (WMP "skin mode" style): built once,
+        eagerly, alongside full_view, but never gridded here -- `set_gadget_mode`
+        grids it in and `full_view` out (and back) on demand. Kept as a sibling
+        of full_view in the same root grid cell rather than a second Toplevel,
+        so the app never has more than one real top-level window (see
+        `set_gadget_mode`'s docstring for why that matters for the alarm)."""
+        self.gadget_view = tk.Frame(self.root, bg=PANEL_BG, highlightthickness=1, highlightbackground=BORDER)
+
+        strip = tk.Frame(self.gadget_view, bg=PANEL_BG)
+        strip.pack(fill="x", padx=8, pady=(8, 0))
+        self.gadget_title_label = tk.Label(strip, text="", font=(FONT_FAMILY, 9, "bold"), bg=PANEL_BG, fg=MUTED)
+        self.gadget_title_label.pack(side="left")
+        self.gadget_close_button = tk.Button(
+            strip, text="", command=self.callbacks.on_exit, bg=PANEL_BG, fg=MUTED,
+            activebackground=DANGER, activeforeground="#ffffff", relief="flat", borderwidth=0,
+            cursor="hand2", font=(FONT_FAMILY, 12, "bold"), padx=6, pady=0,
+        )
+        self.gadget_close_button.pack(side="right")
+        self.gadget_restore_button = tk.Button(
+            strip, text="", command=self.callbacks.on_toggle_gadget_mode, bg=PANEL_BG, fg=MUTED,
+            activebackground=PANEL_BG, activeforeground=ACCENT, relief="flat", borderwidth=0,
+            cursor="hand2", font=(FONT_FAMILY, 9, "underline"), padx=0, pady=0,
+        )
+        self.gadget_restore_button.pack(side="right", padx=(0, 10))
+
+        self.gadget_clock_label = tk.Label(
+            self.gadget_view, text="--:--:--", font=(FONT_FAMILY, 22, "bold"), bg=PANEL_BG, fg=TEXT
+        )
+        self.gadget_clock_label.pack(anchor="w", padx=10, pady=(6, 0))
+
+        self.gadget_next_alert_label = tk.Label(
+            self.gadget_view, text="", font=(FONT_FAMILY, 9), bg=PANEL_BG, fg=MUTED,
+            wraplength=GADGET_WIDTH - 20, justify="left",
+        )
+        self.gadget_next_alert_label.pack(anchor="w", padx=10, pady=(2, 8), fill="x")
+
+        # Drag-from-anywhere: bound on every widget except the two buttons,
+        # so a click on Restore/close still fires its own command instead of
+        # being swallowed by a drag-start. Tk bindings don't propagate from a
+        # parent to its children, hence binding the same handlers repeatedly.
+        for widget in (self.gadget_view, strip, self.gadget_title_label, self.gadget_clock_label, self.gadget_next_alert_label):
+            widget.bind("<ButtonPress-1>", self._start_gadget_drag)
+            widget.bind("<B1-Motion>", self._do_gadget_drag)
+            widget.bind("<Double-Button-1>", lambda _e: self.callbacks.on_toggle_gadget_mode())
+
+    def _start_gadget_drag(self, event) -> None:
+        # Guards against a real, reproduced bug: double-clicking the gadget
+        # to restore the full window fires this a second time (Tk delivers
+        # the plain ButtonPress-1 before resolving Double-Button-1), and if
+        # the mouse moves at all before release -- ordinary click jitter --
+        # a stray <B1-Motion> would otherwise still land on this (now
+        # grid_remove()'d) widget and drag the just-restored, much larger
+        # full window using a stale gadget-sized offset. Bailing out here
+        # whenever gadget mode isn't (or is no longer) active makes any
+        # drag event that arrives mid-mode-switch a no-op.
+        if not self._gadget_active:
+            return
+        self._gadget_drag_offset_x = event.x_root - self.root.winfo_x()
+        self._gadget_drag_offset_y = event.y_root - self.root.winfo_y()
+
+    def _do_gadget_drag(self, event) -> None:
+        if not self._gadget_active:
+            return
+        new_x = event.x_root - self._gadget_drag_offset_x
+        new_y = event.y_root - self._gadget_drag_offset_y
+        # Clamp every motion event, not just at mode-entry: this is an
+        # overrideredirect + topmost window with no taskbar/Alt-Tab entry,
+        # so an unclamped fast drag past a screen edge could otherwise
+        # strand it fully off-screen with its own Restore/Close controls
+        # unreachable for the rest of the session.
+        new_x, new_y = self._resolve_gadget_position(new_x, new_y)
+        self.root.geometry(f"+{new_x}+{new_y}")
+
+    def _virtual_screen_bounds(self) -> Tuple[int, int, int, int]:
+        """(left, top, width, height) of the full virtual desktop spanning
+        every connected monitor. `winfo_screenwidth()`/`winfo_screenheight()`
+        only report the PRIMARY monitor on Windows -- clamping the gadget
+        against just that would silently snap it back from a legitimate
+        position on a secondary monitor every time gadget mode is
+        (re-)entered. `GetSystemMetrics` gives the real bounds (the origin
+        can be negative for a monitor placed left of/above the primary);
+        fall back to Tk's primary-only metrics if that call ever fails for
+        any reason (e.g. a non-Windows dev environment)."""
+        try:
+            import ctypes
+
+            user32 = ctypes.windll.user32
+            SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN = 76, 77
+            SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN = 78, 79
+            left = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
+            top = user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
+            width = user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
+            height = user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
+            if width > 0 and height > 0:
+                return left, top, width, height
+        except Exception:  # nosec B110 - best-effort; Tk's own metrics are a safe fallback
+            pass
+        return 0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+
+    def _resolve_gadget_position(self, x: Optional[int], y: Optional[int]) -> Tuple[int, int]:
+        left, top, width, height = self._virtual_screen_bounds()
+        if x is None or y is None:
+            # The default position is always the primary monitor's own
+            # bottom-right corner (not the whole virtual desktop's) --
+            # where a new gadget is expected to first appear.
+            x = self.root.winfo_screenwidth() - GADGET_WIDTH - GADGET_MARGIN_X
+            y = self.root.winfo_screenheight() - GADGET_HEIGHT - GADGET_MARGIN_BOTTOM
+        x = max(left, min(int(x), max(left, left + width - GADGET_WIDTH)))
+        y = max(top, min(int(y), max(top, top + height - GADGET_HEIGHT)))
+        return x, y
+
+    def current_gadget_position(self) -> Tuple[int, int]:
+        return self.root.winfo_x(), self.root.winfo_y()
+
+    def set_gadget_mode(self, is_gadget: bool, x: Optional[int] = None, y: Optional[int] = None) -> None:
+        """Reskin the SAME root window instead of swapping in a second
+        Toplevel -- this is the one existing Tk() instance and heartbeat for
+        the app's whole life either way. Every `overrideredirect()` toggle is
+        wrapped in an immediate withdraw()-just-before/deiconify()-just-after
+        pair on both directions: this sidesteps a documented Windows/Tk quirk
+        where toggling overrideredirect on an already-mapped window doesn't
+        reliably stick, and because Tk's event loop is single-threaded, the
+        brief "root not mapped" window is invisible to the rest of the app --
+        no heartbeat tick, alert, or toast can run in the middle of this one
+        synchronous call. AlarmController's overlay/dialog need no special
+        handling here: they're independent, non-transient Toplevels (see
+        alarm_ui.py) whose own visibility never depended on root's mapped
+        state, size, or decoration -- only on their own attributes."""
+        if is_gadget:
+            self._pre_gadget_geometry = self.root.geometry()
+            target_x, target_y = self._resolve_gadget_position(x, y)
+            self.root.withdraw()
+            self.root.overrideredirect(True)
+            self.root.resizable(False, False)
+            # TimerMeetApp.__init__ sets a 960x640 minsize for the full
+            # window; left in place it silently clamps the geometry() call
+            # below back up to 960x640 even with resizable(False, False).
+            self.root.minsize(1, 1)
+            self.full_view.grid_remove()
+            self.gadget_view.grid(row=0, column=0, sticky="nsew")
+            self.root.geometry(f"{GADGET_WIDTH}x{GADGET_HEIGHT}+{target_x}+{target_y}")
+            self.root.deiconify()
+            self.root.lift()
+            self.root.attributes("-topmost", True)
+            self._gadget_active = True
+        else:
+            self.root.withdraw()
+            self.root.overrideredirect(False)
+            self.root.attributes("-topmost", False)
+            self.root.resizable(True, True)
+            self.gadget_view.grid_remove()
+            self.full_view.grid(row=0, column=0, sticky="nsew")
+            self.root.geometry(self._pre_gadget_geometry or "1180x760")
+            self.root.minsize(960, 640)
+            self.root.deiconify()
+            self.root.lift()
+            self.root.focus_force()
+            self._gadget_active = False
+
+    def keep_gadget_on_top(self, is_alarm_active: bool) -> None:
+        """Called every heartbeat tick from app.py; a near-zero-cost no-op
+        unless gadget mode is active. Piggybacks on the existing 1s heartbeat
+        instead of a separate self-rescheduling job -- one less job to track
+        starting/cancelling correctly. Skips re-asserting topmost while an
+        alarm is showing so AlarmController's own independent relift loop
+        always wins the top z-order contest (see alarm_ui.py's `_relift`)."""
+        if not self._gadget_active or is_alarm_active:
+            return
+        try:
+            self.root.lift()
+            self.root.attributes("-topmost", True)
+        except Exception:  # nosec B110 - best-effort, mirrors AlarmController's own defensive teardown style
+            pass
+
     # -- form actions -----------------------------------------------------------
 
     def _handle_save(self) -> None:
@@ -721,9 +937,19 @@ class MainWindow:
                 self._toast_window.destroy()
             except Exception:  # nosec B110 - toast may already be gone; destroying it is best-effort
                 pass
-        toast = tk.Label(
-            self.root, text=message, bg="#2a2e37", fg=TEXT, padx=16, pady=8, font=(FONT_FAMILY, 10)
-        )
+        # A background-fired toast (e.g. renewalToast) can land while gadget
+        # mode is active; the default full-window sizing/font is wide enough
+        # to overflow both edges of the tiny 280px gadget skin, so it shrinks
+        # and wraps to fit there instead.
+        if self._gadget_active:
+            toast = tk.Label(
+                self.root, text=message, bg="#2a2e37", fg=TEXT, padx=8, pady=4, font=(FONT_FAMILY, 8),
+                wraplength=GADGET_WIDTH - 16, justify="left",
+            )
+        else:
+            toast = tk.Label(
+                self.root, text=message, bg="#2a2e37", fg=TEXT, padx=16, pady=8, font=(FONT_FAMILY, 10)
+            )
         toast.place(relx=0.5, rely=0.96, anchor="s")
         self._toast_window = toast
         self.root.after(3200, self._hide_toast)
@@ -740,9 +966,11 @@ class MainWindow:
 
     def update_clock(self, text: str) -> None:
         self.current_time_card["value"].configure(text=text)
+        self.gadget_clock_label.configure(text=text)
 
     def update_next_alert(self, text: str) -> None:
         self.next_alert_card["value"].configure(text=text)
+        self.gadget_next_alert_label.configure(text=_truncate_for_gadget(text))
 
     def update_stats(self, total: int, today: int, next_meeting_text: str) -> None:
         self.total_card["value"].configure(text=str(total))
@@ -845,8 +1073,13 @@ class MainWindow:
 
         self.notify_button.configure(text=tr("enableNotifications"))
         self.language_button.configure(text="EN" if language == "es" else "ES")
+        self.gadget_button.configure(text=tr("gadgetModeButton"))
         self.donate_button.configure(text=tr("buyBeer"))
         self.exit_button.configure(text=tr("exitButton"))
+
+        self.gadget_title_label.configure(text=tr("appTitle"))
+        self.gadget_restore_button.configure(text=tr("gadgetRestoreButton"))
+        self.gadget_close_button.configure(text=tr("gadgetCloseButton"))
 
         self.form_eyebrow.configure(text=tr("formEyebrow"))
         self.form_title_label.configure(text=tr("formTitle"))

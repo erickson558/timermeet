@@ -3,7 +3,8 @@
 Usage: ``python build_exe.py``
 
 Requires the dev dependencies (see requirements-dev.txt): PyInstaller, plus
-the app's own runtime dependencies (pygame, plyer). See
+the app's own runtime dependencies (plyer -- audio playback uses the stdlib
+``winsound``/``ctypes`` only, nothing to install). See
 ``.claude/skills/timermeet-exe-packager/SKILL.md`` for the reasoning behind
 each flag below.
 """
@@ -36,11 +37,17 @@ def main() -> None:
         APP_NAME,
         "--icon",
         str(ICON_PATH),
-        # plyer picks its OS backend (plyer.platforms.win.notification) via
-        # a runtime string import that PyInstaller's static analysis can't
-        # see, so it has to be told to include all of plyer's submodules.
-        "--collect-submodules",
-        "plyer",
+        # plyer.notification picks its OS backend via a runtime string
+        # import (plyer.platforms.<platform>.notification) that PyInstaller's
+        # static analysis can't see. This app only ever runs on Windows, so
+        # naming just that one module is enough -- everything it statically
+        # imports (facades, win_api_defs, balloontip) gets pulled in
+        # automatically. `--collect-submodules plyer` was used before, but
+        # that bundles every OS backend for every plyer facade (~294 files,
+        # only a handful of which this app can ever reach), which measurably
+        # adds to onefile's per-launch extraction time for no benefit here.
+        "--hidden-import",
+        "plyer.platforms.win.notification",
         "--distpath",
         str(ROOT / "dist"),
         "--workpath",

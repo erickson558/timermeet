@@ -74,9 +74,10 @@ class AlarmController:
         return self._overlay is not None
 
     def warm_cache(self) -> None:
-        """Preload the siren/fire MP3s into this controller's own player so
-        the first real alarm doesn't stall on disk I/O. Safe to call from a
-        background thread (touches only pygame, never a Tkinter widget)."""
+        """Sanity-check the siren/fire MP3s exist so a missing asset is
+        logged early instead of discovered mid-alarm. Safe to call from a
+        background thread (touches only the filesystem, never a Tkinter
+        widget)."""
         audio.preload(self._player)
 
     def test_play(self, profile_id: str) -> None:

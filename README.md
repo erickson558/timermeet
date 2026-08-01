@@ -6,7 +6,7 @@ TimerMeet nació como un sitio local en PHP y se reescribió por completo en Pyt
 
 ## Qué hace
 
-- Guarda timers de reuniones por trabajo o empresa, con título, fecha/hora, minutos de aviso, sonido de alerta, enlace de Teams y notas.
+- Guarda timers de reuniones por trabajo o empresa, con título, fecha/hora, minutos de aviso, sonido de alerta, enlace de Teams y notas. El campo de trabajo/empresa es un combobox con las empresas ya guardadas -- se administran (agregar o eliminar) desde "Gestionar empresas", junto a ese campo.
 - Dispara un aviso previo (X minutos antes) y otro al momento exacto de inicio, cada uno de forma redundante: sonido en bucle + overlay visual que parpadea y se mantiene siempre encima hasta silenciarlo + notificación nativa de Windows.
 - 5 perfiles de sonido (Suave, Urgente, Alarma fuerte, Sirena invasiva, Sirena de bomberos); los dos últimos usan archivos MP3 reales y caen automáticamente a un tono sintético si el audio no carga -- nunca se queda en silencio.
 - Series repetitivas: diaria, semana laboral (lunes a viernes), semanal, quincenal o mensual, con un motor que las renueva solas cada semana para que nunca dejen de sonar por quedarse sin ocurrencias futuras.
@@ -16,6 +16,7 @@ TimerMeet nació como un sitio local en PHP y se reescribió por completo en Pyt
 - Botón "Salir" para cerrar la app de forma ordenada.
 - Interfaz completa en español e inglés, con botón para cambiar de idioma.
 - Botón de donación ("Cómprame una cerveza") hacia PayPal.
+- `TimerMeet.exe` abre en menos de 5 segundos (medido; ver `SDD.md` v2.4.0 para el detalle de qué se optimizó).
 
 ## Instalación y uso
 
@@ -46,7 +47,7 @@ Esto genera `TimerMeet.exe` en la raíz del proyecto, junto a `timermeet.py`, us
 | Paquete | Para qué |
 |---|---|
 | `tkinter` / `ttk` | Interfaz gráfica (incluida en la instalación estándar de Python; no se agrega como dependencia). |
-| [`pygame`](https://www.pygame.org/) | Reproducción de los sonidos de alarma en MP3. |
+| `winmm.dll` (vía `ctypes`, stdlib) / `winsound` | Reproducción de los sonidos de alarma en MP3 (API MCI de Windows) y el tono sintético de respaldo; no se agrega como dependencia. |
 | [`plyer`](https://github.com/kivy/plyer) | Notificaciones nativas de Windows (mejor esfuerzo; nunca es el único canal de alerta). |
 | [`pyinstaller`](https://pyinstaller.org/) *(solo para compilar)* | Empaqueta la app como un `.exe` de un solo archivo. |
 

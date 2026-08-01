@@ -13,8 +13,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 # Imported lazily (on first real use), not at module load time, so this
-# module costs nothing on the startup critical path -- matches the same
-# lazy-import treatment audio.py gives pygame, for the same reason.
+# module costs nothing on the startup critical path.
 _plyer_notification = None
 _plyer_import_failed = False
 

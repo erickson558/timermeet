@@ -19,13 +19,12 @@ _DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # A PyInstaller --windowed build has no console, so Windows gives the process
 # sys.stdout/sys.stderr = None (not just a closed stream). Any library that
-# unconditionally writes to them at import time (e.g. pygame prints its
-# "Hello from the pygame community" greeting) raises an AttributeError doing
-# so -- and because that can happen deep inside a Tkinter callback, Tkinter's
-# own default error reporter (which itself writes to sys.stderr) silently
-# swallows it too, leaving the app alive but its window stuck unshown with
-# nothing ever logged. Redirecting both to a real file up front means every
-# such write succeeds instead of crashing, and nothing gets lost.
+# unconditionally writes to them at import time raises an AttributeError
+# doing so -- and because that can happen deep inside a Tkinter callback,
+# Tkinter's own default error reporter (which itself writes to sys.stderr)
+# silently swallows it too, leaving the app alive but its window stuck
+# unshown with nothing ever logged. Redirecting both to a real file up front
+# means every such write succeeds instead of crashing, and nothing gets lost.
 if sys.stdout is None or sys.stderr is None:
     _console_stream = open(_DATA_DIR / "console.log", "a", encoding="utf-8", buffering=1)
     if sys.stdout is None:

@@ -238,3 +238,31 @@ def load_settings() -> dict:
 
 def save_settings(settings: dict) -> None:
     security.atomic_write_text(settings_path(), json.dumps(settings, indent=2, ensure_ascii=False) + "\n")
+
+
+def load_companies() -> List[str]:
+    """The user-managed company/job list backing the work-field combobox.
+
+    Lives in ``settings.json`` (this machine only, like the language
+    preference) rather than in ``meetings.json`` -- it's a UI convenience
+    list, not shared/synced data, so it deliberately doesn't go through the
+    OneDrive merge logic above."""
+    raw = load_settings().get("companies")
+    if not isinstance(raw, list):
+        return []
+    seen_lower = set()
+    companies: List[str] = []
+    for item in raw:
+        name = item.strip() if isinstance(item, str) else ""
+        if name and name.lower() not in seen_lower:
+            seen_lower.add(name.lower())
+            companies.append(name)
+    return companies
+
+
+def save_companies(companies: List[str]) -> None:
+    """Persist the company list, merging into whatever else is already in
+    settings.json (never overwrite sibling keys like "language")."""
+    settings = load_settings()
+    settings["companies"] = list(companies)
+    save_settings(settings)

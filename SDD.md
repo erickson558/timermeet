@@ -2,15 +2,15 @@
 
 ## Product Goal
 
-Recordar al usuario sus reuniones de Microsoft Teams con avisos visibles, sonoros y persistentes, sin depender de que un navegador permanezca abierto. La versión activa (`2.3.0`) es una app de escritorio en Python (Tkinter puro); la versión `1.3.0` en PHP/JS queda congelada en `legacy-php/` como referencia.
+Recordar al usuario sus reuniones de Microsoft Teams con avisos visibles, sonoros y persistentes, sin depender de que un navegador permanezca abierto. La versión activa (`2.4.0`) es una app de escritorio en Python (Tkinter puro); la versión `1.3.0` en PHP/JS queda congelada en `legacy-php/` como referencia.
 
 ## Current Baseline
 
-- Versión actual: `2.3.0` (Python, escritorio).
+- Versión actual: `2.4.0` (Python, escritorio).
 - Punto de entrada: [timermeet.py](./timermeet.py).
 - Paquete de la app: [timermeet_app/](./timermeet_app/) (`models.py`, `recurrence.py`, `retention.py`, `storage.py`, `audio.py`, `notifications.py`, `alarm_ui.py`, `main_window.py`, `app.py`, `i18n.py`, `security.py`).
 - Persistencia: archivo compartido [data/meetings.json](./data/meetings.json) (mismo esquema que la versión PHP; se lee y escribe con fusión ante posibles ediciones desde otra PC vía OneDrive, ver `timermeet_app/storage.py`).
-- Preferencias locales: `data/settings.json` (idioma).
+- Preferencias locales: `data/settings.json` (idioma, lista de empresas).
 - Pruebas: [tests/](./tests/) (`unittest`).
 - Empaquetado: [build_exe.py](./build_exe.py) → `TimerMeet.exe` en la raíz del repo, junto a `timermeet.py` y `computer_pc_10894.ico`.
 - Baseline histórico (congelado): [legacy-php/](./legacy-php/) — sitio EasyPHP + JS, versión `1.3.0`, ver `legacy-php/README.md`.
@@ -68,11 +68,29 @@ Además se agregaron dos controles pedidos directamente:
 
 **Arranque más liviano:** `pygame` y `plyer` ahora se importan de forma perezosa (solo la primera vez que realmente se necesita un sonido o una notificación), no al arrancar la app. Antes, el simple hecho de importar `timermeet_app.app` ya cargaba `pygame` (~0.75s solo esa importación, más en el `.exe` empaquetado) aunque el sonido no se fuera a usar hasta más tarde. Medido: el tiempo de importar todo el paquete bajó de ~1.26s a ~0.19s.
 
+## v2.4.0: el `.exe` ya abre en menos de 5 segundos, y empresas configurables
+
+El usuario reportó que el `.exe` seguía sintiéndose lento (medido: 6.13s hasta mostrar contenido) y pidió explícitamente un límite duro: "no tarde más de 5 segundos en abrir". v2.2.0 ya había identificado la causa (arranque de PyInstaller, no el código de la app) pero la había dejado sin resolver porque la palanca disponible entonces -- quitar `pygame` -- era un cambio de funcionalidad que requería decidirse explícitamente. Esta versión lo resuelve:
+
+- **`pygame` → API MCI de Windows.** `timermeet_app/audio.py` se reescribió para reproducir los MP3 de sirena/bomberos con `winmm.dll` vía `ctypes` (stdlib, sin nada que empaquetar) en vez de `pygame.mixer`. El paquete de `pygame` pesaba ~24.3MB en 730 archivos, y `--onefile` de PyInstaller reextrae *todo* el bundle a una carpeta temporal en cada arranque -- ese costo de extracción, no el código Python, era el cuello de botella real. El tono sintético de respaldo (`winsound.Beep`) no cambió. Verificado con una prueba directa de MCI (abrir/reproducir/medir posición/detener sobre el MP3 real) antes de reescribir, y con una prueba end-to-end después (siren/fire en bucle, perfil solo-sintético) -- ningún perfil de sonido quedó en silencio.
+- **`plyer` con `--hidden-import` en vez de `--collect-submodules`.** `plyer.notification` elige su backend con un import dinámico (`plyer.platforms.<os>.notification`) que el análisis estático de PyInstaller no puede seguir, así que antes se empaquetaban los ~294 archivos de **todos** los backends de **todos** los facades de plyer (Android, iOS, macOS, Linux, Windows) para cubrir ese único import. Como esta app solo corre en Windows, nombrar exactamente `plyer.platforms.win.notification` en `build_exe.py` es suficiente -- PyInstaller sigue automáticamente sus imports estáticos (`plyer.facades`, `plyer.platforms.win.libs.balloontip`/`win_api_defs`) y el resto de plyer (~250 archivos que esta app nunca toca) se queda fuera.
+- **Un `root.update()` síncrono de más en el arranque.** Perfilado con `cProfile` reveló que `TimerMeetApp.__init__` llamaba `self.root.update()` justo después de mostrar la etiqueta "Cargando…", para forzar su primer pintado -- pero `update()` también procesa el `after(0, self._force_show_window)` ya encolado (deiconify/state/lift/focus_force), medido en ~0.5s aparte. Se cambió a `update_idletasks()`, que solo vacía la cola de geometría/pintado (barato aquí porque en ese punto del arranque solo existe esa etiqueta) y deja que `_force_show_window` corra en la primera vuelta de `mainloop()` en vez de forzarlo de forma síncrona dentro de `__init__`.
+
+**Resultado medido:** el `.exe` (`TimerMeet.exe`, 36.2MB → 11.4MB) pasó de 6.13s a un rango estable de 3.2-3.9s hasta mostrar la ventana con contenido real, medido lanzándolo repetidamente y sondeando el título de la ventana vía Win32 -- cumple el límite de 5 segundos con margen.
+
+**Empresas configurables + combobox:** el campo "Trabajo / Empresa" del formulario pasó de un `Entry` de texto libre a un `ttk.Combobox` (el único widget ttk de la app -- ver el docstring de `_configure_ttk_style` en `main_window.py` sobre por qué es una excepción segura a la regla de "solo tkinter puro": no es una reescritura basada en PIL como CustomTkinter, así que no repite ese costo de arranque). La lista de empresas:
+- Se guarda en `data/settings.json` bajo la clave `"companies"` (local a esta PC, igual que el idioma -- no pasa por la fusión de `meetings.json`).
+- Se siembra una sola vez, en el primer arranque bajo esta versión, con los nombres de trabajo ya presentes en `meetings.json` (para que quien actualice no vea el combobox vacío); después de eso la lista guardada manda -- no se vuelve a derivar de `meetings.json` en arranques siguientes, o una eliminación explícita reaparecería sola mientras exista una reunión vieja con ese nombre.
+- Se agrega automáticamente al guardar un timer con un nombre de trabajo que aún no está en la lista (escribirlo una vez alcanza para que quede disponible la próxima vez).
+- Se administra explícitamente con el enlace "Gestionar empresas" junto a la etiqueta del campo: agregar un nombre sin necesidad de guardar un timer primero, o eliminar uno de la lista (eliminar solo afecta el combobox -- las reuniones ya guardadas con ese nombre no se tocan ni se pierden).
+
+De paso se corrigió un bug preexistente que este cambio habría hecho visible: `handle_toggle_language` sobrescribía `settings.json` completo con `{"language": ...}`, lo que habría borrado la lista de empresas cada vez que alguien cambiara de idioma. Ahora relee y fusiona antes de guardar.
+
 ## Technical Constraints
 
 - Windows 10/11, Python 3.9+ (probado con 3.12).
 - Interfaz gráfica: `tkinter`/`ttk` puro (sin CustomTkinter, ver arriba).
-- Dependencias runtime: `pygame` (audio), `plyer` (notificaciones nativas, mejor esfuerzo). Ver `requirements.txt`.
+- Dependencias runtime: `plyer` (notificaciones nativas, mejor esfuerzo). Ver `requirements.txt`. El audio (MP3 vía MCI, tono sintético vía `winsound`) usa solo la librería estándar y DLL del propio Windows -- no agrega dependencia.
 - Sin base de datos; persistencia en un único archivo JSON compartido.
 - Esta carpeta del proyecto vive dentro de OneDrive y puede ejecutarse desde más de una PC: la capa de persistencia debe seguir soportando fusión (merge-on-save) en vez de sobrescritura simple — ver el docstring de `timermeet_app/storage.py`.
 - Español como idioma inicial (`i18n.DEFAULT_LANGUAGE = "es"`), inglés soportado por completo; ambos diccionarios deben tener exactamente las mismas claves (verificado en `tests/test_i18n.py`).
@@ -85,7 +103,7 @@ Además se agregaron dos controles pedidos directamente:
 2. Mostrar la próxima reunión, el próximo aviso y el total de timers; filtrar por trabajo.
 3. Disparar un recordatorio antes del inicio y otro al momento de inicio, cada uno como máximo una vez, con ventanas de "aviso perdido" que marcan el flag sin notificar si el momento ya pasó (evita alarmas fuera de tiempo tras una ausencia larga).
 4. Alarma sonora (5 perfiles) + overlay visual persistente (siempre-encima, parpadeante, se re-eleva si queda tapada) + notificación nativa best-effort, disparados juntos y de forma redundante.
-5. Perfiles `Sirena invasiva` y `Sirena de bomberos` usan MP3 locales (`assets/audio/`) vía `pygame.mixer`; si el archivo falla o no carga, cae automáticamente a un tono sintético (`winsound.Beep`) — nunca debe quedar en silencio.
+5. Perfiles `Sirena invasiva` y `Sirena de bomberos` usan MP3 locales (`assets/audio/`) vía la API MCI de Windows (`winmm.dll`); si el archivo falla o no carga, cae automáticamente a un tono sintético (`winsound.Beep`) — nunca debe quedar en silencio.
 6. Series repetitivas: diaria, semana laboral (L-V), semanal, quincenal, mensual. "Semana laboral" exige fecha inicial de lunes a viernes.
 7. Motor de renovación semanal: cada serie activa se extiende automáticamente para cubrir ~1 semana adelante, evaluado en cada heartbeat pero con efecto real solo a partir del viernes 18:00 hora local (o al abrir la app después de esa hora). Es idempotente (una segunda pasada no duplica) y nunca crea ocurrencias con fecha pasada.
 8. El enlace de Teams solo se abre/guarda si usa esquema `http://` o `https://` (`security.is_http_url`); mismo criterio para el botón de donación.
@@ -95,6 +113,9 @@ Además se agregaron dos controles pedidos directamente:
 12. Retención automática (`timermeet_app/retention.py`): una reunión se elimina del archivo solo si ya pasó, sus dos avisos (`reminderSent` y `startSent`) ya se dispararon, y han pasado al menos 7 días desde entonces. Nunca se purga si algún aviso sigue pendiente (evita perder recordatorios silenciosamente) ni la ocurrencia más reciente de una serie recurrente (el motor de renovación la necesita como ancla). Se revisa al arrancar y luego una vez por hora.
 13. Botón "Salir" en el encabezado: cierra la app de forma ordenada (silencia cualquier alarma activa antes de cerrar), igual que el botón X de la ventana.
 14. Botón "Eliminar eventos pasados" en el panel de resumen: pide confirmación y luego elimina de inmediato todos los eventos ya pasados de todos los trabajos (sin importar el filtro activo ni si sus avisos ya dispararon), conservando siempre la última ocurrencia de cada serie recurrente.
+15. El campo "Trabajo / Empresa" del formulario es un combobox editable (`ttk.Combobox`) con la lista de empresas guardadas como opciones, en vez de un campo de texto libre a escribir cada vez; sigue aceptando escribir un nombre nuevo directamente.
+16. Lista de empresas configurable desde "Gestionar empresas" (junto a la etiqueta del campo): agregar una empresa nueva o eliminar una existente de la lista, sin afectar las reuniones ya guardadas con ese nombre. Guardar un timer con un nombre no listado lo agrega automáticamente a la lista.
+17. La app debe volverse interactiva (ventana con contenido real, no solo el letrero de carga) en menos de 5 segundos al abrir `TimerMeet.exe`.
 
 ## Non-Functional Requirements
 
@@ -119,6 +140,10 @@ Además se agregaron dos controles pedidos directamente:
 - `TimerMeet.exe` arranca desde la raíz del repo usando `computer_pc_10894.ico` como ícono, con `assets/audio/` y `data/` presentes junto al ejecutable.
 - La ventana responde a eventos de Windows (no aparece "Sin respuesta") durante todo el arranque, incluso con decenas de reuniones guardadas.
 - Una reunión pasada con ambos avisos ya disparados desaparece del archivo después de 7 días; una con algún aviso pendiente (aunque sea vieja) nunca desaparece sola.
+- Lanzar `TimerMeet.exe` repetidamente muestra la ventana con contenido real (no solo el letrero de carga) en menos de 5 segundos, medido sondeando el título de la ventana.
+- El combobox de "Trabajo / Empresa" ofrece las empresas guardadas y sigue aceptando texto libre; guardar un timer con un nombre nuevo lo deja disponible en el combobox la próxima vez sin pasos adicionales.
+- "Gestionar empresas" permite agregar o eliminar una empresa de la lista; eliminar una empresa no modifica ni borra las reuniones ya guardadas con ese nombre, y la lista persiste entre reinicios de la app.
+- Cambiar de idioma no borra la lista de empresas guardada (ni ninguna otra clave de `data/settings.json`).
 - El botón "Salir" cierra la app sin dejar procesos colgados ni perder cambios sin guardar.
 - El botón "Eliminar eventos pasados" borra todos los eventos vencidos de todos los trabajos tras confirmar, y conserva la última ocurrencia de cada serie recurrente.
 - Una reunión borrada (individualmente, por "Eliminar eventos pasados", o por la purga automática) desaparece de la GUI de inmediato y sigue desaparecida después de guardar, recargar el archivo, o reiniciar la app -- nunca reaparece sola.

@@ -137,7 +137,15 @@ class TimerMeetApp:
             self.root, text="Cargando TimerMeet…", font=("Segoe UI", 14), bg="#1a1a1a", fg="#f5f5f5"
         )
         loading_label.place(relx=0.5, rely=0.5, anchor="center")
-        self.root.update()
+        # update_idletasks(), not update(): only the loading label exists at
+        # this point, so there's nothing but its own geometry/paint to flush
+        # -- cheap by construction (unlike the v2.1.0 bug, which called this
+        # *after* the whole widget tree existed). update() would additionally
+        # process the `after(0, self._force_show_window)` queued above,
+        # whose deiconify/lift/focus_force calls measured ~0.5s alone;
+        # deferring that to mainloop()'s own event processing keeps this
+        # paint-only flush cheap.
+        self.root.update_idletasks()
 
         settings = storage.load_settings()
         saved_language = settings.get("language")
@@ -145,6 +153,19 @@ class TimerMeetApp:
         self.work_filter = "all"
         self.meetings: List[models.Meeting] = storage.load_meetings()
         self._pending_deleted_ids: set = set()
+
+        # First run under this feature (no "companies" key at all yet): seed
+        # the list from whatever work names already exist in meetings.json,
+        # so upgrading users don't see an empty dropdown. After that, the
+        # persisted list is authoritative -- it deliberately does NOT get
+        # re-derived from meetings.json on later launches, or an explicit
+        # removal would silently come back the next time that name is still
+        # used by an existing meeting.
+        if "companies" in settings:
+            self.companies: List[str] = storage.load_companies()
+        else:
+            self.companies = sorted({m.workName for m in self.meetings if m.workName}, key=str.lower)
+            storage.save_companies(self.companies)
         purged_at_startup = self._apply_meetings(retention.purge_stale_meetings(self.meetings)[0])
         self.storage_ok = True
         self._dirty = bool(purged_at_startup)
@@ -165,9 +186,12 @@ class TimerMeetApp:
             on_filter_change=self.handle_filter_change,
             on_clear_past=self.handle_clear_past,
             on_exit=self._on_close,
+            on_add_company=self.handle_add_company,
+            on_remove_company=self.handle_remove_company,
         )
         self.view = MainWindow(self.root, callbacks)
         self.view.apply_translations(self.language)
+        self.view.update_company_options(self.companies)
 
         self.alarms = AlarmController(self.root, get_language=lambda: self.language)
         self.alarms.set_base_title(i18n.t("appTitle", self.language))
@@ -189,15 +213,12 @@ class TimerMeetApp:
         # "Not Responding" during startup.
         loading_label.destroy()
 
-        # Run on a background thread, not via root.after(): pygame.mixer
-        # initialization (inside AlarmPlayer._ensure_mixer) measurably slows
-        # down Tk's own idle-task/event processing on some systems even when
-        # scheduled through Tk's own timer, so it has to stay off the Tk
-        # thread entirely for the window to be responsive immediately.
-        # warm_cache() only touches pygame, never a Tkinter widget, so it's
-        # safe to run concurrently with the UI thread. The alarm system
-        # works fine in the meantime either way -- it lazily loads/falls
-        # back to a synth tone on demand (see audio.py).
+        # Run on a background thread rather than blocking startup on it:
+        # warm_cache() only touches the filesystem/MCI, never a Tkinter
+        # widget, so it's safe to run concurrently with the UI thread. The
+        # alarm system works fine in the meantime either way -- it opens the
+        # MP3 (or falls back to a synth tone) on demand the moment an alarm
+        # actually needs to play (see audio.py).
         threading.Thread(target=self.alarms.warm_cache, daemon=True).start()
 
     def run(self) -> None:
@@ -428,6 +449,12 @@ class TimerMeetApp:
         composed_datetime = f"{payload['date']}T{time_value}"
         meeting_id = str(payload.get("meetingId") or "").strip()
 
+        # A work name typed directly into the combobox (not picked from the
+        # list) becomes available for next time automatically -- the
+        # explicit "Manage companies" dialog is for removing one, or adding
+        # one without saving a meeting first.
+        self._register_company(payload.get("workName", ""))
+
         if meeting_id:
             self._save_edit(meeting_id, payload, recurrence_type, composed_datetime)
         else:
@@ -545,7 +572,12 @@ class TimerMeetApp:
 
     def handle_toggle_language(self) -> None:
         self.language = "en" if self.language == "es" else "es"
-        storage.save_settings({"language": self.language})
+        # Merge into existing settings rather than overwrite: settings.json
+        # also holds the company list (see storage.save_companies), and a
+        # bare save_settings({"language": ...}) would silently wipe it out.
+        settings = storage.load_settings()
+        settings["language"] = self.language
+        storage.save_settings(settings)
         self.view.apply_translations(self.language)
         self.alarms.set_base_title(i18n.t("appTitle", self.language))
         self._refresh_all()
@@ -558,3 +590,36 @@ class TimerMeetApp:
     def handle_filter_change(self, value: str) -> None:
         self.work_filter = value
         self._refresh_all()
+
+    # -- company list ---------------------------------------------------------
+
+    def _register_company(self, name: str) -> None:
+        name = name.strip()
+        if not name or any(c.lower() == name.lower() for c in self.companies):
+            return
+        self.companies.append(name)
+        self.companies.sort(key=str.lower)
+        storage.save_companies(self.companies)
+        self.view.update_company_options(self.companies)
+
+    def handle_add_company(self, name: str) -> None:
+        name = security.clamp_text(name, security.MAX_WORK_NAME_LENGTH)
+        if not name:
+            self.view.show_toast(i18n.t("companyEmptyError", self.language))
+            return
+        if any(c.lower() == name.lower() for c in self.companies):
+            self.view.show_toast(i18n.t("companyExistsError", self.language))
+            return
+        self.companies.append(name)
+        self.companies.sort(key=str.lower)
+        storage.save_companies(self.companies)
+        self.view.update_company_options(self.companies)
+        self.view.show_toast(i18n.t("companyAddedToast", self.language))
+
+    def handle_remove_company(self, name: str) -> None:
+        before = len(self.companies)
+        self.companies = [c for c in self.companies if c.lower() != name.lower()]
+        if len(self.companies) != before:
+            storage.save_companies(self.companies)
+            self.view.update_company_options(self.companies)
+            self.view.show_toast(i18n.t("companyRemovedToast", self.language))

@@ -6,10 +6,15 @@ sawtooth tones with millisecond envelopes and looped MP3 sub-clips; a desktop
 process has no clean equivalent for either, so this module makes two
 deliberate, documented simplifications:
 
-- ``siren``/``fire`` loop the *whole* MP3 file from the start via
-  ``pygame.mixer`` instead of the original's sample-accurate
+- ``siren``/``fire`` loop the *whole* MP3 file from the start via Windows'
+  built-in MCI audio API (``winmm.dll``, accessed through ``ctypes`` --
+  stdlib only, nothing to bundle) instead of the original's sample-accurate
   ``loopStart``/``loopEnd`` sub-clip — still a continuous, loud siren, just
-  not byte-identical looping.
+  not byte-identical looping. An earlier version used ``pygame.mixer`` for
+  this; it was replaced because pygame bundles ~24MB/730 files that a
+  PyInstaller ``--onefile`` build must re-extract on every launch, which was
+  a meaningful chunk of the app's startup time for a feature (MP3 playback)
+  that ``winmm.dll`` already provides for free on every Windows install.
 - the synthesized fallback uses ``winsound.Beep`` (frequency + duration only —
   no waveform shape or volume envelope, which a PC-speaker-style beep can't
   do), playing each tone in the pattern back-to-back on a background thread
@@ -21,6 +26,7 @@ alarm app, silence is never an acceptable failure mode.
 
 from __future__ import annotations
 
+import ctypes
 import logging
 import threading
 import time
@@ -37,25 +43,54 @@ try:
 except ImportError:  # pragma: no cover - non-Windows dev environments
     winsound = None
 
-# pygame is imported lazily (on first real use, see _get_pygame() below),
-# not at module load time. Importing it eagerly measurably lengthens the
-# app's startup critical path (loading its bundled SDL2 DLLs takes real
-# time, worse once frozen by PyInstaller) even though sound is never needed
-# until the first alarm fires or the cache is warmed on a background thread.
-_pygame_module = None
-_pygame_import_failed = False
+try:
+    _winmm = ctypes.windll.winmm  # pragma: no cover - Windows-only
+except (AttributeError, OSError):  # pragma: no cover - non-Windows dev environments
+    _winmm = None
+
+_MCI_ALIAS = "timermeet_alarm"
 
 
-def _get_pygame():
-    global _pygame_module, _pygame_import_failed
-    if _pygame_module is None and not _pygame_import_failed:
-        try:
-            import pygame as _pygame
+def _mci_send(command: str) -> Tuple[int, str]:
+    """Send one MCI command string via winmm.dll. Returns (error_code, reply)
+    -- error_code is 0 on success. Never raises: a missing/unavailable MCI
+    subsystem just means every call below returns a failure code, which the
+    caller already treats as "fall back to the synth tone"."""
+    if _winmm is None:
+        return -1, ""
+    buffer = ctypes.create_unicode_buffer(255)
+    try:
+        error_code = _winmm.mciSendStringW(command, buffer, 254, 0)
+    except Exception as exc:  # defensive -- must never crash the alarm thread
+        logger.warning("MCI command failed (%s): %s", command, exc)
+        return -1, ""
+    return error_code, buffer.value
 
-            _pygame_module = _pygame
-        except ImportError:  # pragma: no cover - optional dependency
-            _pygame_import_failed = True
-    return _pygame_module
+
+def _mci_open(path: str) -> bool:
+    error_code, _ = _mci_send(f'open "{path}" type mpegvideo alias {_MCI_ALIAS}')
+    return error_code == 0
+
+
+def _mci_close() -> None:
+    _mci_send(f"close {_MCI_ALIAS}")
+
+
+def _mci_play_from_start() -> bool:
+    error_code, _ = _mci_send(f"play {_MCI_ALIAS} from 0")
+    return error_code == 0
+
+
+def _mci_length_ms() -> int:
+    _, value = _mci_send(f"status {_MCI_ALIAS} length")
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _mci_stop() -> None:
+    _mci_send(f"stop {_MCI_ALIAS}")
 
 
 @dataclass(frozen=True)
@@ -143,72 +178,66 @@ def _beep(frequency_hz: int, duration_s: float) -> None:
 
 
 class AlarmPlayer:
-    """Owns the mixer and whichever sound (MP3 channel or synth thread) is
-    currently playing. A new call to `play()` always stops the previous
-    sound first -- alarms replace rather than stack, matching the original."""
+    """Owns whichever sound (MP3 via MCI, or a synth thread) is currently
+    playing. A new call to `play()` always stops the previous sound first --
+    alarms replace rather than stack, matching the original. Only one MP3
+    can be "open" under the shared MCI alias at a time, which is fine since
+    only one alarm is ever active at once."""
 
     def __init__(self) -> None:
-        self._mixer_ready: Optional[bool] = None  # None = not yet attempted (lazy, see _ensure_mixer)
-        self._sounds: Dict[str, "pygame.mixer.Sound"] = {}
-        self._active_channel = None
+        self._mci_loaded_key: Optional[str] = None
         self._synth_stop_event: Optional[threading.Event] = None
-
-    def _ensure_mixer(self) -> bool:
-        """Import pygame and initialize its mixer on first actual use rather
-        than at construction/module-import time. Both the import itself and
-        `pygame.mixer.init()` measurably slow down Tkinter's idle-task
-        processing on some systems -- deferring them until a sound is
-        genuinely needed keeps the window responsive immediately on launch."""
-        if self._mixer_ready is None:
-            self._mixer_ready = False
-            pygame = _get_pygame()
-            if pygame is not None:
-                try:
-                    pygame.mixer.init()
-                    self._mixer_ready = True
-                except Exception as exc:  # audio device issues must never crash the app
-                    logger.warning("Could not initialize audio mixer: %s", exc)
-        return self._mixer_ready
-
-    def _load_sound(self, profile: SoundProfile):
-        if not profile.asset_key or not self._ensure_mixer():
-            return None
-        if profile.asset_key in self._sounds:
-            return self._sounds[profile.asset_key]
-        path = _asset_path(profile.asset_filename)
-        try:
-            sound = _get_pygame().mixer.Sound(str(path))
-        except Exception as exc:  # a bad/missing mp3 must fall back, never crash
-            logger.warning("Could not load alarm asset %s: %s", path, exc)
-            return None
-        self._sounds[profile.asset_key] = sound
-        return sound
+        self._mci_loop_stop_event: Optional[threading.Event] = None
 
     def stop(self) -> None:
         if self._synth_stop_event is not None:
             self._synth_stop_event.set()
             self._synth_stop_event = None
-        if self._active_channel is not None:
-            try:
-                self._active_channel.stop()
-            except Exception:  # nosec B110 - channel may already be stopped/invalid; stop() must not raise
-                pass
-            self._active_channel = None
+        if self._mci_loop_stop_event is not None:
+            self._mci_loop_stop_event.set()
+            self._mci_loop_stop_event = None
+        _mci_stop()
 
     def play(self, profile_id: str, mode: str, loop: bool = False) -> None:
         """Play one profile/mode. ``loop=True`` is a live alarm (keeps going
         until `stop()`); ``loop=False`` is a one-shot preview/test."""
         self.stop()
         profile = SOUND_PROFILES.get(profile_id, SOUND_PROFILES[DEFAULT_PROFILE_ID])
-        sound = self._load_sound(profile)
-        if sound is not None:
-            try:
-                self._active_channel = sound.play(loops=-1 if loop else 0)
-                return
-            except Exception as exc:
-                logger.warning("Could not play alarm asset for %s: %s", profile_id, exc)
-
+        if profile.asset_key and self._play_mp3(profile, loop):
+            return
         self._play_synth_pattern(profile, mode, loop)
+
+    def _play_mp3(self, profile: SoundProfile, loop: bool) -> bool:
+        if self._mci_loaded_key != profile.asset_key:
+            _mci_close()
+            path = str(_asset_path(profile.asset_filename))
+            if not _mci_open(path):
+                self._mci_loaded_key = None
+                logger.warning("Could not open alarm asset via MCI: %s", path)
+                return False
+            self._mci_loaded_key = profile.asset_key
+
+        if not _mci_play_from_start():
+            return False
+
+        if loop:
+            length_ms = _mci_length_ms()
+            if length_ms <= 0:
+                return False  # can't loop something we can't measure; let the synth pattern take over
+            stop_event = threading.Event()
+            self._mci_loop_stop_event = stop_event
+
+            def _run() -> None:
+                while not stop_event.is_set():
+                    if stop_event.wait(timeout=length_ms / 1000):
+                        return
+                    if stop_event.is_set():
+                        return
+                    _mci_play_from_start()
+
+            threading.Thread(target=_run, daemon=True).start()
+
+        return True
 
     def _play_synth_pattern(self, profile: SoundProfile, mode: str, loop: bool) -> None:
         pattern = profile.patterns.get(mode) or profile.patterns["reminder"]
@@ -232,12 +261,16 @@ class AlarmPlayer:
 
 
 def preload(player: "AlarmPlayer", profile_ids: Optional[List[str]] = None) -> None:
-    """Best-effort warm-up so the first real alarm doesn't stall on disk I/O.
-    Warms the *same* player instance that will actually play alarms (its
-    ``_sounds`` cache is per-instance) -- call with the AlarmController's own
-    player, not a throwaway one. Failures are swallowed -- `AlarmPlayer.play()`
+    """Best-effort warm-up: just confirms each MP3 asset file exists so a
+    missing file is logged early (on a background thread) rather than
+    discovered silently at the moment an alarm needs it. Unlike the old
+    pygame-based version, there's no persistent handle to keep "loaded" --
+    MCI opens/closes per play() call -- so this is now a cheap sanity check,
+    not a cache warm-up. Failures are swallowed -- `AlarmPlayer.play()`
     already falls back safely."""
     for profile_id in profile_ids or ("siren", "fire"):
         profile = SOUND_PROFILES.get(profile_id)
         if profile and profile.asset_key:
-            player._load_sound(profile)
+            path = _asset_path(profile.asset_filename)
+            if not path.exists():
+                logger.warning("Alarm asset missing: %s", path)

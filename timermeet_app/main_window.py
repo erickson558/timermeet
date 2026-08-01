@@ -23,6 +23,7 @@ import tkinter as tk
 import tkinter.messagebox as messagebox
 import webbrowser
 from dataclasses import dataclass
+from tkinter import ttk
 from typing import Callable, Dict, List, Optional
 
 from . import __version__, i18n, models, security
@@ -110,6 +111,8 @@ class Callbacks:
     on_filter_change: Callable[[str], None]
     on_clear_past: Callable[[], None]
     on_exit: Callable[[], None]
+    on_add_company: Callable[[str], None]
+    on_remove_company: Callable[[str], None]
 
 
 def _button(parent, text: str, command, bg: str, fg: str, hover: Optional[str] = None, **extra) -> tk.Button:
@@ -187,11 +190,45 @@ class MainWindow:
         self._recurrence_id_to_label: Dict[str, str] = {}
         self._recurrence_label_to_id: Dict[str, str] = {}
         self._toast_window = None
+        self._companies: List[str] = []
+        self._company_dialog = None
+        self._company_listbox: Optional[tk.Listbox] = None
 
         self.root.configure(bg=WINDOW_BG)
+        self._configure_ttk_style()
         self._build_layout()
         self.apply_translations(i18n.DEFAULT_LANGUAGE)
         self.clear_form()
+
+    def _configure_ttk_style(self) -> None:
+        """The work-field combobox (see `_build_form`) is the only ttk widget
+        in this app -- everything else is plain tkinter (see module
+        docstring for why). ttk.Combobox is the only stock widget that gives
+        both a type-anything entry and a click-to-pick dropdown list, and
+        unlike CustomTkinter it isn't PIL-image-based, so it doesn't carry
+        the same per-widget render cost that ruled CustomTkinter out. `clam`
+        is the only built-in theme where `.map()` actually lets us override
+        fieldbackground/foreground on Windows (the default `vista` theme
+        ignores most of it)."""
+        style = ttk.Style(self.root)
+        style.theme_use("clam")
+        style.configure(
+            "TimerMeet.TCombobox",
+            fieldbackground=FIELD_BG, background=FIELD_BG, foreground=TEXT,
+            arrowcolor=TEXT, bordercolor=BORDER, lightcolor=FIELD_BG, darkcolor=FIELD_BG,
+            padding=6,
+        )
+        style.map(
+            "TimerMeet.TCombobox",
+            fieldbackground=[("readonly", FIELD_BG), ("disabled", FIELD_BG)],
+            foreground=[("disabled", MUTED)],
+        )
+        # The dropdown popup is a plain Tk listbox under the hood and reads
+        # its colors from the option database, not from the ttk style above.
+        self.root.option_add("*TCombobox*Listbox.background", FIELD_BG)
+        self.root.option_add("*TCombobox*Listbox.foreground", TEXT)
+        self.root.option_add("*TCombobox*Listbox.selectBackground", ACCENT)
+        self.root.option_add("*TCombobox*Listbox.selectForeground", ACCENT_FG)
 
     # -- layout ---------------------------------------------------------------
 
@@ -277,9 +314,19 @@ class MainWindow:
 
         self.meeting_id_var = tk.StringVar(value="")
 
-        self.work_label = self._add_label(panel)
-        self.work_label.pack(anchor="w", padx=10)
-        self.work_entry = _entry(panel)
+        work_header = tk.Frame(panel, bg=PANEL_BG)
+        work_header.pack(fill="x", padx=10)
+        self.work_label = tk.Label(
+            work_header, text="", font=(FONT_FAMILY, 11, "bold"), anchor="w", bg=PANEL_BG, fg=TEXT
+        )
+        self.work_label.pack(side="left")
+        self.manage_companies_button = tk.Button(
+            work_header, text="", command=self._open_manage_companies, bg=PANEL_BG, fg=MUTED,
+            activebackground=PANEL_BG, activeforeground=ACCENT, relief="flat", borderwidth=0,
+            cursor="hand2", font=(FONT_FAMILY, 9, "underline"), padx=0, pady=0,
+        )
+        self.manage_companies_button.pack(side="right")
+        self.work_entry = ttk.Combobox(panel, style="TimerMeet.TCombobox", font=(FONT_FAMILY, 11))
         self.work_entry.pack(fill="x", padx=10, pady=(0, 10))
 
         self.title_label_field = self._add_label(panel)
@@ -520,6 +567,100 @@ class MainWindow:
         ):
             self.callbacks.on_clear_past()
 
+    # -- company management -----------------------------------------------------
+
+    def update_company_options(self, names: List[str]) -> None:
+        self._companies = list(names)
+        self.work_entry["values"] = self._companies
+        self._refresh_company_listbox()
+
+    def _open_manage_companies(self) -> None:
+        if self._company_dialog is not None:
+            self._company_dialog.lift()
+            self._company_dialog.focus_force()
+            return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title(i18n.t("manageCompaniesTitle", self.language))
+        dialog.configure(bg=PANEL_BG)
+        dialog.geometry("360x420")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.protocol("WM_DELETE_WINDOW", self._close_manage_companies)
+        self._company_dialog = dialog
+
+        tk.Label(
+            dialog, text=i18n.t("manageCompaniesHint", self.language), wraplength=320, justify="left",
+            bg=PANEL_BG, fg=MUTED, font=(FONT_FAMILY, 10),
+        ).pack(anchor="w", padx=14, pady=(14, 8))
+
+        add_row = tk.Frame(dialog, bg=PANEL_BG)
+        add_row.pack(fill="x", padx=14)
+        new_company_entry = _entry(add_row)
+        new_company_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
+
+        def _add(_event=None) -> None:
+            self.callbacks.on_add_company(new_company_entry.get())
+            new_company_entry.delete(0, "end")
+
+        new_company_entry.bind("<Return>", _add)
+        _button(add_row, i18n.t("addCompanyButton", self.language), _add, ACCENT, ACCENT_FG, ACCENT_HOVER).pack(side="left")
+
+        list_frame = tk.Frame(dialog, bg=PANEL_BG)
+        list_frame.pack(fill="both", expand=True, padx=14, pady=10)
+        listbox = tk.Listbox(
+            list_frame, bg=FIELD_BG, fg=TEXT, selectbackground=ACCENT, selectforeground=ACCENT_FG,
+            relief="flat", highlightthickness=1, highlightbackground=BORDER, font=(FONT_FAMILY, 11),
+            activestyle="none", disabledforeground=MUTED,
+        )
+        listbox.pack(side="left", fill="both", expand=True)
+        scrollbar = tk.Scrollbar(list_frame, orient="vertical", command=listbox.yview)
+        scrollbar.pack(side="right", fill="y")
+        listbox.configure(yscrollcommand=scrollbar.set)
+        self._company_listbox = listbox
+
+        def _remove_selected() -> None:
+            if not self._companies:
+                return
+            selection = listbox.curselection()
+            if not selection:
+                return
+            name = listbox.get(selection[0])
+            if messagebox.askyesno(
+                i18n.t("removeCompanyButton", self.language), i18n.t("removeCompanyConfirm", self.language)
+            ):
+                self.callbacks.on_remove_company(name)
+
+        bottom_row = tk.Frame(dialog, bg=PANEL_BG)
+        bottom_row.pack(fill="x", padx=14, pady=(0, 14))
+        _button(
+            bottom_row, i18n.t("removeCompanyButton", self.language), _remove_selected, DANGER, "#ffffff", DANGER_HOVER
+        ).pack(side="left")
+        _button(
+            bottom_row, i18n.t("closeButton", self.language), self._close_manage_companies, GHOST_BG, GHOST_FG, GHOST_HOVER
+        ).pack(side="right")
+
+        self._refresh_company_listbox()
+
+    def _close_manage_companies(self) -> None:
+        if self._company_dialog is not None:
+            self._company_dialog.destroy()
+            self._company_dialog = None
+            self._company_listbox = None
+
+    def _refresh_company_listbox(self) -> None:
+        listbox = self._company_listbox
+        if listbox is None:
+            return
+        listbox.configure(state="normal")
+        listbox.delete(0, "end")
+        if self._companies:
+            for name in self._companies:
+                listbox.insert("end", name)
+        else:
+            listbox.insert("end", i18n.t("noCompaniesYet", self.language))
+            listbox.configure(state="disabled")
+
     @staticmethod
     def _set_entry(entry: tk.Entry, value: str) -> None:
         previous_state = entry.cget("state")
@@ -712,6 +853,9 @@ class MainWindow:
         self.form_hint_label.configure(text=tr("formHint"))
 
         self.work_label.configure(text=tr("workLabel"))
+        self.manage_companies_button.configure(text=tr("manageCompaniesButton"))
+        if self._company_dialog is not None:
+            self._company_dialog.title(tr("manageCompaniesTitle"))
         self.title_label_field.configure(text=tr("titleLabel"))
         self.date_label.configure(text=tr("dateOnlyLabel"))
         self.time_label.configure(text=tr("timeOnlyLabel"))

@@ -10,6 +10,7 @@ You are the implementer for TimerMeet's Python desktop app (plain `tkinter`/`ttk
 
 - `timermeet_app/models.py` -- the `Meeting` dataclass, field normalization/validation. Any new field must get a safe default in `normalize_meeting()`.
 - `timermeet_app/recurrence.py` -- occurrence generation + the Friday-18:00 weekly renewal/idempotency engine. Extremely easy to silently break; see its module docstring before touching it.
+- `timermeet_app/retention.py` -- purges past+fully-alerted meetings after a 7-day grace period; never purges a pending alert or a series' latest occurrence.
 - `timermeet_app/storage.py` -- atomic JSON writes + merge-on-save (the OneDrive multi-machine safety net). Never replace the merge with naive overwrite.
 - `timermeet_app/audio.py` -- 5 sound profiles, MP3-with-synth-fallback. A failing MP3 must always fall back to `winsound.Beep`, never silence.
 - `timermeet_app/alarm_ui.py` -- the alert dialog + persistent alarm overlay + title-blink. Both always fire together (redundant by design).
@@ -34,4 +35,5 @@ You are the implementer for TimerMeet's Python desktop app (plain `tkinter`/`ttk
 - Any new URL-opening code path must go through `security.is_http_url()` first.
 - Any new disk write must go through `security.atomic_write_text()` (or `storage.save_meetings`/`save_settings`, which already do).
 - Keep the Tkinter main thread non-blocking: long-running work (audio synthesis, file I/O retries) belongs on a background thread or in a `root.after()` callback, never a blocking sleep on the UI thread.
+- **Never call `root.update()` or `root.update_idletasks()` synchronously on the startup path (or anywhere performance matters).** This exact call caused the v2.0.1→v2.1.0 startup freeze: it forces Tk to drain its *entire* pending idle/geometry queue in one blocking call, and Windows flags the window "Not Responding" for however long that takes. Let `mainloop()` process the same work incrementally instead. If you think you need one to force a repaint, you almost certainly don't -- ask first.
 - Don't add speculative abstractions, config flags, or backwards-compat shims beyond what the request needs.

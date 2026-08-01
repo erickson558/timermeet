@@ -18,7 +18,7 @@ import webbrowser
 from datetime import datetime, timedelta
 from typing import List, Optional
 
-from . import i18n, models, notifications, recurrence, security, storage
+from . import i18n, models, notifications, recurrence, retention, security, storage
 from .alarm_ui import AlarmController
 from .main_window import Callbacks, MainWindow, MeetingCardData
 
@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 HEARTBEAT_MS = 1000
 RESYNC_MS = 60_000  # periodic reload-from-disk, the desktop equivalent of the
 # web app's 45s server poll -- picks up edits made on another OneDrive-synced PC
+PURGE_MS = 3_600_000  # once an hour is plenty for a retention window measured in days
 MEETING_LIVE_WINDOW = timedelta(minutes=60)
 START_ALERT_WINDOW = timedelta(minutes=10)
 
@@ -143,9 +144,11 @@ class TimerMeetApp:
         self.language = saved_language if saved_language in i18n.translations else i18n.DEFAULT_LANGUAGE
         self.work_filter = "all"
         self.meetings: List[models.Meeting] = storage.load_meetings()
+        self.meetings, purged_at_startup = retention.purge_stale_meetings(self.meetings)
         self.storage_ok = True
-        self._dirty = False
+        self._dirty = bool(purged_at_startup)
         self._resync_accumulator_ms = 0
+        self._purge_accumulator_ms = 0
         self._last_rendered_signature = None
 
         callbacks = Callbacks(
@@ -171,7 +174,16 @@ class TimerMeetApp:
 
         self._refresh_all()
         self.root.after(HEARTBEAT_MS, self._heartbeat)
-        self.root.update_idletasks()
+        # Do NOT add a synchronous root.update()/update_idletasks() call here.
+        # It was here in an earlier version to force CustomTkinter's deferred
+        # widget rendering to finish before showing the real UI -- but
+        # forcing the *entire* pending idle/geometry queue to drain in one
+        # blocking call is exactly what made the window freeze on launch
+        # with a real-sized meeting list (10+ seconds, confirmed by timing).
+        # Removing it fixed the freeze completely: letting mainloop() work
+        # through the same queue incrementally, interleaved with normal
+        # event processing, is what keeps Windows from flagging the window
+        # "Not Responding" during startup.
         loading_label.destroy()
 
         # Run on a background thread, not via root.after(): pygame.mixer
@@ -240,7 +252,13 @@ class TimerMeetApp:
         created = recurrence.run_weekly_series_renewal(self.meetings, now)
         fired_any = self._process_alerts(now)
 
-        if created or fired_any or self._dirty:
+        self._purge_accumulator_ms += HEARTBEAT_MS
+        purged = 0
+        if self._purge_accumulator_ms >= PURGE_MS:
+            self._purge_accumulator_ms = 0
+            self.meetings, purged = retention.purge_stale_meetings(self.meetings, now)
+
+        if created or purged or fired_any or self._dirty:
             self._persist(silent=True)
             if created:
                 self.view.show_toast(i18n.format_text("renewalToast", self.language, count=created))

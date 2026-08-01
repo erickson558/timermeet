@@ -2,13 +2,13 @@
 
 ## Product Goal
 
-Recordar al usuario sus reuniones de Microsoft Teams con avisos visibles, sonoros y persistentes, sin depender de que un navegador permanezca abierto. La versión activa (`2.0.1`) es una app de escritorio en Python (Tkinter puro); la versión `1.3.0` en PHP/JS queda congelada en `legacy-php/` como referencia.
+Recordar al usuario sus reuniones de Microsoft Teams con avisos visibles, sonoros y persistentes, sin depender de que un navegador permanezca abierto. La versión activa (`2.1.0`) es una app de escritorio en Python (Tkinter puro); la versión `1.3.0` en PHP/JS queda congelada en `legacy-php/` como referencia.
 
 ## Current Baseline
 
-- Versión actual: `2.0.1` (Python, escritorio).
+- Versión actual: `2.1.0` (Python, escritorio).
 - Punto de entrada: [timermeet.py](./timermeet.py).
-- Paquete de la app: [timermeet_app/](./timermeet_app/) (`models.py`, `recurrence.py`, `storage.py`, `audio.py`, `notifications.py`, `alarm_ui.py`, `main_window.py`, `app.py`, `i18n.py`, `security.py`).
+- Paquete de la app: [timermeet_app/](./timermeet_app/) (`models.py`, `recurrence.py`, `retention.py`, `storage.py`, `audio.py`, `notifications.py`, `alarm_ui.py`, `main_window.py`, `app.py`, `i18n.py`, `security.py`).
 - Persistencia: archivo compartido [data/meetings.json](./data/meetings.json) (mismo esquema que la versión PHP; se lee y escribe con fusión ante posibles ediciones desde otra PC vía OneDrive, ver `timermeet_app/storage.py`).
 - Preferencias locales: `data/settings.json` (idioma).
 - Pruebas: [tests/](./tests/) (`unittest`).
@@ -26,6 +26,12 @@ Al probar `v2.0.0` con datos reales (41 reuniones), la ventana tardaba entre 20 
 - La inicialización de `pygame.mixer` se volvió perezosa y se ejecuta en un hilo de fondo, no de forma síncrona al arrancar.
 - El recálculo del área de scroll de la lista de reuniones se agrupa (debounce) en vez de recalcularse en cada widget insertado.
 - Se corrigió un bug real de arranque bajo `--windowed` de PyInstaller: `sys.stdout`/`sys.stderr` son `None` sin consola adjunta, lo que hacía fallar en silencio la primera impresión de `pygame` y dejaba la ventana creada pero nunca mostrada.
+
+## Por qué v2.1.0: el freeze seguía ahí, y de dónde salía de verdad
+
+Después de `v2.0.1` el arranque seguía sintiéndose "congelado" (~10s sin responder). La causa real, aislada con mediciones directas (no con suposiciones): `TimerMeetApp.__init__` llamaba a `self.root.update_idletasks()` justo antes de mostrar la ventana, para forzar que todo el trabajo de renderizado pendiente terminara antes de quitar el letrero de "Cargando...". Esa llamada es **bloqueante y síncrona** — obliga a Tcl/Tk a vaciar *toda* su cola de tareas pendientes de una sola vez, sin importar cuánto tarde, y mientras tanto Windows marca la ventana como "Sin respuesta". Quitar esa llamada (dejar que `mainloop()` procese la misma cola de forma incremental, intercalada con el bombeo normal de mensajes) eliminó el freeze por completo: la ventana queda respondiendo desde el primer segundo. **Regla dura de ahora en adelante: nunca llamar a `root.update()`/`root.update_idletasks()` de forma síncrona en el camino de arranque** — ver el comentario en `app.py::TimerMeetApp.__init__`.
+
+De paso, esta versión responde a otra causa de lentitud: el archivo de datos crecía sin límite porque nada purgaba reuniones pasadas ya notificadas. Se agregó `timermeet_app/retention.py` (ver requisito funcional #12 abajo) que elimina esas reuniones "muertas" con una ventana de gracia de 7 días, revisado una vez por hora y también al arrancar.
 
 ## Technical Constraints
 
@@ -51,6 +57,7 @@ Al probar `v2.0.0` con datos reales (41 reuniones), la ventana tardaba entre 20 
 9. Botón de donación "Cómprame una cerveza" enlazando a PayPal (`https://www.paypal.com/donate/?hosted_button_id=ZABFRXC2P3JQN`).
 10. Interfaz completa en español e inglés, con selector de idioma que recuerda la preferencia entre sesiones (`data/settings.json`).
 11. Persistencia resiliente ante múltiples PCs sincronizadas por OneDrive: al guardar, se relee el disco y se fusiona con la memoria (gana el registro con `updatedAt` más reciente; `reminderSent`/`startSent` siempre se combinan con OR para no repetir una alarma ya silenciada en otra sesión); se refresca desde disco periódicamente y al recuperar el foco de la ventana.
+12. Retención automática (`timermeet_app/retention.py`): una reunión se elimina del archivo solo si ya pasó, sus dos avisos (`reminderSent` y `startSent`) ya se dispararon, y han pasado al menos 7 días desde entonces. Nunca se purga si algún aviso sigue pendiente (evita perder recordatorios silenciosamente) ni la ocurrencia más reciente de una serie recurrente (el motor de renovación la necesita como ancla). Se revisa al arrancar y luego una vez por hora.
 
 ## Non-Functional Requirements
 
@@ -73,6 +80,8 @@ Al probar `v2.0.0` con datos reales (41 reuniones), la ventana tardaba entre 20 
 - Dos instancias en PCs distintas sincronizadas por OneDrive convergen: una reunión creada en una aparece en la otra tras la resincronización periódica o al recuperar el foco, sin que ninguna borre los cambios de la otra.
 - Un enlace de Teams que no empiece con `http://`/`https://` se rechaza al guardar y no se abre desde ningún lado de la interfaz.
 - `TimerMeet.exe` arranca desde la raíz del repo usando `computer_pc_10894.ico` como ícono, con `assets/audio/` y `data/` presentes junto al ejecutable.
+- La ventana responde a eventos de Windows (no aparece "Sin respuesta") durante todo el arranque, incluso con decenas de reuniones guardadas.
+- Una reunión pasada con ambos avisos ya disparados desaparece del archivo después de 7 días; una con algún aviso pendiente (aunque sea vieja) nunca desaparece sola.
 
 ## SDD Workflow
 

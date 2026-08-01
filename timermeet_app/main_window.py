@@ -644,18 +644,19 @@ class MainWindow:
             card, text=meeting.title or "-", font=(FONT_FAMILY, 14, "bold"), anchor="w",
             bg=palette["card_bg"], fg=palette["title_fg"],
         ).grid(row=1, column=0, sticky="ew", padx=12)
+
+        # Countdown + recurrence share one line (instead of two separate
+        # labels) -- one less widget per card and a less cluttered card.
+        detail_text = card_data.countdown_text
+        if card_data.recurrence_text:
+            detail_text = f"{detail_text}  ·  {card_data.recurrence_text}"
         tk.Label(
-            card, text=card_data.countdown_text, anchor="w", bg=palette["card_bg"], fg=palette["muted_fg"],
+            card, text=detail_text, anchor="w", bg=palette["card_bg"], fg=palette["muted_fg"],
             font=(FONT_FAMILY, 10),
         ).grid(row=2, column=0, sticky="ew", padx=12, pady=(2, 0))
-        if card_data.recurrence_text:
-            tk.Label(
-                card, text=card_data.recurrence_text, anchor="w", font=(FONT_FAMILY, 10),
-                bg=palette["card_bg"], fg=palette["recurrence_fg"],
-            ).grid(row=3, column=0, sticky="ew", padx=12, pady=(2, 0))
 
         actions = tk.Frame(card, bg=palette["card_bg"])
-        actions.grid(row=4, column=0, sticky="ew", padx=12, pady=(6, 10))
+        actions.grid(row=3, column=0, sticky="ew", padx=12, pady=(6, 10))
         _button(
             actions, i18n.t("openTeams", self.language), lambda mid=meeting.id: self.callbacks.on_open_link(mid),
             palette["button_bg"], palette["button_fg"], palette["button_hover"],

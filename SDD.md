@@ -2,11 +2,11 @@
 
 ## Product Goal
 
-Recordar al usuario sus reuniones de Microsoft Teams con avisos visibles, sonoros y persistentes, sin depender de que un navegador permanezca abierto. La versión activa (`2.6.0`) es una app de escritorio en Python (Tkinter puro); la versión `1.3.0` en PHP/JS queda congelada en `legacy-php/` como referencia.
+Recordar al usuario sus reuniones de Microsoft Teams con avisos visibles, sonoros y persistentes, sin depender de que un navegador permanezca abierto. La versión activa (`2.6.1`) es una app de escritorio en Python (Tkinter puro); la versión `1.3.0` en PHP/JS queda congelada en `legacy-php/` como referencia.
 
 ## Current Baseline
 
-- Versión actual: `2.6.0` (Python, escritorio).
+- Versión actual: `2.6.1` (Python, escritorio).
 - Punto de entrada: [timermeet.py](./timermeet.py).
 - Paquete de la app: [timermeet_app/](./timermeet_app/) (`models.py`, `recurrence.py`, `retention.py`, `storage.py`, `audio.py`, `notifications.py`, `alarm_ui.py`, `main_window.py`, `app.py`, `i18n.py`, `security.py`, `tray_icon.py`).
 - Persistencia: archivo compartido [data/meetings.json](./data/meetings.json) (mismo esquema que la versión PHP; se lee y escribe con fusión ante posibles ediciones desde otra PC vía OneDrive, ver `timermeet_app/storage.py`).
@@ -122,6 +122,14 @@ El usuario reportó que la UI seguía sintiéndose lenta, en particular que maxi
 
 **Costo de la nueva dependencia, medido y mitigado:** `pystray` es minúsculo (0.2MB/26 archivos), pero depende de `Pillow` para cargar la imagen del ícono, y por defecto el hook de PyInstaller para Pillow empaqueta los ~47 módulos `PIL.*ImagePlugin` (JPEG, TIFF, WEBP, etc.), sumando ~19MB al `.exe` de un solo archivo. Medido en una comparación A/B controlada (mismo momento, misma carga del sistema): esto agregó ~0.8-1.1 segundos al arranque, suficiente para poner en riesgo el límite de 5 segundos. Como esta app solo necesita abrir su propio archivo `.ico` (que puede contener cuadros en PNG o BMP), `build_exe.py` ahora excluye explícitamente los ~44 plugins de PIL que no hacen falta (calculado dinámicamente contra la lista real de Pillow, no una lista fija a mano, para que siga siendo correcto si una versión futura de Pillow agrega o renombra plugins) -- esto bajó el `.exe` de ~30.8MB a ~26.0MB y, medido de nuevo en la misma comparación A/B, dejó el arranque prácticamente igual al de antes de agregar el modo bandeja.
 
+## v2.6.1: ventana de alerta duplicada
+
+El usuario reportó (con captura de pantalla) que al disparar un aviso aparecían dos ventanas superpuestas con el mismo contenido -- confuso, parecía un bug de duplicación.
+
+**Causa raíz (no era un bug de duplicación, era diseño):** `AlarmController.notify()` (`timermeet_app/alarm_ui.py`) siempre disparó, a propósito, dos `Toplevel` independientes por cada alerta: el overlay persistente ("Alarma activa", rojo, parpadeante, se re-eleva solo) y además un diálogo modal de un solo disparo ("Recordatorio"/"Inicio", con los mismos textos y botones "Abrir Teams"/"Silenciar"). Era la réplica intencional del diseño "no te lo puedes perder" de la app PHP original (modal + overlay + notificación del navegador). El problema: el diálogo no cubría ningún caso que el overlay no cubriera ya -- el overlay es en todo caso más robusto porque se re-eleva cada 2s (`_relift`) y no puede quedar tapado en silencio, mientras el diálogo es un `grab_set()` de un solo disparo. El resultado visual eran dos ventanas casi idénticas apiladas sin criterio de z-order, con botones duplicados con etiquetas distintas para la misma acción ("Silenciar" vs "Silenciar alarma"), leído por el usuario como un bug.
+
+**La corrección:** se eliminó el diálogo modal (`_show_dialog`) y su estado asociado (`self._dialog`); `notify()` ahora dispara un solo canal visual (el overlay) más el sonido en bucle y el toast nativo best-effort de Windows -- las mismas tres garantías redundantes de "no te lo puedes perder" que antes, sin la cuarta ventana redundante. Se limpiaron las claves de i18n exclusivas del diálogo (`alertDialogOpen`/`alertDialogClose`) y se renombraron las claves de la etiqueta superior, compartidas con el overlay, de `alertDialogReminderTag`/`alertDialogStartTag` a `alertReminderTag`/`alertStartTag` para que el nombre no siga refiriendo a un diálogo que ya no existe. Ningún canal de alerta (sonido, overlay, notificación nativa) perdió funcionalidad; `AlarmController.is_active()` y toda la lógica de bloqueo de modo gadget/bandeja mientras suena una alarma siguen intactas porque dependían solo del overlay, nunca del diálogo.
+
 ## Technical Constraints
 
 - Windows 10/11, Python 3.9+ (probado con 3.12).
@@ -138,7 +146,7 @@ El usuario reportó que la UI seguía sintiéndose lenta, en particular que maxi
 1. Crear, editar y eliminar timers de reuniones (mismos campos que la versión PHP: trabajo, título, fecha/hora, minutos de aviso, sonido, enlace de Teams y notas).
 2. Mostrar la próxima reunión, el próximo aviso y el total de timers; filtrar por trabajo.
 3. Disparar un recordatorio antes del inicio y otro al momento de inicio, cada uno como máximo una vez, con ventanas de "aviso perdido" que marcan el flag sin notificar si el momento ya pasó (evita alarmas fuera de tiempo tras una ausencia larga).
-4. Alarma sonora (5 perfiles) + overlay visual persistente (siempre-encima, parpadeante, se re-eleva si queda tapada) + notificación nativa best-effort, disparados juntos y de forma redundante.
+4. Alarma sonora (5 perfiles) + overlay visual persistente (siempre-encima, parpadeante, se re-eleva si queda tapada) + notificación nativa best-effort, disparados juntos y de forma redundante. Una sola ventana visual por alerta (el overlay); no se duplica en un diálogo modal aparte (ver `timermeet_app/alarm_ui.py`).
 5. Perfiles `Sirena invasiva` y `Sirena de bomberos` usan MP3 locales (`assets/audio/`) vía la API MCI de Windows (`winmm.dll`); si el archivo falla o no carga, cae automáticamente a un tono sintético (`winsound.Beep`) — nunca debe quedar en silencio.
 6. Series repetitivas: diaria, semana laboral (L-V), semanal, quincenal, mensual. "Semana laboral" exige fecha inicial de lunes a viernes.
 7. Motor de renovación semanal: cada serie activa se extiende automáticamente para cubrir ~1 semana adelante, evaluado en cada heartbeat pero con efecto real solo a partir del viernes 18:00 hora local (o al abrir la app después de esa hora). Es idempotente (una segunda pasada no duplica) y nunca crea ocurrencias con fecha pasada.
@@ -184,7 +192,7 @@ El usuario reportó que la UI seguía sintiéndose lenta, en particular que maxi
 - "Gestionar empresas" permite agregar o eliminar una empresa de la lista; eliminar una empresa no modifica ni borra las reuniones ya guardadas con ese nombre, y la lista persiste entre reinicios de la app.
 - Cambiar de idioma no borra la lista de empresas guardada (ni ninguna otra clave de `data/settings.json`).
 - El botón "Salir" cierra la app sin dejar procesos colgados ni perder cambios sin guardar.
-- El modo gadget se puede activar y desactivar repetidamente sin dejar la ventana fuera de la pantalla (el arrastre y la posición inicial siempre quedan dentro de los límites reales del escritorio, incluyendo monitores secundarios); una alarma real disparada durante el modo gadget sigue mostrando el overlay, el diálogo y el sonido con normalidad, y cambiar de modo se rechaza mientras esa alarma esté activa.
+- El modo gadget se puede activar y desactivar repetidamente sin dejar la ventana fuera de la pantalla (el arrastre y la posición inicial siempre quedan dentro de los límites reales del escritorio, incluyendo monitores secundarios); una alarma real disparada durante el modo gadget sigue mostrando el overlay y el sonido con normalidad, y cambiar de modo se rechaza mientras esa alarma esté activa.
 - El botón "Eliminar eventos pasados" borra todos los eventos vencidos de todos los trabajos tras confirmar, y conserva la última ocurrencia de cada serie recurrente.
 - Una reunión borrada (individualmente, por "Eliminar eventos pasados", o por la purga automática) desaparece de la GUI de inmediato y sigue desaparecida después de guardar, recargar el archivo, o reiniciar la app -- nunca reaparece sola.
 - El modo bandeja oculta la ventana y muestra un ícono en la bandeja del sistema; mostrar desde el menú del ícono (o el clic por defecto) restaura la ventana con normalidad, y "Salir" desde ese mismo menú cierra la app sin dejar el ícono ni procesos colgados. Una alarma real disparada en modo bandeja sigue sonando y mostrando el overlay con normalidad, y cambiar a este modo se rechaza mientras esa alarma esté activa.

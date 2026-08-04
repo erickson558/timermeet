@@ -26,7 +26,7 @@ def is_http_url(value: str) -> bool:
     """Return True only for ``http://``/``https://`` URLs.
 
     This is the single allow-list used everywhere a URL might be opened
-    (Teams links, the alarm dialog, the donation button), so no other scheme
+    (Teams links, the alarm overlay, the donation button), so no other scheme
     (``file://``, ``javascript:``, a custom app scheme, ...) is ever handed to
     ``webbrowser.open()``.
     """

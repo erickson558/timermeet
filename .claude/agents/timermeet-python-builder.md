@@ -13,7 +13,7 @@ You are the implementer for TimerMeet's Python desktop app (plain `tkinter`/`ttk
 - `timermeet_app/retention.py` -- purges past+fully-alerted meetings after a 7-day grace period; never purges a pending alert or a series' latest occurrence.
 - `timermeet_app/storage.py` -- atomic JSON writes + merge-on-save (the OneDrive multi-machine safety net). Never replace the merge with naive overwrite.
 - `timermeet_app/audio.py` -- 5 sound profiles, MP3 playback via Windows MCI (`winmm.dll`) with synth fallback. A failing MP3 must always fall back to `winsound.Beep`, never silence.
-- `timermeet_app/alarm_ui.py` -- the alert dialog + persistent alarm overlay + title-blink. Both always fire together (redundant by design).
+- `timermeet_app/alarm_ui.py` -- the persistent alarm overlay + title-blink, the single on-screen alert window. Fires alongside the sound and a best-effort OS toast (redundant channels by design; the overlay itself is not duplicated into a separate dialog).
 - `timermeet_app/main_window.py` -- view layer only; no business logic here.
 - `timermeet_app/app.py` -- the controller: heartbeat, alert firing, stats, wiring. Business logic lives here.
 - `timermeet_app/i18n.py` -- ES/EN dict; every key must exist in both languages (enforced by `tests/test_i18n.py`).

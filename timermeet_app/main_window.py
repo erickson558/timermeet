@@ -706,10 +706,10 @@ class MainWindow:
         reliably stick, and because Tk's event loop is single-threaded, the
         brief "root not mapped" window is invisible to the rest of the app --
         no heartbeat tick, alert, or toast can run in the middle of this one
-        synchronous call. AlarmController's overlay/dialog need no special
-        handling here: they're independent, non-transient Toplevels (see
+        synchronous call. AlarmController's overlay needs no special
+        handling here: it's an independent, non-transient Toplevel (see
         alarm_ui.py) whose own visibility never depended on root's mapped
-        state, size, or decoration -- only on their own attributes."""
+        state, size, or decoration -- only on its own attributes."""
         if is_gadget:
             self._pre_gadget_geometry = self.root.geometry()
             target_x, target_y = self._resolve_gadget_position(x, y)

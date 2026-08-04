@@ -95,8 +95,6 @@ translations = {
         "reminderAt": "Aviso",
         "alertReminderTitle": "Recordatorio de reunión",
         "alertStartTitle": "La reunión empieza ahora",
-        "alertDialogOpen": "Abrir Teams",
-        "alertDialogClose": "Silenciar",
         "saved": "Timer guardado.",
         "updated": "Timer actualizado.",
         "deleted": "Timer eliminado.",
@@ -115,8 +113,8 @@ translations = {
         "browserNotificationUnsupported": "Este equipo no soporta notificaciones nativas; seguirás recibiendo la alarma sonora y visual.",  # desktop-adapted
         "notificationsGrantedToast": "Notificación nativa enviada correctamente.",  # desktop-adapted
         "notificationsDeniedToast": "No se pudo mostrar la notificación nativa en este equipo.",  # desktop-adapted
-        "alertDialogReminderTag": "Recordatorio",
-        "alertDialogStartTag": "Inicio",
+        "alertReminderTag": "Recordatorio",
+        "alertStartTag": "Inicio",
         "footerWorkLabel": "Trabajo",
         "footerDateLabel": "Fecha",
         "footerReminderLabel": "Avisar antes",
@@ -247,8 +245,6 @@ translations = {
         "reminderAt": "Reminder",
         "alertReminderTitle": "Meeting reminder",
         "alertStartTitle": "Meeting starts now",
-        "alertDialogOpen": "Open Teams",
-        "alertDialogClose": "Silence",
         "saved": "Timer saved.",
         "updated": "Timer updated.",
         "deleted": "Timer deleted.",
@@ -267,8 +263,8 @@ translations = {
         "browserNotificationUnsupported": "This computer does not support native notifications; you'll still get the sound and visual alarm.",  # desktop-adapted
         "notificationsGrantedToast": "Native notification sent successfully.",  # desktop-adapted
         "notificationsDeniedToast": "Could not show the native notification on this computer.",  # desktop-adapted
-        "alertDialogReminderTag": "Reminder",
-        "alertDialogStartTag": "Start",
+        "alertReminderTag": "Reminder",
+        "alertStartTag": "Start",
         "footerWorkLabel": "Job",
         "footerDateLabel": "Date",
         "footerReminderLabel": "Remind before",

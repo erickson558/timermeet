@@ -1,9 +1,14 @@
-"""Alarm presentation: the one-shot alert dialog + the persistent, must-dismiss
-alarm overlay, plus the title-bar blink. Both windows are shown together
-whenever a meeting's reminder or start alert fires (see
-``app.py::TimerMeetApp._notify_meeting``), mirroring the original web app's
-redundant "can't miss it" design (modal dialog + full-page overlay + OS
-notification, all at once, see ``legacy-php/assets/app.js::notifyMeeting``).
+"""Alarm presentation: the persistent, must-dismiss alarm overlay plus the
+title-bar blink. Shown whenever a meeting's reminder or start alert fires
+(see ``app.py::TimerMeetApp._notify_meeting``), alongside the alarm sound and
+a best-effort OS notification (see ``notifications.py``) -- three redundant
+"can't miss it" channels per alert, same intent as the original web app's
+modal dialog + full-page overlay + OS notification combo (see
+``legacy-php/assets/app.js::notifyMeeting``), minus the modal dialog: a
+second on-screen window duplicating the overlay's own title/body/buttons
+added visual clutter without covering any case the overlay didn't already
+handle (the overlay re-lifts itself every ``_RELIFT_INTERVAL_MS`` so it can't
+be silently buried, which is strictly stronger than a one-shot modal grab).
 
 Built with plain ``tkinter`` (not CustomTkinter) so an alarm firing for the
 first time is never delayed by CustomTkinter's deferred widget-realization
@@ -45,16 +50,15 @@ def _alarm_button(parent, text: str, command, bg: str, hover: str, state: str = 
 
 class AlarmController:
     """Owns the single active alarm (if any) for the whole app: the sound
-    player, the alert dialog, the persistent overlay, and the title-bar
-    blink. Firing a new alert always replaces whatever is currently active
-    rather than stacking, matching the original app."""
+    player, the persistent overlay, and the title-bar blink. Firing a new
+    alert always replaces whatever is currently active rather than stacking,
+    matching the original app."""
 
     def __init__(self, root: tk.Tk, get_language: Callable[[], str]):
         self._root = root
         self._get_language = get_language
         self._player = audio.AlarmPlayer()
 
-        self._dialog: Optional[tk.Toplevel] = None
         self._overlay: Optional[tk.Toplevel] = None
         self._flash_container = None
         self._flash_state = False
@@ -84,21 +88,20 @@ class AlarmController:
         """One-shot preview for the form's "Probar sonido" button. Reuses
         the same player as a live alarm, so -- exactly like the original
         `testSelectedSound()` -- previewing a sound while a real alarm is
-        ringing stops that alarm's audio too (the overlay/dialog stay open,
-        just silently, until dismissed)."""
+        ringing stops that alarm's audio too (the overlay stays open, just
+        silently, until dismissed)."""
         self._player.play(profile_id, "reminder", loop=False)
 
     def notify(self, meeting, mode: str, on_dismiss: Callable[[], None]) -> None:
-        """Fire all three channels for one meeting: sound + overlay, the
-        one-shot dialog, and a best-effort native OS toast. `mode` is
-        "reminder" or "start"."""
+        """Fire all three channels for one meeting: sound + overlay, and a
+        best-effort native OS toast. `mode` is "reminder" or "start"."""
         self.dismiss(run_callback=False)
         self._on_dismiss = on_dismiss
         language = self._get_language()
         self._current_url = meeting.teamsUrl if security.is_http_url(meeting.teamsUrl) else ""
 
         title_key = "alertReminderTitle" if mode == "reminder" else "alertStartTitle"
-        tag_key = "alertDialogReminderTag" if mode == "reminder" else "alertDialogStartTag"
+        tag_key = "alertReminderTag" if mode == "reminder" else "alertStartTag"
         title_text = i18n.t(title_key, language)
         body_text = f"{meeting.workName} · {meeting.title}".strip(" ·")
         when = meeting.local_datetime()
@@ -106,7 +109,6 @@ class AlarmController:
 
         self._player.play(meeting.soundProfile, mode, loop=True)
         self._show_overlay(language, tag_key, title_text, body_text, meta_text)
-        self._show_dialog(language, tag_key, title_text, body_text)
         self._start_title_blink(title_text)
         notifications.notify(title_text, body_text)
 
@@ -131,17 +133,6 @@ class AlarmController:
                 except Exception:  # nosec B110
                     pass
                 setattr(self, attr, None)
-
-        if self._dialog is not None:
-            try:
-                self._dialog.grab_release()
-            except Exception:  # nosec B110
-                pass
-            try:
-                self._dialog.destroy()
-            except Exception:  # nosec B110
-                pass
-            self._dialog = None
 
         if self._overlay is not None:
             try:
@@ -207,40 +198,6 @@ class AlarmController:
         self._flash_state = False
         self._flash_overlay()
         self._relift()
-
-    def _show_dialog(self, language, tag_key, title_text, body_text) -> None:
-        dialog = tk.Toplevel(self._root)
-        dialog.title(i18n.t(tag_key, language))
-        dialog.geometry("420x220")
-        dialog.configure(bg="#1c1f26")
-        dialog.attributes("-topmost", True)
-        dialog.protocol("WM_DELETE_WINDOW", self.dismiss)
-
-        tk.Label(
-            dialog, text=i18n.t(tag_key, language), font=("Segoe UI", 12, "bold"), bg="#1c1f26", fg="#f2f3f5"
-        ).pack(pady=(20, 4))
-        tk.Label(
-            dialog, text=title_text, font=("Segoe UI", 16, "bold"), wraplength=360, bg="#1c1f26", fg="#f2f3f5"
-        ).pack(pady=(0, 8))
-        tk.Label(
-            dialog, text=body_text, wraplength=360, bg="#1c1f26", fg="#f2f3f5", font=("Segoe UI", 10)
-        ).pack(pady=(0, 16))
-
-        buttons = tk.Frame(dialog, bg="#1c1f26")
-        buttons.pack(pady=(0, 16))
-        _alarm_button(
-            buttons, i18n.t("alertDialogOpen", language), self.open_link, _BUTTON_BG, _BUTTON_HOVER,
-            state="normal" if self._current_url else "disabled",
-        ).pack(side="left", padx=8)
-        _alarm_button(
-            buttons, i18n.t("alertDialogClose", language), self.dismiss, "#2a2e37", "#343a45",
-        ).pack(side="left", padx=8)
-
-        try:
-            dialog.grab_set()
-        except Exception:  # nosec B110 - modal grab is a nicety, not required for the alarm to work
-            pass
-        self._dialog = dialog
 
     # -- periodic effects ------------------------------------------------------
 

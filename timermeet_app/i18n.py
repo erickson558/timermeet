@@ -167,6 +167,19 @@ translations = {
         "trayShowMenuItem": "Mostrar TimerMeet",
         "trayModeToast": "TimerMeet sigue activo en la bandeja del sistema.",
         "trayModeUnavailableToast": "No se pudo activar el modo bandeja en este equipo.",
+        "calendarViewButton": "Vista calendario",
+        "listViewButton": "Vista de lista",
+        "calendarPrevMonthButton": "‹",
+        "calendarNextMonthButton": "›",
+        "calendarTodayButton": "Hoy",
+        "calendarWeekdayMon": "Lun",
+        "calendarWeekdayTue": "Mar",
+        "calendarWeekdayWed": "Mié",
+        "calendarWeekdayThu": "Jue",
+        "calendarWeekdayFri": "Vie",
+        "calendarWeekdaySat": "Sáb",
+        "calendarWeekdaySun": "Dom",
+        "calendarMoreLabel": "+{count} más",
     },
     "en": {
         "appTitle": "TimerMeet",
@@ -317,6 +330,19 @@ translations = {
         "trayShowMenuItem": "Show TimerMeet",
         "trayModeToast": "TimerMeet is still running in the system tray.",
         "trayModeUnavailableToast": "Could not enable tray mode on this computer.",
+        "calendarViewButton": "Calendar view",
+        "listViewButton": "List view",
+        "calendarPrevMonthButton": "‹",
+        "calendarNextMonthButton": "›",
+        "calendarTodayButton": "Today",
+        "calendarWeekdayMon": "Mon",
+        "calendarWeekdayTue": "Tue",
+        "calendarWeekdayWed": "Wed",
+        "calendarWeekdayThu": "Thu",
+        "calendarWeekdayFri": "Fri",
+        "calendarWeekdaySat": "Sat",
+        "calendarWeekdaySun": "Sun",
+        "calendarMoreLabel": "+{count} more",
     },
 }
 
@@ -360,3 +386,27 @@ def format_datetime_display(value: datetime, language: str = DEFAULT_LANGUAGE) -
     if language == "es":
         return f"{value.day} {month_name} {value.year}, {value.strftime('%H:%M')}"
     return f"{month_name} {value.day}, {value.year}, {value.strftime('%H:%M')}"
+
+
+# Separate from `_MONTHS` above on purpose: that list is deliberately
+# abbreviated ("ago") for the alarm's compact date/time line, while the
+# calendar view's "Mes Año" navigation header (e.g. "Agosto 2026") reads
+# better unabbreviated -- same "small lookup table beside the main dict"
+# pattern as `_MONTHS`, just spelled out in full.
+_MONTH_NAMES_FULL = {
+    "es": [
+        "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+        "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
+    ],
+    "en": [
+        "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December",
+    ],
+}
+
+
+def format_month_year(year: int, month: int, language: str = DEFAULT_LANGUAGE) -> str:
+    """"Mes Año" header for the monthly calendar view, e.g. "Agosto 2026" /
+    "August 2026"."""
+    names = _MONTH_NAMES_FULL.get(language, _MONTH_NAMES_FULL[DEFAULT_LANGUAGE])
+    return f"{names[month - 1]} {year}"

@@ -11,7 +11,7 @@ section) — it must behave identically here.
 from __future__ import annotations
 
 import calendar
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional
 
 from . import models
@@ -173,6 +173,32 @@ def extend_series_if_needed(
             meeting.seriesSize = final_size
 
     return created_total
+
+
+def month_grid(year: int, month: int, firstweekday: int = 0) -> List[List[date]]:
+    """Return a fixed 6x7 grid of `date` objects for the monthly calendar
+    view, padded with leading/trailing days from the adjacent months.
+
+    `calendar.Calendar.monthdatescalendar` already does the leading/trailing
+    padding and returns real `date` objects (unlike `monthdayscalendar`,
+    which returns bare ints and zeroes) -- but it only guarantees *at least*
+    4 rows, giving back 4 or 5 rows for most months and 6 only when the
+    month's length/start-weekday combination needs it. The calendar view
+    grids a fixed number of day-cell widgets once at startup (see
+    `main_window.py`) and reuses them across months via `.configure()`, so a
+    row count that changes between months would mean showing/hiding a whole
+    grid row -- exactly the kind of layout jump v2.6.0 already spent effort
+    eliminating from the meeting list. Padding every month out to exactly 6
+    rows keeps the widget count, and the cell size, constant regardless of
+    which month is on screen. `firstweekday=0` (Monday) matches the
+    `Mon=0...Sun=6` convention `_is_weekend`/`validate_meeting` already use
+    elsewhere in this module.
+    """
+    weeks = calendar.Calendar(firstweekday).monthdatescalendar(year, month)
+    while len(weeks) < 6:
+        next_day = weeks[-1][-1] + timedelta(days=1)
+        weeks.append([next_day + timedelta(days=offset) for offset in range(7)])
+    return weeks[:6]
 
 
 def run_weekly_series_renewal(meetings: List[models.Meeting], now: Optional[datetime] = None) -> int:

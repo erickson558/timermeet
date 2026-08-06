@@ -2,13 +2,14 @@
 
 ## Product Goal
 
-Recordar al usuario sus reuniones de Microsoft Teams con avisos visibles, sonoros y persistentes, sin depender de que un navegador permanezca abierto. La versión activa (`2.6.1`) es una app de escritorio en Python (Tkinter puro); la versión `1.3.0` en PHP/JS queda congelada en `legacy-php/` como referencia.
+Recordar al usuario sus reuniones de Microsoft Teams con avisos visibles, sonoros y persistentes, sin depender de que un navegador permanezca abierto. La versión activa (`2.7.0`) es una app de escritorio en Python (Tkinter puro); la versión `1.3.0` en PHP/JS queda congelada en `legacy-php/` como referencia.
 
 ## Current Baseline
 
-- Versión actual: `2.6.1` (Python, escritorio).
+- Versión actual: `2.7.0` (Python, escritorio).
 - Punto de entrada: [timermeet.py](./timermeet.py).
-- Paquete de la app: [timermeet_app/](./timermeet_app/) (`models.py`, `recurrence.py`, `retention.py`, `storage.py`, `audio.py`, `notifications.py`, `alarm_ui.py`, `main_window.py`, `app.py`, `i18n.py`, `security.py`, `tray_icon.py`).
+- Paquete de la app: [timermeet_app/](./timermeet_app/) (`models.py`, `recurrence.py`, `retention.py`, `storage.py`, `audio.py`, `notifications.py`, `alarm_ui.py`, `main_window.py`, `app.py`, `i18n.py`, `security.py`, `tray_icon.py`) -- ningún archivo nuevo en `v2.7.0`; la vista de calendario vive en los mismos módulos existentes.
+- `v2.7.0` agrega `recurrence.py::month_grid` como nueva función pública (pura, sin `tkinter`, ver su sección más abajo) y nuevas claves de i18n exclusivas de la vista de calendario (`calendarViewButton`, `listViewButton`, `calendarPrevMonthButton`, `calendarNextMonthButton`, `calendarTodayButton`, `calendarWeekdayMon`...`calendarWeekdaySun`, `calendarMoreLabel`) -- sin cambios al esquema de `Meeting` ni a `storage.py`.
 - Persistencia: archivo compartido [data/meetings.json](./data/meetings.json) (mismo esquema que la versión PHP; se lee y escribe con fusión ante posibles ediciones desde otra PC vía OneDrive, ver `timermeet_app/storage.py`).
 - Preferencias locales: `data/settings.json` (idioma, lista de empresas).
 - Pruebas: [tests/](./tests/) (`unittest`).
@@ -129,6 +130,85 @@ El usuario reportó (con captura de pantalla) que al disparar un aviso aparecía
 **Causa raíz (no era un bug de duplicación, era diseño):** `AlarmController.notify()` (`timermeet_app/alarm_ui.py`) siempre disparó, a propósito, dos `Toplevel` independientes por cada alerta: el overlay persistente ("Alarma activa", rojo, parpadeante, se re-eleva solo) y además un diálogo modal de un solo disparo ("Recordatorio"/"Inicio", con los mismos textos y botones "Abrir Teams"/"Silenciar"). Era la réplica intencional del diseño "no te lo puedes perder" de la app PHP original (modal + overlay + notificación del navegador). El problema: el diálogo no cubría ningún caso que el overlay no cubriera ya -- el overlay es en todo caso más robusto porque se re-eleva cada 2s (`_relift`) y no puede quedar tapado en silencio, mientras el diálogo es un `grab_set()` de un solo disparo. El resultado visual eran dos ventanas casi idénticas apiladas sin criterio de z-order, con botones duplicados con etiquetas distintas para la misma acción ("Silenciar" vs "Silenciar alarma"), leído por el usuario como un bug.
 
 **La corrección:** se eliminó el diálogo modal (`_show_dialog`) y su estado asociado (`self._dialog`); `notify()` ahora dispara un solo canal visual (el overlay) más el sonido en bucle y el toast nativo best-effort de Windows -- las mismas tres garantías redundantes de "no te lo puedes perder" que antes, sin la cuarta ventana redundante. Se limpiaron las claves de i18n exclusivas del diálogo (`alertDialogOpen`/`alertDialogClose`) y se renombraron las claves de la etiqueta superior, compartidas con el overlay, de `alertDialogReminderTag`/`alertDialogStartTag` a `alertReminderTag`/`alertStartTag` para que el nombre no siga refiriendo a un diálogo que ya no existe. Ningún canal de alerta (sonido, overlay, notificación nativa) perdió funcionalidad; `AlarmController.is_active()` y toda la lógica de bloqueo de modo gadget/bandeja mientras suena una alarma siguen intactas porque dependían solo del overlay, nunca del diálogo.
+
+## v2.7.0: Vista de calendario mensual
+
+**Estado: implementada y verificada.** Esta sección se escribió *antes* de tocar código, como exige el flujo de este proyecto; el resto del apartado (requisitos, restricciones, no-goals, criterios de aceptación) describía la especificación cerrada y sigue vigente sin cambios porque es exactamente lo que se construyó. Lo que sí cambia aquí, ahora que la implementación terminó: las "Decisiones pendientes" del borrador quedaron resueltas (ver más abajo) y se agrega un resumen de la revisión adversarial que se corrió antes de cerrar la versión. Pasó `python -m unittest discover -s tests` (77/77) y una revisión de seguridad (`bandit` + `pip-audit`, ambos limpios; sin dependencias nuevas, sin E/S/`subprocess`/URLs nuevas).
+
+**Objetivo:** una segunda forma de ver los timers guardados -- cuadrícula mensual al estilo Outlook/Teams -- como alternativa a la lista actual, sin duplicar el modelo de datos ni la lógica de edición.
+
+**Patrón de acceso (reutiliza el mecanismo de v2.5.0, no inventa uno nuevo):** `main_window.py` gana un tercer marco hermano, `calendar_view`, en la misma celda de grid de `root` que ya comparten `full_view` y `gadget_view` -- el mismo esquema de "solo uno gridded a la vez", construido una sola vez y de forma eager (como `gadget_view`), nunca un `Toplevel` ni un segundo `Tk()`. Un botón nuevo en el encabezado de `full_view` ("Vista calendario") y un botón espejo en el encabezado de `calendar_view` ("Vista de lista") comparten un solo callback de toggle (`on_toggle_calendar_view`), igual que "Modo gadget"/"Completo" comparten hoy `on_toggle_gadget_mode`.
+
+**Ajuste necesario en `set_gadget_mode` (encontrado leyendo el código actual, no era obvio de antemano):** hoy `set_gadget_mode(False)` regresa siempre a `full_view`. Con un tercer modo primario, eso es un bug real en potencia: entrar a modo gadget desde el calendario y salir debe regresar al calendario, no saltar a la lista. Hay que rastrear cuál vista primaria (`"list"` o `"calendar"`) estaba activa antes de entrar a modo gadget y restaurar exactamente esa. El modo bandeja no necesita ningún cambio: `handle_enter_tray_mode`/`handle_restore_from_tray` solo hacen `withdraw()`/`_force_show_window()` y nunca tocan qué marco está gridded, así que ya es compatible con un tercer marco sin tocar `tray_icon.py`.
+
+**Requisitos de UI:**
+- Cuadrícula fija de 6 filas × 7 columnas (42 celdas), semana de lunes a domingo, siempre 6 filas sin importar cuántas necesite el mes real -- evita que la altura de fila cambie al navegar entre meses; se rellena con días del mes siguiente si el mes real cabe en 4 o 5 filas.
+- Encabezado de navegación: "‹" (mes anterior), "›" (mes siguiente), etiqueta "Mes Año" (ej. "Agosto 2026"), botón "Hoy" que regresa al mes que contiene la fecha actual sin importar qué tan lejos se haya navegado.
+- Fila de encabezado con las 7 abreviaturas de día (lun-dom / Mon-Sun).
+- El día de hoy se resalta con color de acento solo cuando el mes visible es el mes calendario actual; ningún día se resalta como "hoy" al ver otro mes.
+- Días fuera del mes visible (celdas iniciales/finales de relleno) usan estilo visualmente atenuado (`MUTED`/`SUBTLE` ya existentes), pero siguen mostrando sus reuniones y siguen siendo clicables igual que un día del mes actual -- es una reunión real con fecha real, no hay motivo para deshabilitarla solo por caer en una celda de relleno.
+- Celda sin reuniones: no muestra ninguna fila de entrada.
+- Celda con reuniones: hasta 3 entradas (hora + título truncado, con la misma pastilla de color por trabajo que ya usa la lista vía `_color_for_work_name`), ordenadas por hora; la 4ª reunión en adelante se resume en una etiqueta "+N más" no interactiva en esta iteración.
+
+**Requisitos de interacción:**
+- Clic en una reunión específica dentro de una celda: llama el mismo `handle_edit(meeting_id)` que ya usa la lista (sin cambios), cambia la vista activa de vuelta a lista, y el formulario aparece ya poblado con esa reunión -- idéntico a pulsar "Editar" en la tarjeta de esa misma reunión en la lista.
+- Clic en el fondo de una celda (con o sin reuniones), fuera de cualquier entrada específica: no hace nada en esta iteración.
+- Clic en la etiqueta "+N más": no hace nada en esta iteración (no interactiva).
+
+**Requisitos de datos:**
+- `recurrence.py` **no** expone hoy ninguna función para "calcular todas las ocurrencias de una serie en un rango de fechas", y no la necesita para esto: cada ocurrencia de una serie recurrente ya es un `Meeting` materializado e independiente en `self.meetings`/`data/meetings.json` (creado por `_save_new`/`extend_series_if_needed`), con su propio campo `datetime` concreto. Mostrar el calendario es un filtrado/agrupado simple de `self.meetings` por fecha, no una expansión de reglas de recurrencia.
+- Limitación de arquitectura que esto hereda (se documenta aquí, no se resuelve en este alcance): el motor de renovación semanal (`run_weekly_series_renewal`) solo mantiene materializadas las ocurrencias de una serie hasta ~9 días después del viernes 18:00 más reciente, no un mes calendario completo hacia adelante. Navegar el calendario a un mes que empiece a más de ~2 semanas de distancia mostrará series recurrentes con pocas o ninguna ocurrencia todavía materializada, aunque la serie "en teoría" se repita ese mes. El calendario hace esta limitación mucho más visible que la lista actual, pero no la causa. Se decide explícitamente NO agregar generación de ocurrencias "virtuales"/proyectadas solo para previsualizar -- ver decisiones resueltas.
+- Función nueva y pura agregada en `recurrence.py` (sin `tkinter`, con pruebas unitarias en `tests/test_recurrence.py`): `month_grid(year: int, month: int, firstweekday: int = 0) -> List[List[date]]` -- envuelve `calendar.Calendar(firstweekday).monthdatescalendar(year, month)` (`recurrence.py` ya importa `calendar`) y rellena hasta exactamente 6 filas cuando el mes real cabe en 4 o 5. `firstweekday=0` (lunes) por consistencia con el resto del módulo, que ya usa `Mon=0…Sun=6` en `_is_weekend`/`validate_meeting`; se decidió lunes para ambos idiomas, sin excepción de domingo-primero para inglés (ver decisiones resueltas).
+- Agrupar reuniones por fecha (`Dict[date, List[Meeting]]` para las fechas visibles) es una función nueva y simple en `app.py` (no en `recurrence.py`, no hay aritmética de calendario ahí) -- mismo patrón que ya usan `_visible_meetings`/`_work_names` en ese archivo.
+- El cálculo de las celdas debe correr solo cuando la vista de calendario esté activa -- igual que `keep_gadget_on_top` es no-op si el modo gadget no lo está. Recalcularlo en cada heartbeat de 1 segundo mientras el usuario ve la lista o el gadget sería trabajo desperdiciado.
+- Sin cambios al esquema de `Meeting` ni a `storage.py`: esta función solo lee `self.meetings`, nunca escribe una forma nueva de dato; la fusión merge-on-save no se toca.
+
+**Restricciones heredadas, sin excepción:**
+- Solo `tkinter`/`ttk` plano (nada de CustomTkinter); el único widget ttk sigue siendo el combobox de empresa.
+- Las 42 celdas se construyen una sola vez, eager, junto con `full_view`/`gadget_view` -- igual que la lista de reuniones desde v2.6.0, las celdas y sus filas de entrada se reutilizan entre refrescos (`.configure()`/`.grid()`/`.grid_remove()`), nunca se destruyen y reconstruyen en cada heartbeat; solo un cambio de idioma fuerza una reconstrucción completa, igual que en la lista.
+- Ningún `root.update()`/`root.update_idletasks()` síncrono en la construcción ni en el refresco del calendario.
+- Construir 42 celdas × ~6 widgets cada una (~250 widgets) de una vez es un costo fijo nuevo mayor que cualquier otro panel existente (encabezado ~10, formulario ~30) -- debe remedirse el arranque del `.exe` (límite duro de 5s, v2.4.0) después de implementar; si regresiona, construir `calendar_view` de forma perezosa (al primer toggle) en vez de eager.
+- No debe romper la vista de lista ni el modo gadget existentes; el modo bandeja ya es compatible sin cambios.
+
+**No-goals de esta iteración (quedan en el backlog):**
+- Vista semanal con franjas horarias (Outlook "day/week view").
+- Arrastrar una reunión en la cuadrícula para reprogramarla (drag-to-reschedule).
+- Ver más de un mes a la vez / imprimir la vista de calendario.
+- Filtrar el calendario por trabajo/empresa (ignora el filtro de la lista; siempre muestra todas las reuniones).
+- Clic en una celda vacía para crear una reunión nueva pre-llenada con esa fecha.
+- Popover/lista de detalle del día para alcanzar las reuniones ocultas detrás de "+N más".
+- Generar ocurrencias "virtuales" (no materializadas) de una serie recurrente solo para previsualizar meses futuros -- el calendario siempre refleja únicamente lo que ya existe en `self.meetings`.
+
+**Decisiones resueltas (ya no pendientes -- se implementaron con el valor por defecto que este borrador asumía, sin sorpresas):**
+1. `calendar_view` lleva su propio encabezado completo (Salir/Idioma/Donar/Gadget/Bandeja, reutilizando `_build_header`, ahora parametrizado para poder construirse dos veces con sus propios widgets por instancia).
+2. Semana de lunes a domingo para ambos idiomas (`month_grid(firstweekday=0)`), sin excepción de domingo-primero para inglés.
+3. Las reuniones más allá de la 3ª por día quedan inalcanzables desde el calendario en esta iteración (solo "+N más", no interactivo); cambiar a la vista de lista sigue siendo la única forma de editarlas.
+4. El calendario ignora el filtro de trabajo/empresa de la lista y siempre muestra todas las reuniones.
+5. Las 42 celdas se construyen de forma eager al arranque, junto con `full_view`/`gadget_view`. El arranque del `.exe` debe re-medirse tras compilarlo con este cambio (ver criterio de aceptación más abajo); si regresiona por encima de 5s, la palanca ya identificada es construir `calendar_view` de forma perezosa (al primer toggle) en vez de eager.
+
+**Revisión adversarial (3 paneles independientes, con intento de refutación por hallazgo -- mismo protocolo que v2.5.0):** se encontraron y corrigieron los siguientes problemas reales antes de cerrar esta versión, ninguno detectado por la corrida inicial de la batería de pruebas:
+1. **Fuga real de comandos Tcl:** `render_calendar` hacía `.bind("<Button-1>", ...)` con una closure nueva sobre cada entrada visible en **cada** heartbeat de 1 segundo mientras la vista de calendario estuviera abierta; en esta versión de Tk, un `.bind()` repetido sobre el mismo widget+secuencia no libera el comando anterior, así que cada segundo dejaba registrado un comando Tcl más, sin límite, mientras el calendario quedara en pantalla. Corregido con el mismo patrón de "no re-renderizar si nada visible cambió" que `_refresh_all` ya usa para la lista: una firma (`_last_rendered_calendar_signature`) captura todo lo que una celda puede mostrar (día/pertenencia al mes/resaltado de hoy/cada entrada con su id+hora+título+color/conteo de overflow) más el idioma, y `render_calendar` solo se llama de nuevo cuando esa firma cambia.
+2. **Hueco en el filtro por modo:** el cálculo de celdas (`_refresh_calendar`) solo debía correr con la vista de calendario activa, pero no consideraba que el modo gadget es una re-piel ortogonal de la misma ventana (no cambia `active_view`) -- alguien que entrara al modo gadget viniendo del calendario seguía pagando el costo cada segundo para un marco ya `grid_remove()`d e invisible. Corregido: la condición ahora es `active_view == "calendar" and not gadget_mode`.
+3. **Recorte en el tamaño mínimo declarado de la ventana (960x640, `v2.4.0`):** el presupuesto de truncado de una entrada de calendario reutilizaba una constante pensada para otro contexto y, medido con títulos reales en los 42 celdas al piso de 960px, un título como "Weekly Team Standup" se recortaba a la mitad. Corregido con un presupuesto propio y más estrecho para la vista de calendario (`_CALENDAR_ENTRY_MAX_CHARS = 20`), medido para no recortar en ese mismo piso.
+4. **Número mágico duplicado:** el límite de 3 entradas por celda estaba repetido como literal en `app.py` además de en `main_window.py`. Corregido: `app.py` ahora importa `CALENDAR_MAX_ENTRIES_PER_CELL` desde `main_window.py` en vez de mantener su propia copia del `3`.
+5. **Código muerto** identificado y eliminado durante la limpieza posterior a la refactorización de `_build_header` (necesaria para que `full_view` y `calendar_view` tuvieran cada uno su propia copia de los widgets del encabezado).
+6. **Hueco de cobertura de pruebas:** se agregaron casos nuevos a `tests/test_recurrence.py` (`month_grid`: 4 filas rellenadas a 6, un mes que ya necesita 6, año bisiesto, cruce dic→ene) y a `tests/test_app_helpers.py` (agrupado de reuniones por fecha y construcción de celdas), además de los criterios verificados manualmente más abajo.
+
+**Criterios de aceptación (verificados al cerrar v2.7.0):**
+- `recurrence.py::month_grid` regresa siempre exactamente 6 filas × 7 columnas, con pruebas unitarias cubriendo un mes que cabe en 4 filas, uno que necesita 6, y un febrero bisiesto (`python -m unittest discover -s tests`).
+- `calendar_view` se construye una sola vez como tercer hermano de `full_view`/`gadget_view` en la celda de `root`; en todo momento exactamente uno de los tres está gridded.
+- Secuencia lista → gadget → restaurar regresa a lista; secuencia calendario → gadget → restaurar regresa a calendario (verificación manual explícita del punto encontrado en `set_gadget_mode`).
+- Prev/Next month no truncan ni truenan en cruces de año (dic→ene, ene→dic); "Hoy" regresa siempre al mes que contiene la fecha actual sin importar cuánto se haya navegado.
+- El resaltado de "hoy" solo aparece cuando el mes visible es el mes calendario real actual.
+- Celdas de relleno (fuera del mes) muestran sus reuniones con el mismo comportamiento de clic que una celda del mes actual, solo con estilo atenuado.
+- Clic en una reunión específica del calendario deja el formulario de edición en el mismo estado que clic en "Editar" desde la tarjeta equivalente en la lista (mismo `meeting_id`, mismos valores poblados).
+- Reuniones con `datetime` vacío o no parseable (`local_datetime() is None`) nunca aparecen en la cuadrícula.
+- Un refresco completo del calendario con datos reales no reconstruye ninguna de las 42 celdas -- solo `.configure()`/`.grid()`/`.grid_remove()` sobre widgets ya creados, medido con `time.perf_counter()` en milisegundos, no segundos (mismo criterio que v2.6.0 aplicó a la lista).
+- Ningún `root.update()`/`root.update_idletasks()` síncrono nuevo en todo el flujo de esta función.
+- Toda cadena nueva (encabezado mes/año, abreviaturas de día, botones Prev/Next/Hoy/Vista calendario/Vista de lista, etiqueta "+N más") existe en `translations["es"]` y `translations["en"]`; `tests/test_i18n.py` sigue pasando sin modificarse.
+- `data/meetings.json` conserva exactamente el mismo esquema; ningún campo nuevo se agrega a `Meeting`; el comportamiento de fusión de `storage.py` no cambia.
+- Modo bandeja desde la vista de calendario: ocultar y restaurar regresa al calendario sin tocar `tray_icon.py` (verificación de regresión, no código nuevo).
+- Tiempo de arranque de `TimerMeet.exe` re-medido después de este cambio; sigue bajo 5 segundos (si no, construcción perezosa de `calendar_view` en vez de eager).
 
 ## Technical Constraints
 

@@ -20,6 +20,7 @@ TimerMeet nació como un sitio local en PHP y se reescribió por completo en Pyt
 - Modo gadget/mini: un botón en el encabezado convierte la ventana en un panel flotante, sin bordes, siempre-encima y arrastrable (estilo "skin mode" de Windows Media Player) con el reloj y el siguiente aviso; un botón regresa a la vista completa. El modo y la posición se recuerdan entre reinicios.
 - Modo bandeja del sistema: otro botón en el encabezado oculta la ventana por completo y la reduce a un ícono en la bandeja; un clic o "Mostrar TimerMeet" desde su menú la restaura, "Salir" desde el mismo menú cierra la app.
 - La lista de reuniones se actualiza en su lugar (sin destruir y reconstruir las tarjetas en cada segundo), así que la ventana no se siente lenta ni "reordena" nada al maximizar, mover o simplemente dejarla abierta.
+- Vista de calendario mensual: un botón en el encabezado ("Vista calendario") cambia la lista actual por una cuadrícula mensual estilo Outlook/Teams (6 semanas fijas, lunes a domingo, con "‹"/"›" para navegar entre meses y un botón "Hoy"). Cada día muestra hasta 3 reuniones (hora + título, con el mismo color por trabajo que la lista) y un contador "+N más" para el resto; clic en una reunión abre el mismo formulario de edición que usa la lista. "Vista de lista" regresa a la vista normal. Ignora el filtro de trabajo/empresa (siempre muestra todas las reuniones) y no agrega ningún campo nuevo a los timers guardados.
 
 ## Instalación y uso
 

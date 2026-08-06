@@ -15,12 +15,19 @@ import logging
 import threading
 import tkinter as tk
 import webbrowser
-from datetime import datetime, timedelta
-from typing import List, Optional
+from datetime import date, datetime, timedelta
+from typing import Dict, List, Optional, Tuple
 
 from . import i18n, models, notifications, recurrence, retention, security, storage
 from .alarm_ui import AlarmController
-from .main_window import Callbacks, MainWindow, MeetingCardData
+from .main_window import (
+    CALENDAR_MAX_ENTRIES_PER_CELL,
+    Callbacks,
+    CalendarCellData,
+    CalendarEntry,
+    MainWindow,
+    MeetingCardData,
+)
 from .tray_icon import TrayIcon
 
 logger = logging.getLogger(__name__)
@@ -36,6 +43,33 @@ START_ALERT_WINDOW = timedelta(minutes=10)
 def _meeting_sort_key(meeting: models.Meeting):
     parsed = meeting.local_datetime()
     return parsed if parsed is not None else datetime.min
+
+
+def _group_meetings_by_date(meetings: List[models.Meeting]) -> Dict[date, List[models.Meeting]]:
+    """Group meetings by their local calendar date, for the monthly
+    calendar view (see `_refresh_calendar`). A meeting with an empty or
+    unparseable `datetime` (`local_datetime() is None`) has no calendar
+    cell to belong to and is silently dropped here -- it must never appear
+    in the grid (see SDD.md's acceptance criteria for v2.7.0), the same way
+    it's already excluded from the list view's countdown/status rendering."""
+    groups: Dict[date, List[models.Meeting]] = {}
+    for meeting in meetings:
+        when = meeting.local_datetime()
+        if when is None:
+            continue
+        groups.setdefault(when.date(), []).append(meeting)
+    return groups
+
+
+def _shift_month(year: int, month: int, delta: int) -> Tuple[int, int]:
+    """Advance/rewind a (year, month) pair by `delta` months, wrapping the
+    year boundary in both directions (Dec + 1 -> next Jan; Jan - 1 ->
+    previous Dec). The calendar view's Prev/Next buttons are the only
+    callers, each passing delta=-1/+1 -- Python's floor division/modulo
+    already do the right thing here without needing day-of-month overflow
+    handling like `recurrence._add_months` (there's no day component)."""
+    index = (month - 1) + delta
+    return year + index // 12, index % 12 + 1
 
 
 def _coerce_gadget_coordinate(value) -> Optional[int]:
@@ -92,6 +126,11 @@ def _countdown_text(meeting: models.Meeting, now: datetime, language: str) -> st
         return f"{i18n.t('startedAgo', language)} {_format_relative(now - when, language)}"
     return f"{i18n.t('startsIn', language)} {_format_relative(when - now, language)}"
 
+
+_CALENDAR_WEEKDAY_KEYS = [
+    "calendarWeekdayMon", "calendarWeekdayTue", "calendarWeekdayWed",
+    "calendarWeekdayThu", "calendarWeekdayFri", "calendarWeekdaySat", "calendarWeekdaySun",
+]
 
 _RECURRENCE_TEXT_KEYS = {
     "daily": "recurrenceDaily",
@@ -188,6 +227,18 @@ class TimerMeetApp:
             self.root.update_idletasks()
 
         self.work_filter = "all"
+        # Which primary view is showing ("list"/"calendar") -- mirrors
+        # MainWindow's own `_primary_view`, but this copy is what
+        # `_refresh_all` reads to decide whether the calendar's per-heartbeat
+        # recompute (grouping meetings by date, rebuilding 42 cells' worth of
+        # display data) is worth doing at all; see `_refresh_calendar`. Not
+        # persisted between launches -- unlike gadgetMode, nothing in
+        # SDD.md's acceptance criteria asks for that, and the app always
+        # starts in list view.
+        self.active_view = "list"
+        now = datetime.now()
+        self._calendar_year = now.year
+        self._calendar_month = now.month
         self.meetings: List[models.Meeting] = storage.load_meetings()
         self._pending_deleted_ids: set = set()
 
@@ -209,6 +260,7 @@ class TimerMeetApp:
         self._resync_accumulator_ms = 0
         self._purge_accumulator_ms = 0
         self._last_rendered_signature = None
+        self._last_rendered_calendar_signature = None
 
         callbacks = Callbacks(
             on_save=self.handle_save,
@@ -227,6 +279,10 @@ class TimerMeetApp:
             on_remove_company=self.handle_remove_company,
             on_toggle_gadget_mode=self.handle_toggle_gadget_mode,
             on_enter_tray_mode=self.handle_enter_tray_mode,
+            on_toggle_calendar_view=self.handle_toggle_calendar_view,
+            on_calendar_prev_month=self.handle_calendar_prev_month,
+            on_calendar_next_month=self.handle_calendar_next_month,
+            on_calendar_today=self.handle_calendar_today,
         )
         self.view = MainWindow(self.root, callbacks)
         self.view.apply_translations(self.language)
@@ -497,10 +553,105 @@ class TimerMeetApp:
             self.view.render_meeting_list(cards)
             self._last_rendered_signature = signature
 
+        # Building the 6x7 grid's display data (grouping every meeting by
+        # date, formatting up to 3 entries per cell x 42 cells) only to throw
+        # it away unseen would be pure waste on every single heartbeat tick
+        # while the user is looking at the list or the gadget -- skip it
+        # entirely unless the calendar is the view actually on screen, same
+        # spirit as `keep_gadget_on_top` being a no-op outside gadget mode.
+        # `active_view` alone isn't enough: entering gadget mode doesn't
+        # change it (gadget mode is an orthogonal reskin of the SAME root
+        # window, see MainWindow.set_gadget_mode), so a user who was in
+        # calendar view before toggling into the gadget would otherwise keep
+        # paying this cost every tick for a frame that's `grid_remove()`d
+        # and physically invisible.
+        if self.active_view == "calendar" and not self.gadget_mode:
+            self._refresh_calendar(now)
+
         # A near-zero-cost no-op unless gadget mode is active; piggybacks on
         # this existing 1s heartbeat instead of a separate self-rescheduling
         # relift job (one less job lifecycle to start/cancel correctly).
         self.view.keep_gadget_on_top(self.alarms.is_active())
+
+    def _refresh_calendar(self, now: datetime) -> None:
+        """Build this heartbeat's display data for the monthly calendar
+        view and hand it to `MainWindow.render_calendar`, which only ever
+        `.configure()`/`.grid()`/`.grid_remove()`s the 42 pre-built cells --
+        see that method's docstring. Only called while `active_view ==
+        "calendar"` (see `_refresh_all`)."""
+        weeks = recurrence.month_grid(self._calendar_year, self._calendar_month)
+        grouped = _group_meetings_by_date(self.meetings)
+        # "Today" is only highlighted while the *visible* month is the real
+        # current month (see SDD.md) -- comparing bare dates would wrongly
+        # highlight a leading/trailing padding cell that happens to literally
+        # be today's date while browsing a neighboring month.
+        showing_current_month = (self._calendar_year, self._calendar_month) == (now.year, now.month)
+        today_date = now.date()
+
+        cells: List[CalendarCellData] = []
+        for week in weeks:
+            for day in week:
+                # `grouped` only ever holds meetings whose `local_datetime()`
+                # parsed successfully (see `_group_meetings_by_date`), so
+                # every meeting reaching this loop already has one -- no
+                # `datetime.min` fallback needed the way `_meeting_sort_key`
+                # needs one for the *unfiltered* full meeting list.
+                day_meetings = sorted(grouped.get(day, []), key=_meeting_sort_key)
+                entries = [
+                    CalendarEntry(
+                        meeting_id=meeting.id,
+                        time_text=meeting.local_datetime().strftime("%H:%M"),
+                        title=meeting.title,
+                        color=_color_for_work_name(meeting.workName),
+                    )
+                    for meeting in day_meetings[:CALENDAR_MAX_ENTRIES_PER_CELL]
+                ]
+                cells.append(
+                    CalendarCellData(
+                        day=day,
+                        in_current_month=(day.year, day.month) == (self._calendar_year, self._calendar_month),
+                        is_today=showing_current_month and day == today_date,
+                        entries=entries,
+                        overflow_count=max(0, len(day_meetings) - CALENDAR_MAX_ENTRIES_PER_CELL),
+                    )
+                )
+
+        month_label = i18n.format_month_year(self._calendar_year, self._calendar_month, self.language)
+        weekday_labels = [i18n.t(key, self.language) for key in _CALENDAR_WEEKDAY_KEYS]
+
+        # Same "skip re-render if nothing changed" dirty-check `_refresh_all`
+        # already applies to the list view, and for the same reason: this
+        # runs every second from the heartbeat while the calendar is on
+        # screen, and `render_calendar` rebinds a fresh click-handler closure
+        # onto every visible entry label each time it's called (see
+        # `MainWindow._update_calendar_cell`). Repeated `.bind()` calls on
+        # the same widget+sequence do NOT release the previous Tcl command
+        # in this Tk/Python version -- verified directly, every prior
+        # binding stays registered forever since these cell widgets are
+        # never destroyed -- so calling `render_calendar` unconditionally on
+        # every tick was an unbounded, per-second memory leak for as long as
+        # the calendar view stayed open. The signature captures everything a
+        # cell can visibly show (day/month membership/today-highlight/each
+        # entry's id+time+title+color/overflow count) plus the month label
+        # and language (weekday names and the "+N more" label are
+        # translated), so any real display change still re-renders.
+        signature = (
+            self.language,
+            month_label,
+            tuple(
+                (
+                    cell.day,
+                    cell.in_current_month,
+                    cell.is_today,
+                    tuple((e.meeting_id, e.time_text, e.title, e.color) for e in cell.entries),
+                    cell.overflow_count,
+                )
+                for cell in cells
+            ),
+        )
+        if signature != self._last_rendered_calendar_signature:
+            self.view.render_calendar(month_label, weekday_labels, cells)
+            self._last_rendered_calendar_signature = signature
 
     def _find_meeting(self, meeting_id: str) -> Optional[models.Meeting]:
         return next((m for m in self.meetings if m.id == meeting_id), None)
@@ -751,3 +902,31 @@ class TimerMeetApp:
         self.tray_mode = False
         self.tray.hide()
         self._force_show_window()
+
+    # -- calendar view ----------------------------------------------------------
+
+    def handle_toggle_calendar_view(self) -> None:
+        # Shared by both directions -- "Vista calendario" on the list's
+        # header and "Vista de lista" on the calendar's header both wire to
+        # this same callback (see `_build_header` in main_window.py), the
+        # same pattern "Modo gadget"/"Completo" already use for
+        # `on_toggle_gadget_mode`. Unlike gadget/tray mode, this isn't
+        # blocked while an alarm is active: both views live inside the same
+        # normal, decorated root window, so switching between them can never
+        # interfere with AlarmController's independent Toplevel overlay.
+        self.active_view = "calendar" if self.active_view == "list" else "list"
+        self.view.set_active_view(self.active_view)
+        self._refresh_all()
+
+    def handle_calendar_prev_month(self) -> None:
+        self._calendar_year, self._calendar_month = _shift_month(self._calendar_year, self._calendar_month, -1)
+        self._refresh_all()
+
+    def handle_calendar_next_month(self) -> None:
+        self._calendar_year, self._calendar_month = _shift_month(self._calendar_year, self._calendar_month, 1)
+        self._refresh_all()
+
+    def handle_calendar_today(self) -> None:
+        now = datetime.now()
+        self._calendar_year, self._calendar_month = now.year, now.month
+        self._refresh_all()

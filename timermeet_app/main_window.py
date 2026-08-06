@@ -23,6 +23,7 @@ import tkinter as tk
 import tkinter.messagebox as messagebox
 import webbrowser
 from dataclasses import dataclass
+from datetime import date
 from tkinter import ttk
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -98,6 +99,35 @@ def _truncate_for_gadget(text: str) -> str:
     return text[: _GADGET_ALERT_MAX_CHARS - 1].rstrip() + "…"
 
 
+# Monthly calendar view (v2.7.0): a day cell shows at most this many meeting
+# rows before the rest collapse into a non-interactive "+N más"/"+N more"
+# label (see SDD.md's calendar view requirements) -- 3 is the count the spec
+# settled on, and this constant is the single source of truth for both the
+# eager cell construction below and app.py's `_refresh_calendar`, which must
+# slice `day_meetings[:3]` the same way.
+CALENDAR_MAX_ENTRIES_PER_CELL = 3
+CALENDAR_ROWS = 6
+CALENDAR_COLS = 7
+
+# A calendar cell is much narrower than a full meeting card, so its "HH:MM
+# Title" entry line needs its own, tighter truncation budget. Empirically
+# measured (see the v2.7.0 fix in SDD.md) against the app's own declared
+# floor -- root.minsize(960, 640) -- with every one of the 42 cells holding
+# realistic titles: 24 clipped (a "Weekly Team Standup" entry rendered at
+# 149px inside a 130px column), 20 did not, across repeated measurements.
+# This constant is NOT re-derived per window size (deliberately -- see the
+# fix's rationale for staying a fixed count instead of a dynamic
+# width-measurement system), so it must keep fitting at that same 960px
+# floor even though most launches default to the wider 1180px window.
+_CALENDAR_ENTRY_MAX_CHARS = 20
+
+
+def _truncate_calendar_entry(text: str) -> str:
+    if len(text) <= _CALENDAR_ENTRY_MAX_CHARS:
+        return text
+    return text[: _CALENDAR_ENTRY_MAX_CHARS - 1].rstrip() + "…"
+
+
 _RECURRENCE_LABEL_KEYS = [
     ("none", "recurrenceNone"),
     ("daily", "recurrenceDaily"),
@@ -127,6 +157,57 @@ class _CardWidgets:
 
 
 @dataclass
+class CalendarEntry:
+    """One meeting row inside a calendar day-cell -- already formatted/
+    pre-colored by app.py (the color reuses `_color_for_work_name`, the same
+    helper the list view's cards use), so this module stays display-only."""
+
+    meeting_id: str
+    time_text: str
+    title: str
+    color: str
+
+
+@dataclass
+class CalendarCellData:
+    day: date
+    in_current_month: bool
+    is_today: bool
+    entries: List[CalendarEntry]
+    overflow_count: int
+
+
+@dataclass
+class _CalendarCellWidgets:
+    frame: tk.Frame
+    day_label: tk.Label
+    entry_labels: List[tk.Label]
+    overflow_label: tk.Label
+
+
+@dataclass
+class _HeaderWidgets:
+    """Widget handles for one instance of the shared header (see
+    `_build_header`) -- `full_view` and `calendar_view` each get their own
+    instance, so `apply_translations`/`update_storage_status` must loop over
+    every entry in `MainWindow._headers` instead of assuming a single set of
+    header widgets exists."""
+
+    title_label: tk.Label
+    subtitle_label: tk.Label
+    version_chip: tk.Label
+    storage_chip: tk.Label
+    notify_button: tk.Button
+    language_button: tk.Button
+    calendar_toggle_button: tk.Button
+    calendar_toggle_key: str
+    gadget_button: tk.Button
+    tray_button: tk.Button
+    donate_button: tk.Button
+    exit_button: tk.Button
+
+
+@dataclass
 class Callbacks:
     on_save: Callable[[dict], None]
     on_clear: Callable[[], None]
@@ -144,6 +225,10 @@ class Callbacks:
     on_remove_company: Callable[[str], None]
     on_toggle_gadget_mode: Callable[[], None]
     on_enter_tray_mode: Callable[[], None]
+    on_toggle_calendar_view: Callable[[], None]
+    on_calendar_prev_month: Callable[[], None]
+    on_calendar_next_month: Callable[[], None]
+    on_calendar_today: Callable[[], None]
 
 
 def _button(parent, text: str, command, bg: str, fg: str, hover: Optional[str] = None, **extra) -> tk.Button:
@@ -249,6 +334,16 @@ class MainWindow:
         self._card_widgets: Dict[str, _CardWidgets] = {}
         self._card_language: Optional[str] = None
         self._empty_state_frame: Optional[tk.Frame] = None
+        # Which of the two *primary* (non-gadget) sibling frames is the
+        # logical "current view" -- read by `set_gadget_mode` on exit so
+        # leaving gadget mode restores whichever of list/calendar was active
+        # beforehand instead of always jumping back to the list (the bug
+        # documented in SDD.md's v2.7.0 section). Only `set_active_view` and
+        # `set_gadget_mode` ever change this.
+        self._primary_view = "list"
+        self._headers: List[_HeaderWidgets] = []
+        self._calendar_weekday_labels: List[tk.Label] = []
+        self._calendar_cells: List[_CalendarCellWidgets] = []
 
         self.root.configure(bg=WINDOW_BG)
         self._configure_ttk_style()
@@ -289,11 +384,12 @@ class MainWindow:
     # -- layout ---------------------------------------------------------------
 
     def _build_layout(self) -> None:
-        # root has exactly one grid cell, holding whichever of these two
-        # sibling frames is currently gridded -- full_view (today's whole
-        # header+form+summary layout, unchanged) or gadget_view (the
+        # root has exactly one grid cell, holding whichever of these three
+        # sibling frames is currently gridded -- full_view (the list view:
+        # header+form+summary, unchanged), calendar_view (the monthly grid,
+        # see `_build_calendar_view`/`set_active_view`), or gadget_view (the
         # borderless mini skin, see `_build_gadget_view`/`set_gadget_mode`).
-        # Only one is ever gridded at a time; the other sits ungridded.
+        # Only one is ever gridded at a time; the other two sit ungridded.
         self.root.grid_columnconfigure(0, weight=1)
         self.root.grid_rowconfigure(0, weight=1)
 
@@ -302,7 +398,8 @@ class MainWindow:
         self.full_view.grid_columnconfigure(0, weight=1)
         self.full_view.grid_rowconfigure(1, weight=1)
 
-        self._build_header(self.full_view)
+        self.full_header = self._build_header(self.full_view, "calendarViewButton")
+        self._headers.append(self.full_header)
 
         body = tk.Frame(self.full_view, bg=WINDOW_BG)
         body.grid(row=1, column=0, sticky="nsew", padx=16, pady=(0, 16))
@@ -314,52 +411,82 @@ class MainWindow:
         self._build_summary(body)
 
         self._build_gadget_view()
+        self._build_calendar_view()
 
-    def _build_header(self, parent) -> None:
+    def _build_header(self, parent, calendar_toggle_key: str) -> _HeaderWidgets:
+        """Builds one full copy of the header (title/version/storage chips +
+        the Notify/Language/Calendar-toggle/Gadget/Tray/Donate/Exit action
+        row) into `parent`, and returns handles to every widget it created
+        instead of stashing them on `self` directly -- this is called twice
+        (once for `full_view`, once for `calendar_view`, see
+        `_build_calendar_view`), and a plain `self.title_label = ...` would
+        have the second call silently overwrite the first view's widget
+        reference, leaving `full_view`'s header never updated again by
+        `apply_translations`/`update_storage_status`. Both call sites keep
+        every returned instance in `self._headers` and loop over it instead.
+        `calendar_toggle_key` is the only thing that differs between the two
+        headers' otherwise-identical action rows: "Vista calendario" on
+        `full_view`'s copy, "Vista de lista" on `calendar_view`'s -- both
+        buttons share the same `on_toggle_calendar_view` callback (it's a
+        toggle), exactly like "Modo gadget"/"Completo" already share
+        `on_toggle_gadget_mode`.
+        """
         header = tk.Frame(parent, bg=PANEL_BG)
         header.grid(row=0, column=0, sticky="ew", padx=16, pady=16)
         header.grid_columnconfigure(0, weight=1)
 
         title_box = tk.Frame(header, bg=PANEL_BG)
         title_box.grid(row=0, column=0, sticky="w", padx=14, pady=14)
-        self.title_label = tk.Label(
+        title_label = tk.Label(
             title_box, text="TimerMeet", font=(FONT_FAMILY, 24, "bold"), bg=PANEL_BG, fg=TEXT,
         )
-        self.title_label.pack(anchor="w")
-        self.subtitle_label = tk.Label(
+        title_label.pack(anchor="w")
+        subtitle_label = tk.Label(
             title_box, text="", font=(FONT_FAMILY, 12), bg=PANEL_BG, fg=MUTED,
         )
-        self.subtitle_label.pack(anchor="w", pady=(2, 0))
+        subtitle_label.pack(anchor="w", pady=(2, 0))
 
         chips = tk.Frame(title_box, bg=PANEL_BG)
         chips.pack(anchor="w", pady=(10, 0))
-        self.version_chip = tk.Label(
+        version_chip = tk.Label(
             chips, text="", bg=CHIP_BG, fg=MUTED, padx=10, pady=4, font=(FONT_FAMILY, 10),
         )
-        self.version_chip.pack(side="left", padx=(0, 8))
-        self.storage_chip = tk.Label(
+        version_chip.pack(side="left", padx=(0, 8))
+        storage_chip = tk.Label(
             chips, text="", bg=CHIP_BG, fg=MUTED, padx=10, pady=4, font=(FONT_FAMILY, 10),
         )
-        self.storage_chip.pack(side="left")
+        storage_chip.pack(side="left")
 
         actions = tk.Frame(header, bg=PANEL_BG)
         actions.grid(row=0, column=1, sticky="e", padx=14, pady=14)
-        self.notify_button = _button(actions, "", self.callbacks.on_test_notification, GHOST_BG, GHOST_FG, GHOST_HOVER)
-        self.notify_button.pack(side="left", padx=4)
-        self.language_button = _button(actions, "EN", self.callbacks.on_toggle_language, GHOST_BG, GHOST_FG, GHOST_HOVER)
-        self.language_button.pack(side="left", padx=4)
-        self.gadget_button = _button(actions, "", self.callbacks.on_toggle_gadget_mode, GHOST_BG, GHOST_FG, GHOST_HOVER)
-        self.gadget_button.pack(side="left", padx=4)
-        self.tray_button = _button(actions, "", self.callbacks.on_enter_tray_mode, GHOST_BG, GHOST_FG, GHOST_HOVER)
-        self.tray_button.pack(side="left", padx=4)
-        self.donate_button = _button(actions, "", self._open_donate, GOLD_BG, GOLD_FG, GOLD_HOVER)
-        self.donate_button.pack(side="left", padx=4)
+        notify_button = _button(actions, "", self.callbacks.on_test_notification, GHOST_BG, GHOST_FG, GHOST_HOVER)
+        notify_button.pack(side="left", padx=4)
+        language_button = _button(actions, "EN", self.callbacks.on_toggle_language, GHOST_BG, GHOST_FG, GHOST_HOVER)
+        language_button.pack(side="left", padx=4)
+        calendar_toggle_button = _button(
+            actions, "", self.callbacks.on_toggle_calendar_view, GHOST_BG, GHOST_FG, GHOST_HOVER
+        )
+        calendar_toggle_button.pack(side="left", padx=4)
+        gadget_button = _button(actions, "", self.callbacks.on_toggle_gadget_mode, GHOST_BG, GHOST_FG, GHOST_HOVER)
+        gadget_button.pack(side="left", padx=4)
+        tray_button = _button(actions, "", self.callbacks.on_enter_tray_mode, GHOST_BG, GHOST_FG, GHOST_HOVER)
+        tray_button.pack(side="left", padx=4)
+        donate_button = _button(actions, "", self._open_donate, GOLD_BG, GOLD_FG, GOLD_HOVER)
+        donate_button.pack(side="left", padx=4)
         # A thin visual gap sets "Salir" apart from the utility buttons --
         # it's the one action in this row that ends the whole app, not just
         # toggles a setting or opens a link, so it shouldn't blend in.
         tk.Frame(actions, bg=PANEL_BG, width=12).pack(side="left")
-        self.exit_button = _button(actions, "", self.callbacks.on_exit, DANGER, "#ffffff", DANGER_HOVER)
-        self.exit_button.pack(side="left", padx=4)
+        exit_button = _button(actions, "", self.callbacks.on_exit, DANGER, "#ffffff", DANGER_HOVER)
+        exit_button.pack(side="left", padx=4)
+
+        return _HeaderWidgets(
+            title_label=title_label, subtitle_label=subtitle_label, version_chip=version_chip,
+            storage_chip=storage_chip, notify_button=notify_button, language_button=language_button,
+            calendar_toggle_button=calendar_toggle_button, calendar_toggle_key=calendar_toggle_key,
+            gadget_button=gadget_button, tray_button=tray_button, donate_button=donate_button,
+            exit_button=exit_button,
+        )
 
     def _open_donate(self) -> None:
         if security.is_http_url(DONATE_URL):
@@ -627,6 +754,184 @@ class MainWindow:
             widget.bind("<B1-Motion>", self._do_gadget_drag)
             widget.bind("<Double-Button-1>", lambda _e: self.callbacks.on_toggle_gadget_mode())
 
+    # -- monthly calendar view ----------------------------------------------------
+
+    def _build_calendar_view(self) -> None:
+        """The third sibling of `full_view`/`gadget_view` in root's one grid
+        cell (see `_build_gadget_view`'s docstring for why a sibling frame,
+        never a second Toplevel/Tk()). Built once, eagerly, right alongside
+        the other two -- per SDD.md's v2.7.0 decision, this is measured
+        against the .exe's 5s startup budget rather than assumed safe; if a
+        real regression ever shows up, this is the one call to make lazy
+        (build on first toggle instead of here), not the default.
+        `set_active_view` grids it in/out; it starts ungridded because the
+        default primary view is the list."""
+        self.calendar_view = tk.Frame(self.root, bg=WINDOW_BG)
+        self.calendar_view.grid_columnconfigure(0, weight=1)
+        self.calendar_view.grid_rowconfigure(3, weight=1)
+
+        self.calendar_header = self._build_header(self.calendar_view, "listViewButton")
+        self._headers.append(self.calendar_header)
+
+        nav = tk.Frame(self.calendar_view, bg=PANEL_BG)
+        nav.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 8))
+        self.calendar_prev_button = _button(
+            nav, "", self.callbacks.on_calendar_prev_month, GHOST_BG, GHOST_FG, GHOST_HOVER
+        )
+        self.calendar_prev_button.pack(side="left", padx=(0, 4))
+        self.calendar_month_label = tk.Label(
+            nav, text="", font=(FONT_FAMILY, 15, "bold"), bg=PANEL_BG, fg=TEXT, width=18, anchor="center",
+        )
+        self.calendar_month_label.pack(side="left", padx=4)
+        self.calendar_next_button = _button(
+            nav, "", self.callbacks.on_calendar_next_month, GHOST_BG, GHOST_FG, GHOST_HOVER
+        )
+        self.calendar_next_button.pack(side="left", padx=(4, 12))
+        self.calendar_today_button = _button(nav, "", self.callbacks.on_calendar_today, GHOST_BG, GHOST_FG, GHOST_HOVER)
+        self.calendar_today_button.pack(side="left")
+
+        weekday_row = tk.Frame(self.calendar_view, bg=WINDOW_BG)
+        weekday_row.grid(row=2, column=0, sticky="ew", padx=16)
+        for col in range(CALENDAR_COLS):
+            weekday_row.grid_columnconfigure(col, weight=1)
+            label = tk.Label(weekday_row, text="", font=(FONT_FAMILY, 10, "bold"), bg=WINDOW_BG, fg=MUTED)
+            label.grid(row=0, column=col, sticky="ew", pady=(0, 4))
+            self._calendar_weekday_labels.append(label)
+
+        grid_frame = tk.Frame(self.calendar_view, bg=WINDOW_BG)
+        grid_frame.grid(row=3, column=0, sticky="nsew", padx=16, pady=(0, 16))
+        for row in range(CALENDAR_ROWS):
+            grid_frame.grid_rowconfigure(row, weight=1)
+        for col in range(CALENDAR_COLS):
+            grid_frame.grid_columnconfigure(col, weight=1)
+
+        # Built once, eagerly, exactly like the meeting list's cards --
+        # `render_calendar` only ever `.configure()`/`.grid()`/`.grid_remove()`s
+        # these 42 cells afterwards, it never destroys/recreates them.
+        for row in range(CALENDAR_ROWS):
+            for col in range(CALENDAR_COLS):
+                self._calendar_cells.append(self._build_calendar_cell(grid_frame, row, col))
+
+    def _build_calendar_cell(self, parent, row: int, col: int) -> _CalendarCellWidgets:
+        cell = tk.Frame(parent, bg=PANEL_BG, highlightthickness=1, highlightbackground=BORDER)
+        cell.grid(row=row, column=col, sticky="nsew", padx=1, pady=1)
+        cell.grid_columnconfigure(0, weight=1)
+
+        day_label = tk.Label(cell, text="", font=(FONT_FAMILY, 10, "bold"), bg=PANEL_BG, fg=TEXT, anchor="w")
+        day_label.grid(row=0, column=0, sticky="w", padx=4, pady=(2, 0))
+
+        entry_labels: List[tk.Label] = []
+        for slot in range(CALENDAR_MAX_ENTRIES_PER_CELL):
+            entry_label = tk.Label(
+                cell, text="", font=(FONT_FAMILY, 8), anchor="w", cursor="hand2", padx=3,
+            )
+            entry_label.grid(row=1 + slot, column=0, sticky="ew", padx=3, pady=1)
+            entry_labels.append(entry_label)
+
+        overflow_label = tk.Label(cell, text="", font=(FONT_FAMILY, 8), bg=PANEL_BG, fg=MUTED, anchor="w")
+        overflow_label.grid(row=1 + CALENDAR_MAX_ENTRIES_PER_CELL, column=0, sticky="ew", padx=4, pady=1)
+
+        return _CalendarCellWidgets(
+            frame=cell, day_label=day_label, entry_labels=entry_labels, overflow_label=overflow_label,
+        )
+
+    def _primary_view_frame(self) -> tk.Frame:
+        return self.calendar_view if self._primary_view == "calendar" else self.full_view
+
+    def set_active_view(self, view: str) -> None:
+        """Swap which of `full_view` ("list") / `calendar_view` ("calendar")
+        is gridded into root's cell -- the same swap mechanism
+        `set_gadget_mode` already uses, just between the two non-gadget
+        frames. Also records `_primary_view`, which `set_gadget_mode` reads
+        on exit so leaving gadget mode returns to whichever of these two was
+        active beforehand instead of unconditionally landing on the list
+        (see that method's docstring)."""
+        if self._gadget_active:
+            # Defensive only: the toggle buttons that call this live in
+            # full_view's/calendar_view's own headers, neither of which is
+            # reachable while gadget_view is the one gridded frame -- this
+            # should never actually fire from the real UI.
+            return
+        self._primary_view_frame().grid_remove()
+        self._primary_view = view
+        self._primary_view_frame().grid(row=0, column=0, sticky="nsew")
+
+    def render_calendar(self, month_label: str, weekday_labels: List[str], cells: List[CalendarCellData]) -> None:
+        """Incremental, like `render_meeting_list`: reuses the 42 pre-built
+        cell widgets (and their up-to-3 pre-built entry-row labels) via
+        `.configure()`/`.grid()`/`.grid_remove()` every call -- never
+        destroys/recreates a cell. Called from app.py only while the
+        calendar is the active view (see `_refresh_calendar`), so a month
+        navigation click or a heartbeat tick while some other view is
+        showing never reaches here at all."""
+        self.calendar_month_label.configure(text=month_label)
+        for label_widget, text in zip(self._calendar_weekday_labels, weekday_labels):
+            label_widget.configure(text=text)
+        for widgets, cell_data in zip(self._calendar_cells, cells):
+            self._update_calendar_cell(widgets, cell_data)
+
+    def _update_calendar_cell(self, widgets: _CalendarCellWidgets, cell_data: CalendarCellData) -> None:
+        if cell_data.is_today:
+            day_bg, day_fg = ACCENT, ACCENT_FG
+        elif cell_data.in_current_month:
+            day_bg, day_fg = PANEL_BG, TEXT
+        else:
+            # Outside the visible month, but still real, clickable meetings
+            # underneath (see SDD.md) -- only the day number itself dims.
+            day_bg, day_fg = PANEL_BG, SUBTLE
+        widgets.day_label.configure(text=str(cell_data.day.day), bg=day_bg, fg=day_fg)
+
+        for index, entry_label in enumerate(widgets.entry_labels):
+            if index < len(cell_data.entries):
+                entry = cell_data.entries[index]
+                entry_label.configure(
+                    text=_truncate_calendar_entry(f"{entry.time_text} {entry.title}"),
+                    bg=entry.color, fg="black",
+                )
+                # Rebinding a fresh closure each render (instead of a
+                # per-widget click handler set up once at construction, the
+                # way `_create_card`'s buttons do) is required here: unlike a
+                # meeting card -- one card per meeting, built once for that
+                # meeting's whole lifetime in the list -- a calendar cell is
+                # a fixed *position* in the grid whose displayed meeting
+                # changes every time the user navigates months.
+                #
+                # This is safe from leaking Tcl commands ONLY because
+                # `render_calendar` is now gated by app.py's own dirty-check
+                # (`_last_rendered_calendar_signature`): repeated `.bind()`
+                # calls on the same widget+sequence do NOT release the
+                # previous Tcl command on this Tk/Python version -- verified
+                # directly, 2000 rebinds left 2000 orphaned entries in
+                # `widget._tclCommands`, growing unbounded for as long as the
+                # calendar stayed open. Rebinding only happens here when this
+                # slot's actual displayed meeting changed (a month
+                # navigation, an edit, etc.), not on every idle heartbeat
+                # tick with unchanged data -- see app.py's `_refresh_calendar`.
+                entry_label.bind(
+                    "<Button-1>", lambda _e, mid=entry.meeting_id: self._handle_calendar_entry_click(mid)
+                )
+                entry_label.grid()
+            else:
+                entry_label.grid_remove()
+
+        if cell_data.overflow_count > 0:
+            widgets.overflow_label.configure(
+                text=i18n.format_text("calendarMoreLabel", self.language, count=cell_data.overflow_count)
+            )
+            widgets.overflow_label.grid()
+        else:
+            widgets.overflow_label.grid_remove()
+
+    def _handle_calendar_entry_click(self, meeting_id: str) -> None:
+        # Same edit flow as the list view's "Editar" button, then hand the
+        # view-toggle back to app.py so its `active_view` bookkeeping (used
+        # to skip calendar recompute while the list is showing, see
+        # `_refresh_calendar`) stays correct -- reusing the toggle callback
+        # is safe here specifically because this can only ever fire while
+        # the calendar is already the active view.
+        self.callbacks.on_edit(meeting_id)
+        self.callbacks.on_toggle_calendar_view()
+
     def _start_gadget_drag(self, event) -> None:
         # Guards against a real, reproduced bug: double-clicking the gadget
         # to restore the full window fires this a second time (Tk delivers
@@ -709,7 +1014,18 @@ class MainWindow:
         synchronous call. AlarmController's overlay needs no special
         handling here: it's an independent, non-transient Toplevel (see
         alarm_ui.py) whose own visibility never depended on root's mapped
-        state, size, or decoration -- only on its own attributes."""
+        state, size, or decoration -- only on its own attributes.
+
+        Which of `full_view`/`calendar_view` gets grid_remove()d on entry and
+        grid()ed back on exit is resolved through `_primary_view_frame()`
+        (backed by `_primary_view`), not hardcoded to `full_view` -- with a
+        third primary view added in v2.7.0, hardcoding it here was a real
+        bug: entering gadget mode from the calendar and leaving it again
+        used to always land back on the list instead of the calendar. Only
+        `set_active_view` ever changes `_primary_view`, so whichever primary
+        view was showing before this call is exactly what reappears after
+        it, regardless of how many times gadget mode is toggled in between.
+        """
         if is_gadget:
             self._pre_gadget_geometry = self.root.geometry()
             target_x, target_y = self._resolve_gadget_position(x, y)
@@ -720,7 +1036,7 @@ class MainWindow:
             # window; left in place it silently clamps the geometry() call
             # below back up to 960x640 even with resizable(False, False).
             self.root.minsize(1, 1)
-            self.full_view.grid_remove()
+            self._primary_view_frame().grid_remove()
             self.gadget_view.grid(row=0, column=0, sticky="nsew")
             self.root.geometry(f"{GADGET_WIDTH}x{GADGET_HEIGHT}+{target_x}+{target_y}")
             self.root.deiconify()
@@ -733,7 +1049,7 @@ class MainWindow:
             self.root.attributes("-topmost", False)
             self.root.resizable(True, True)
             self.gadget_view.grid_remove()
-            self.full_view.grid(row=0, column=0, sticky="nsew")
+            self._primary_view_frame().grid(row=0, column=0, sticky="nsew")
             self.root.geometry(self._pre_gadget_geometry or "1180x760")
             self.root.minsize(960, 640)
             self.root.deiconify()
@@ -1011,7 +1327,8 @@ class MainWindow:
         self.next_meeting_card["value"].configure(text=next_meeting_text)
 
     def update_storage_status(self, text: str) -> None:
-        self.storage_chip.configure(text=text)
+        for header in self._headers:
+            header.storage_chip.configure(text=text)
 
     def update_filter_options(self, work_names: List[str], selected: str) -> None:
         all_label = i18n.t("allWorks", self.language)
@@ -1150,20 +1467,27 @@ class MainWindow:
             return i18n.t(key, language)
 
         self.root.title(tr("appTitle"))
-        self.title_label.configure(text=tr("appTitle"))
-        self.subtitle_label.configure(text=tr("appSubtitle"))
-        self.version_chip.configure(text=f"{tr('versionLabel')}: v{__version__}")
-
-        self.notify_button.configure(text=tr("enableNotifications"))
-        self.language_button.configure(text="EN" if language == "es" else "ES")
-        self.gadget_button.configure(text=tr("gadgetModeButton"))
-        self.tray_button.configure(text=tr("trayModeButton"))
-        self.donate_button.configure(text=tr("buyBeer"))
-        self.exit_button.configure(text=tr("exitButton"))
+        # Both header instances (full_view's and calendar_view's) share this
+        # loop -- see `_HeaderWidgets`/`_build_header` for why there are two.
+        for header in self._headers:
+            header.title_label.configure(text=tr("appTitle"))
+            header.subtitle_label.configure(text=tr("appSubtitle"))
+            header.version_chip.configure(text=f"{tr('versionLabel')}: v{__version__}")
+            header.notify_button.configure(text=tr("enableNotifications"))
+            header.language_button.configure(text="EN" if language == "es" else "ES")
+            header.calendar_toggle_button.configure(text=tr(header.calendar_toggle_key))
+            header.gadget_button.configure(text=tr("gadgetModeButton"))
+            header.tray_button.configure(text=tr("trayModeButton"))
+            header.donate_button.configure(text=tr("buyBeer"))
+            header.exit_button.configure(text=tr("exitButton"))
 
         self.gadget_title_label.configure(text=tr("appTitle"))
         self.gadget_restore_button.configure(text=tr("gadgetRestoreButton"))
         self.gadget_close_button.configure(text=tr("gadgetCloseButton"))
+
+        self.calendar_prev_button.configure(text=tr("calendarPrevMonthButton"))
+        self.calendar_next_button.configure(text=tr("calendarNextMonthButton"))
+        self.calendar_today_button.configure(text=tr("calendarTodayButton"))
 
         self.form_eyebrow.configure(text=tr("formEyebrow"))
         self.form_title_label.configure(text=tr("formTitle"))

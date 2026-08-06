@@ -4,7 +4,7 @@
 web app)."""
 
 import unittest
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from timermeet_app import models, recurrence
 
@@ -114,6 +114,50 @@ class WeeklySeriesRenewalTests(unittest.TestCase):
         created = recurrence.run_weekly_series_renewal(meetings, now)
         self.assertEqual(created, 0)
         self.assertEqual(len(meetings), 1)
+
+
+class MonthGridTests(unittest.TestCase):
+    def test_always_returns_exactly_six_rows_of_seven_days(self):
+        weeks = recurrence.month_grid(2026, 8)
+        self.assertEqual(len(weeks), 6)
+        for week in weeks:
+            self.assertEqual(len(week), 7)
+
+    def test_weeks_start_on_monday_by_default(self):
+        for week in recurrence.month_grid(2026, 8):
+            self.assertEqual(week[0].weekday(), 0)  # Mon=0
+
+    def test_pads_a_four_row_month_up_to_six_rows(self):
+        # February 2021 is exactly 4 Mon-Sun weeks (28 days, 1st is a Monday)
+        # -- the shortest possible real month, so this is the case that
+        # needs the most padding.
+        weeks = recurrence.month_grid(2021, 2)
+        self.assertEqual(len(weeks), 6)
+        self.assertEqual(weeks[0][0], date(2021, 2, 1))
+        self.assertEqual(weeks[3][-1], date(2021, 2, 28))
+        # The two padded trailing rows continue seamlessly into March
+        # instead of repeating/skipping days.
+        self.assertEqual(weeks[4][0], date(2021, 3, 1))
+        self.assertEqual(weeks[5][-1], date(2021, 3, 14))
+
+    def test_a_month_that_already_needs_six_rows_is_returned_unpadded(self):
+        weeks = recurrence.month_grid(2020, 3)
+        self.assertEqual(len(weeks), 6)
+        self.assertEqual(weeks[0][0], date(2020, 2, 24))
+        self.assertEqual(weeks[-1][-1], date(2020, 4, 5))
+
+    def test_leap_year_february_is_included_whole(self):
+        weeks = recurrence.month_grid(2024, 2)
+        flat = [day for week in weeks for day in week]
+        self.assertIn(date(2024, 2, 29), flat)
+        self.assertEqual(len(weeks), 6)
+
+    def test_december_to_january_year_rollover_does_not_break(self):
+        weeks = recurrence.month_grid(2026, 12)
+        self.assertEqual(len(weeks), 6)
+        flat = [day for week in weeks for day in week]
+        self.assertIn(date(2026, 12, 25), flat)
+        self.assertIn(date(2027, 1, 1), flat)
 
 
 class MostRecentFridayEodTests(unittest.TestCase):

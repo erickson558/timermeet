@@ -395,7 +395,11 @@ class TimerMeetApp:
         self._resync_from_disk()
 
     def _on_close(self) -> None:
-        self.alarms.dismiss(run_callback=False)
+        # advance_queue=False: the app is shutting down, so any other alert
+        # still waiting in the queue must be dropped, not popped and shown
+        # in a brand-new Toplevel parented to a root that's about to be
+        # destroyed (see AlarmController.dismiss's docstring/comment).
+        self.alarms.dismiss(run_callback=False, advance_queue=False)
         if self.gadget_mode:
             # Otherwise quitting directly from the gadget's own close button
             # would lose whatever spot the user last dragged it to -- normal

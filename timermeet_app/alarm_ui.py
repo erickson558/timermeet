@@ -49,10 +49,20 @@ def _alarm_button(parent, text: str, command, bg: str, hover: str, state: str = 
 
 
 class AlarmController:
-    """Owns the single active alarm (if any) for the whole app: the sound
-    player, the persistent overlay, and the title-bar blink. Firing a new
-    alert always replaces whatever is currently active rather than stacking,
-    matching the original app."""
+    """Owns the currently-showing alarm (if any) for the whole app: the sound
+    player, the persistent overlay, and the title-bar blink.
+
+    A second alert firing while one is already on screen is queued (FIFO)
+    rather than replacing the active one. An earlier version tore down
+    whatever was showing every time `notify()` was called (matching the
+    original app's `startAlarmSequence`) -- but `app.py::_process_alerts`
+    marks a meeting's alert "sent" immediately after calling `notify()`, so
+    when two meetings became due in the same 1-second heartbeat tick (e.g.
+    two meetings both starting at 9:00), the first one's overlay/sound was
+    silently destroyed before the user ever saw it, and it could never fire
+    again -- a permanent, silent loss of a notification. Queueing instead
+    means the first alert keeps ringing undisturbed and the second is shown
+    automatically, back-to-back, the instant the first is dismissed."""
 
     def __init__(self, root: tk.Tk, get_language: Callable[[], str]):
         self._root = root
@@ -70,6 +80,11 @@ class AlarmController:
         self._current_url = ""
         self._base_title = "TimerMeet"
         self._on_dismiss: Optional[Callable[[], None]] = None
+        # FIFO of (meeting, mode, on_dismiss) tuples still waiting to be
+        # shown -- see class docstring. Never re-ordered, capped, or
+        # deduplicated: multiple meetings due in the exact same second is a
+        # rare edge case, not a hot path worth extra machinery.
+        self._queue: list = []
 
     def set_base_title(self, title: str) -> None:
         self._base_title = title
@@ -94,8 +109,21 @@ class AlarmController:
 
     def notify(self, meeting, mode: str, on_dismiss: Callable[[], None]) -> None:
         """Fire all three channels for one meeting: sound + overlay, and a
-        best-effort native OS toast. `mode` is "reminder" or "start"."""
-        self.dismiss(run_callback=False)
+        best-effort native OS toast. `mode` is "reminder" or "start". If an
+        alarm is already on screen, this one is queued instead -- see class
+        docstring -- and will be presented automatically once the active
+        one is dismissed."""
+        if self.is_active():
+            self._queue.append((meeting, mode, on_dismiss))
+            return
+        self._present(meeting, mode, on_dismiss)
+
+    def _present(self, meeting, mode: str, on_dismiss: Callable[[], None]) -> None:
+        """Actually build and show the sound + overlay + title-blink + OS
+        toast for one meeting. Called by `notify()` when nothing is
+        currently active, and again by `dismiss()` to present the next
+        queued alert immediately after the previous one finishes tearing
+        down."""
         self._on_dismiss = on_dismiss
         language = self._get_language()
         self._current_url = meeting.teamsUrl if security.is_http_url(meeting.teamsUrl) else ""
@@ -117,7 +145,7 @@ class AlarmController:
             webbrowser.open(self._current_url)
         self.dismiss()
 
-    def dismiss(self, run_callback: bool = True) -> None:
+    def dismiss(self, run_callback: bool = True, advance_queue: bool = True) -> None:
         self._player.stop()
 
         # Every teardown step below is best-effort: dismiss() must always
@@ -146,8 +174,36 @@ class AlarmController:
         except Exception:  # nosec B110
             pass
 
+        # Capture the outgoing alert's callback and clear it now, but do
+        # NOT invoke it yet -- see below. If we invoke it here (the old
+        # order), it runs while self._overlay is still None and the next
+        # queued alert hasn't been presented, so any caller that checks
+        # is_active() from inside the callback (e.g. app.py::_refresh_all
+        # -> keep_gadget_on_top(self.alarms.is_active())) observably sees
+        # "no alarm active" for one call even though another alert is a
+        # single line away from appearing -- a real, empirically-confirmed
+        # bug. Presenting the next alert (if any) *before* firing the
+        # callback means self._overlay already reflects the post-hand-off
+        # state by the time the callback runs.
         callback = self._on_dismiss
         self._on_dismiss = None
+
+        if not advance_queue:
+            # Shutdown path (app.py::_on_close calls dismiss(advance_queue=
+            # False) while destroying the root window): drop any still-
+            # pending alerts outright rather than leaving them for some
+            # future dismiss() to pop -- there will be no live root to
+            # parent a new Toplevel to.
+            self._queue.clear()
+        elif self._queue:
+            # Show the next queued alert immediately, in the same call --
+            # no Tkinter mainloop turn happens between the teardown above
+            # and _present() below, so is_active() (self._overlay is not
+            # None) is already True again by the time the outgoing
+            # callback (fired below) runs.
+            next_meeting, next_mode, next_on_dismiss = self._queue.pop(0)
+            self._present(next_meeting, next_mode, next_on_dismiss)
+
         if run_callback and callback is not None:
             callback()
 
@@ -225,6 +281,16 @@ class AlarmController:
         self._relift_job = self._root.after(_RELIFT_INTERVAL_MS, self._relift)
 
     def _start_title_blink(self, alert_title: str) -> None:
+        # Reset the toggle for every newly-presented alert (same precedent
+        # as the self._flash_state reset in _show_overlay, right before its
+        # own periodic effect is kicked off). Without this, a queued
+        # alert's very first synchronous tick just flips whatever parity
+        # the *previous* alert's ticking happened to leave it at, so the
+        # new alert's title could silently stay on the plain base-title
+        # phase for up to one full _TITLE_BLINK_INTERVAL_MS instead of
+        # announcing itself immediately.
+        self._blink_on = False
+
         def _tick() -> None:
             if self._overlay is None:
                 return

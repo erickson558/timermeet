@@ -283,6 +283,7 @@ class TimerMeetApp:
             on_calendar_prev_month=self.handle_calendar_prev_month,
             on_calendar_next_month=self.handle_calendar_next_month,
             on_calendar_today=self.handle_calendar_today,
+            on_calendar_day_click=self.handle_calendar_day_click,
         )
         self.view = MainWindow(self.root, callbacks)
         self.view.apply_translations(self.language)
@@ -934,3 +935,9 @@ class TimerMeetApp:
         now = datetime.now()
         self._calendar_year, self._calendar_month = now.year, now.month
         self._refresh_all()
+
+    def handle_calendar_day_click(self, day: date) -> None:
+        # Thin by design (SDD.md v2.8.0): no business logic here, no
+        # `self.meetings` mutation -- the real creation still happens only
+        # when the user submits the normal form via `handle_save`/`_save_new`.
+        self.view.prefill_new_meeting(day)

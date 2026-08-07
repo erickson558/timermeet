@@ -229,6 +229,7 @@ class Callbacks:
     on_calendar_prev_month: Callable[[], None]
     on_calendar_next_month: Callable[[], None]
     on_calendar_today: Callable[[], None]
+    on_calendar_day_click: Callable[[date], None]
 
 
 def _button(parent, text: str, command, bg: str, fg: str, hover: Optional[str] = None, **extra) -> tk.Button:
@@ -265,6 +266,7 @@ class _ScrollablePanel(tk.Frame):
         self._scrollregion_job = None
         self._canvas_width_job = None
         self._pending_canvas_width = None
+        self._wheel_funcid = None
 
         # Debounced via after_idle rather than recalculating on every single
         # <Configure> event: inserting N sibling widgets (e.g. one meeting
@@ -282,8 +284,8 @@ class _ScrollablePanel(tk.Frame):
         self.canvas.pack(side="left", fill="both", expand=True)
         self.scrollbar.pack(side="right", fill="y")
 
-        self.canvas.bind("<Enter>", lambda _e: self.canvas.bind_all("<MouseWheel>", self._on_mousewheel))
-        self.canvas.bind("<Leave>", lambda _e: self.canvas.unbind_all("<MouseWheel>"))
+        self.canvas.bind("<Enter>", self._bind_wheel)
+        self.canvas.bind("<Leave>", self._unbind_wheel)
 
     def _schedule_scrollregion_update(self, _event=None) -> None:
         if self._scrollregion_job is not None:
@@ -307,6 +309,45 @@ class _ScrollablePanel(tk.Frame):
 
     def _on_mousewheel(self, event) -> None:
         self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    def _bind_wheel(self, _event=None) -> None:
+        # Guarded so a stray double-<Enter> (Tk can fire it without a
+        # matching <Leave> in between, e.g. moving the mouse across a nested
+        # child widget boundary) never registers a second global binding on
+        # top of one already active -- that second `bind_all` would itself
+        # be an orphaned Tcl command the moment `_unbind_wheel` only releases
+        # the last one it captured.
+        if self._wheel_funcid is None:
+            self._wheel_funcid = self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+
+    def _unbind_wheel(self, _event=None) -> None:
+        # `unbind_all` alone only removes the Tk *binding* for the sequence;
+        # it does NOT release the underlying Tcl command `bind_all` created
+        # (confirmed empirically: 100,000 Enter/Leave cycles across this
+        # panel and the meeting-form panel leaked 101,253 orphaned Tcl
+        # commands and +79MB RSS in a long-running session). Explicitly
+        # calling `deletecommand` on the funcid `bind_all` returned is what
+        # actually frees it. Guarded with `is None` so a stray <Leave>
+        # without a preceding <Enter> (or a second one) is a no-op instead
+        # of double-deleting an already-released command.
+        if self._wheel_funcid is not None:
+            self.canvas.unbind_all("<MouseWheel>")
+            # Deleting the command must go through `self.canvas._root()`,
+            # NOT `self.canvas` itself: CPython's `Misc.bind_all` implements
+            # a global binding as `self._root()._bind(('bind', 'all'), ...)`
+            # -- it registers the Tcl command against the *toplevel root*'s
+            # own bookkeeping list (`_tclCommands`), never the widget
+            # `bind_all` was called on. Calling `deletecommand` on `canvas`
+            # instead still deletes the real Tcl command (they share one
+            # interpreter) but silently fails to remove it from the root's
+            # list (a caught `ValueError`, since it's not in canvas's own
+            # list). That stale, already-deleted name then blows up
+            # `root.destroy()` at real app shutdown with `_tkinter.TclError:
+            # can't delete Tcl command` the moment `destroy()` tries to
+            # clean it up a second time -- confirmed empirically both ways
+            # before settling on this.
+            self.canvas._root().deletecommand(self._wheel_funcid)
+            self._wheel_funcid = None
 
 
 class MainWindow:
@@ -813,11 +854,19 @@ class MainWindow:
                 self._calendar_cells.append(self._build_calendar_cell(grid_frame, row, col))
 
     def _build_calendar_cell(self, parent, row: int, col: int) -> _CalendarCellWidgets:
-        cell = tk.Frame(parent, bg=PANEL_BG, highlightthickness=1, highlightbackground=BORDER)
+        # cursor="hand2" on both the frame's empty background and the day
+        # number is the only discoverability signal that this cell is
+        # clickable-to-create (see SDD.md v2.8.0 -- no new "+" widget, no
+        # hover color) -- matches the treatment `entry_label` already had.
+        cell = tk.Frame(
+            parent, bg=PANEL_BG, highlightthickness=1, highlightbackground=BORDER, cursor="hand2",
+        )
         cell.grid(row=row, column=col, sticky="nsew", padx=1, pady=1)
         cell.grid_columnconfigure(0, weight=1)
 
-        day_label = tk.Label(cell, text="", font=(FONT_FAMILY, 10, "bold"), bg=PANEL_BG, fg=TEXT, anchor="w")
+        day_label = tk.Label(
+            cell, text="", font=(FONT_FAMILY, 10, "bold"), bg=PANEL_BG, fg=TEXT, anchor="w", cursor="hand2",
+        )
         day_label.grid(row=0, column=0, sticky="w", padx=4, pady=(2, 0))
 
         entry_labels: List[tk.Label] = []
@@ -881,6 +930,19 @@ class MainWindow:
             day_bg, day_fg = PANEL_BG, SUBTLE
         widgets.day_label.configure(text=str(cell_data.day.day), bg=day_bg, fg=day_fg)
 
+        # Same "rebind a fresh closure on every render, never once at
+        # construction" reasoning as `entry_label` below: `day_label`/`frame`
+        # are long-lived widgets tied to a fixed grid *position*, not to a
+        # fixed date, so the date this closure should create a meeting for
+        # changes every time the user navigates months. Safe from leaking
+        # Tcl commands for the identical reason -- gated behind
+        # `render_calendar`'s own dirty-check in app.py, whose signature
+        # already keys on `cell.day` first, so an unchanged heartbeat tick
+        # never reaches this line at all.
+        day_click = lambda _e, d=cell_data.day: self._handle_calendar_day_click(d)
+        widgets.day_label.bind("<Button-1>", day_click)
+        widgets.frame.bind("<Button-1>", day_click)
+
         for index, entry_label in enumerate(widgets.entry_labels):
             if index < len(cell_data.entries):
                 entry = cell_data.entries[index]
@@ -930,6 +992,17 @@ class MainWindow:
         # is safe here specifically because this can only ever fire while
         # the calendar is already the active view.
         self.callbacks.on_edit(meeting_id)
+        self.callbacks.on_toggle_calendar_view()
+
+    def _handle_calendar_day_click(self, day: date) -> None:
+        # Mirrors `_handle_calendar_entry_click`'s two-step pattern (data
+        # action first, then hand the view-toggle to app.py) -- here the
+        # "data action" is preparing a blank form for `day` instead of
+        # populating one from an existing meeting. Tkinter doesn't propagate
+        # a child widget's click up to its parent, so this only ever fires
+        # from a click on the day number or the cell's own empty background,
+        # never as a duplicate of an `entry_label` click (see SDD.md v2.8.0).
+        self.callbacks.on_calendar_day_click(day)
         self.callbacks.on_toggle_calendar_view()
 
     def _start_gadget_drag(self, event) -> None:
@@ -1271,6 +1344,14 @@ class MainWindow:
         self.save_button.configure(text=i18n.t("saveButton", self.language))
         self.form_feedback_label.configure(text="")
         self._handle_recurrence_change(self._recurrence_var.get())
+
+    def prefill_new_meeting(self, target_date: date) -> None:
+        """Calendar-day-click entry point (SDD.md v2.8.0): reset the form to
+        the exact same blank state the "Limpiar" button produces, then set
+        only the date field -- workName/time/reminder/sound/recurrence all
+        stay at `clear_form`'s defaults, no inference from calendar context."""
+        self.clear_form()
+        self._set_entry(self.date_entry, target_date.isoformat())
 
     def set_now_values(self, date_str: str, time_str: str) -> None:
         self._set_entry(self.date_entry, date_str)

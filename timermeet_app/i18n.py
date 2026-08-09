@@ -11,7 +11,7 @@ open", "this browser cannot..."). Each reworded value is marked with a
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import date, datetime
 
 DEFAULT_LANGUAGE = "es"
 
@@ -180,6 +180,10 @@ translations = {
         "calendarWeekdaySat": "Sáb",
         "calendarWeekdaySun": "Dom",
         "calendarMoreLabel": "+{count} más",
+        "weekViewButton": "Vista semanal",
+        "weekPrevButton": "‹",
+        "weekNextButton": "›",
+        "weekTodayButton": "Esta semana",
     },
     "en": {
         "appTitle": "TimerMeet",
@@ -343,6 +347,10 @@ translations = {
         "calendarWeekdaySat": "Sat",
         "calendarWeekdaySun": "Sun",
         "calendarMoreLabel": "+{count} more",
+        "weekViewButton": "Week view",
+        "weekPrevButton": "‹",
+        "weekNextButton": "›",
+        "weekTodayButton": "This week",
     },
 }
 
@@ -410,3 +418,44 @@ def format_month_year(year: int, month: int, language: str = DEFAULT_LANGUAGE) -
     "August 2026"."""
     names = _MONTH_NAMES_FULL.get(language, _MONTH_NAMES_FULL[DEFAULT_LANGUAGE])
     return f"{names[month - 1]} {year}"
+
+
+def _month_abbrev(month: int, language: str) -> str:
+    """3-letter, capitalized month abbreviation for the weekly view's range
+    header (e.g. "Ago", "Jul") -- sliced from `_MONTH_NAMES_FULL`, not the
+    already-abbreviated, lowercase `_MONTHS` table `format_datetime_display`
+    uses. `_MONTHS`'s casing ("ago", "jul") reads fine inline in a sentence
+    but looks wrong as a capitalized standalone header token, and this view
+    family's other header (`format_month_year`) already reads "Agosto
+    2026", not "ago 2026" -- this keeps that same capitalized precedent."""
+    names = _MONTH_NAMES_FULL.get(language, _MONTH_NAMES_FULL[DEFAULT_LANGUAGE])
+    return names[month - 1][:3]
+
+
+def format_week_range(start: date, end: date, language: str = DEFAULT_LANGUAGE) -> str:
+    """Date-range header for the weekly calendar view's nav bar (SDD.md
+    v2.9.0), e.g. "10-16 Ago 2026" (same month), "27 Jul - 2 Ago 2026"
+    (month crossing), or a year-crossing week (only reachable by a
+    Monday-first week straddling Dec 31/Jan 1, e.g. "29 Dic 2025 - 4 Ene
+    2026"). No new `translations[...]` key for the format itself -- same
+    precedent `format_month_year` already established: this is date
+    arithmetic plus a per-language day/month ordering, not a translated
+    sentence with placeholders.
+    """
+    is_es = language == "es"
+    start_month = _month_abbrev(start.month, language)
+    end_month = _month_abbrev(end.month, language)
+
+    if start.year != end.year:
+        if is_es:
+            return f"{start.day} {start_month} {start.year} - {end.day} {end_month} {end.year}"
+        return f"{start_month} {start.day}, {start.year} - {end_month} {end.day}, {end.year}"
+
+    if start.month != end.month:
+        if is_es:
+            return f"{start.day} {start_month} - {end.day} {end_month} {end.year}"
+        return f"{start_month} {start.day} - {end_month} {end.day}, {end.year}"
+
+    if is_es:
+        return f"{start.day}-{end.day} {start_month} {end.year}"
+    return f"{start_month} {start.day}-{end.day}, {end.year}"

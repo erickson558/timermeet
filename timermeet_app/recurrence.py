@@ -201,6 +201,22 @@ def month_grid(year: int, month: int, firstweekday: int = 0) -> List[List[date]]
     return weeks[:6]
 
 
+def week_dates(anchor: date, firstweekday: int = 0) -> List[date]:
+    """Return the 7 `date` objects (Monday-first by default) of the week
+    containing `anchor`, in order -- the weekly calendar view's equivalent
+    of `month_grid` (see SDD.md v2.9.0), same purity/testing discipline
+    (no `tkinter`, unit-tested directly). Unlike `month_grid`, there's no
+    stdlib `calendar` helper for "the week containing this date" to wrap --
+    `anchor.weekday()` (Mon=0...Sun=6, the same convention `_is_weekend`/
+    `validate_meeting` already use) gives the offset back to that week's
+    Monday directly, so this is a plain arithmetic shift rather than a
+    `calendar.Calendar` call.
+    """
+    offset = (anchor.weekday() - firstweekday) % 7
+    start = anchor - timedelta(days=offset)
+    return [start + timedelta(days=i) for i in range(7)]
+
+
 def run_weekly_series_renewal(meetings: List[models.Meeting], now: Optional[datetime] = None) -> int:
     """Extend every active recurring series so it stays populated roughly a
     week into the future, refreshed starting each Friday 18:00 local time (or

@@ -20,6 +20,7 @@ CustomTkinter design; see MEMORY/SDD for the tradeoff this was worth making.
 from __future__ import annotations
 
 import tkinter as tk
+import tkinter.font as tkfont
 import tkinter.messagebox as messagebox
 import webbrowser
 from dataclasses import dataclass
@@ -79,6 +80,33 @@ _CARD_PALETTE = {
     "danger_fg": "#ffffff",
 }
 
+# A meeting card's actual content (color chip + title + one countdown/
+# recurrence line + 3 action buttons) never needs more than ~400-500px --
+# measured growing unbounded from a reasonable 308px at the app's 960px
+# minsize floor up to 1084px on a 1920px-wide monitor, which reads as
+# sparse/broken rather than adapting well. Passed as `_ScrollablePanel`'s
+# `max_content_width` for the meeting-list panel only (see `_build_summary`)
+# -- the meeting-form panel's own `_ScrollablePanel` is intentionally left
+# uncapped, it was never part of this bug. Left-aligned rather than
+# centered: simplest change that satisfies the requirement (no need to also
+# reposition the canvas window's x-coordinate), and it keeps the list's left
+# edge lined up with the panel's other left-aligned content (stats cards,
+# filter row) above it.
+MEETING_CARD_MAX_WIDTH_PX = 760
+
+# `title_label`'s own `.grid(padx=...)` inside a meeting card (see
+# `_create_card`) -- pulled out as a named constant because
+# `_on_meeting_list_width_change` needs the exact same number to compute
+# how much of the card's width is actually available to the title text
+# itself once this padding is subtracted. A second-round adversarial review
+# found that capping the card's width above (`MEETING_CARD_MAX_WIDTH_PX`)
+# shrank a title's available room from as much as ~1060px (old, uncapped,
+# on a 1920px monitor) down to ~736px (760 minus this padding twice) with
+# no wrap/truncation to match -- a 90-character title (well under
+# `security.MAX_TITLE_LENGTH=120`) that used to always fit now silently
+# clipped mid-character. See `_on_meeting_list_width_change` for the fix.
+_CARD_TITLE_PADX = 12
+
 _SOUND_LABEL_KEYS = [
     ("soft", "soundSoft"),
     ("urgent", "soundUrgent"),
@@ -127,6 +155,210 @@ def _truncate_calendar_entry(text: str) -> str:
         return text
     return text[: _CALENDAR_ENTRY_MAX_CHARS - 1].rstrip() + "…"
 
+
+# Weekly calendar view (v2.9.0): 24 hour-rows x 7 day-columns, reusing
+# `CalendarEntry` for each hour-cell's up-to-2 meeting rows -- see SDD.md's
+# v2.9.0 section for the full design (the hour-axis-scrolls-with-the-grid
+# decision, the Nivel A/Nivel B split for the live time-line, etc.).
+WEEK_ROWS = 24
+WEEK_COLS = 7
+# 2, not the month view's 3: an hour-row is much shorter than a full day
+# cell (see SDD.md decision #7) -- deliberately lower, not a copy-paste of
+# CALENDAR_MAX_ENTRIES_PER_CELL.
+WEEK_MAX_ENTRIES_PER_CELL = 2
+# SDD.md's starting point was 48px ("comfortable for 2 lines of text"), but
+# a cell can show 3 lines at once -- 2 entries (WEEK_MAX_ENTRIES_PER_CELL)
+# PLUS the "+N más" overflow row underneath them, all three simultaneously
+# whenever an hour has more meetings than fit. Measured empirically against
+# a real widget tree: 3 stacked 8pt entry/overflow labels need ~65px, so
+# 48px would silently clip the overflow row in a busy hour. This matters
+# more here than it would elsewhere in the app: `grid_rowconfigure(...,
+# minsize=...)` is only a MINIMUM -- Tk's grid never shrinks a row below
+# its widest/tallest current content -- so an under-sized constant wouldn't
+# just clip text, it would silently grow THAT row taller than every other
+# row, breaking the live time-line's pure-arithmetic Y math (SDD.md
+# decision #3), which assumes every row is exactly this many pixels tall.
+# 70px keeps a small margin above the measured 67px true minimum (content
+# height + this cell's own `pady`) for minor cross-environment font-metric
+# variance (ClearType/DPI settings).
+WEEK_ROW_HEIGHT_PX = 70
+# Wide enough for "23:00" at 9pt plus the small trailing padx this column
+# already gets in `_build_week_view` -- measured against the app's declared
+# floor (root.minsize(960, 640), same floor `_CALENDAR_ENTRY_MAX_CHARS` was
+# measured against) so the axis never clips even at that minimum width.
+HOUR_AXIS_WIDTH_PX = 56
+# `tk.Scrollbar`'s own default width on Windows -- reserved as a spacer in
+# the day-header row (built OUTSIDE the `_ScrollablePanel`, per SDD.md
+# decision #2) so its 7 day columns keep lining up with the scrollable
+# grid's day columns underneath, which lose this same width to their own
+# vertical scrollbar.
+_WEEK_SCROLLBAR_SPACER_PX = 17
+# A week's day column is narrower than a month cell's (the day column here
+# also gives up room to the hour axis + scrollbar spacer, see above), so the
+# month view's 20-char budget does not transfer without remeasuring -- and
+# this grid has a sharper failure mode than the month view's if it's picked
+# wrong: all 24 hour-rows share the SAME 7 day-columns, and Tk's grid only
+# distributes *extra* space via `weight=1` -- it never shrinks a column
+# below the widest content currently inside it. One single un-truncated
+# long title in any ONE of the 168 cells would widen that whole column
+# (every other hour in that day, not just that one cell), silently
+# distorting all 7 columns' proportions. Measured empirically at this app's
+# 960px minsize floor (same floor `_CALENDAR_ENTRY_MAX_CHARS` was measured
+# against) with every cell otherwise blank: each day column's "fair share"
+# width was ~120px, and font.measure() against that budget (minus the
+# label's own padx margins) found 19 characters as the true fit limit for a
+# representative long title. 16 keeps a deliberate margin below that
+# measured limit -- smaller than the month view's own margin (24 clipped,
+# 20 fits), on purpose, given the column-wide-distortion risk above.
+_WEEK_ENTRY_MAX_CHARS = 16
+# Distinct from every other color in the palette on purpose (see SDD.md
+# decision #3): not ACCENT (already means "today"/primary action) and not
+# DANGER (already means "destructive"), so the live time-line reads as its
+# own, unambiguous "this is where 'now' is" signal.
+NOW_LINE_COLOR = "#22c55e"
+# See `MainWindow._apply_week_now_line`'s docstring: a real day column can
+# never legitimately be narrower than ~120px at this app's 960px minsize
+# floor, but a just-`.grid()`ed cell's pre-layout width measured as low as
+# ~18px before Tk finished a real geometry pass -- this sits with margin
+# between the two, used to detect "not really laid out yet" without
+# assuming the stale value is always exactly the same number.
+_WEEK_LINE_MIN_PLAUSIBLE_WIDTH_PX = 80
+# Defense-in-depth cap on `_apply_week_now_line`'s self-reschedule (see its
+# docstring): the cold-start width delay it works around resolves within
+# ~1.5s in every empirical measurement, so 20 retries at the 300ms interval
+# below (6s total) is a >3x margin above that -- generous enough to never
+# fire under real conditions, but a hard ceiling so a future window state
+# that genuinely never resolves can't retry unconditionally forever even if
+# the active-view checks elsewhere in this method somehow have a gap.
+_WEEK_LINE_MAX_RETRIES = 20
+
+
+def _truncate_week_entry(text: str) -> str:
+    if len(text) <= _WEEK_ENTRY_MAX_CHARS:
+        return text
+    return text[: _WEEK_ENTRY_MAX_CHARS - 1].rstrip() + "…"
+
+
+def _truncate_text_to_pixel_width(text: str, font: "tkfont.Font", max_width_px: int) -> str:
+    """Ellipsis truncation measured in real pixels via `font.measure()` --
+    the same metric Tk itself uses to lay out a Label -- rather than a
+    fixed character-count budget like `_truncate_calendar_entry`/
+    `_truncate_week_entry` above. Those two can get away with a static
+    character count because their available width is a fixed pixel column
+    that never changes at runtime; the header subtitle's available width
+    (see `MainWindow._update_header_subtitle`) changes on every window
+    resize, so a single hardcoded character count can't stay correct across
+    this app's whole 960px-1920px supported range. Binary search over
+    `text`'s length rather than a linear scan: this runs on every header
+    resize (debounced, but still potentially every live-drag frame), and
+    `font.measure()` is a real Tcl round-trip, not free.
+
+    Returns `""` (never a bare, unindicated `"…"` or worse) if not even the
+    ellipsis itself fits `max_width_px` -- callers treat an empty result as
+    "hide the subtitle at this width" per this app's own acceptance
+    criterion (show fully, show truncated-with-ellipsis, or hide -- never a
+    silent raw clip)."""
+    if max_width_px <= 0:
+        return ""
+    if font.measure(text) <= max_width_px:
+        return text
+    ellipsis = "…"
+    if font.measure(ellipsis) > max_width_px:
+        return ""
+    low, high, best = 0, len(text), ""
+    while low <= high:
+        mid = (low + high) // 2
+        candidate = text[:mid].rstrip() + ellipsis
+        if font.measure(candidate) <= max_width_px:
+            best = candidate
+            low = mid + 1
+        else:
+            high = mid - 1
+    return best
+
+
+# Header action-row spacing (see `_build_header`): measured empirically
+# against a real widget tree (960px through 1920px, all three header
+# instances) that the *default* `_button` padding (12px internal + 4px pack
+# gap) made this row's 8 buttons (Notificar/Idioma/up to 2 view-switch/
+# Gadget/Bandeja/Donar/Salir) require ~1040-1065px total -- more than the
+# app's own declared floor, `root.minsize(960, 640)` (v2.4.0), which a
+# completely ordinary action (Windows' Win+Left/Right half-screen Snap on any
+# 1920px-wide monitor) lands on directly. Because `header`'s grid gives
+# column 0 (title/subtitle/chips) the only nonzero weight and leaves this
+# actions column at weight 0, Tk's grid always honors a 0-weight column's
+# full requested size first and shrinks the weighted column to absorb any
+# deficit (down to 0 if needed) -- so at 960px the *buttons* never actually
+# shrink; they get laid out at their full width starting from wherever
+# column 0 was compressed to, which pushes the rightmost ones (Donar, Salir)
+# past the window's real right edge, off-screen and unclickable.
+#
+# SECOND ROUND (see `_header_title_column_minsize`): a follow-up adversarial
+# review found that the first-round fix above -- correct on its own terms --
+# left column 0 with no *floor*, so at that same 960px width Tk was free to
+# compress it all the way down to ~1px, taking the app's own name
+# ("TimerMeet", `title_label`) down with it. Giving column 0 a real
+# `grid_columnconfigure(minsize=...)` floor fixes that (see
+# `_build_header`), but empirically (real `tk.Tk()`, no mocks, this row's
+# actual widgets) a hard floor for the title and this row's *first-round*
+# footprint do not both fit inside the ~928px a 960px window actually gives
+# `header` (960 minus `full_view`'s own 16px outer padding on each side):
+# even shaved to the bone (2px button padding, 0px gaps) this row measured
+# ~777-799px, and `title_label` alone needs ~198px (170px text at its real
+# 24pt bold font + `title_box`'s own 28px padding) on top of that -- ~50-70px
+# more than the ~928px available, regardless of how tight the padding gets.
+# This isn't a padding problem: it's this row's Spanish button *text* itself
+# (`i18n.DEFAULT_LANGUAGE`) -- "Probar notificación nativa" + up to 2
+# view-switch labels + "Modo gadget" + "Bandeja" + "Cómprame una cerveza" +
+# "Salir", the worst case being the list/week headers' 8-button row --
+# already measuring ~695-717px on its own, un-padded.
+#
+# Closing that remaining gap needed one more lever: `_HEADER_BUTTON_FONT_SIZE`
+# below drops this row's own font from `_button`'s app-wide default (11pt)
+# to 9pt -- still comfortably legible, and matching this app's own existing
+# precedent for secondary UI text at a similarly small size (the version/
+# storage chips at 10pt, calendar/week entry labels at 8pt, see
+# `_CALENDAR_ENTRY_MAX_CHARS`'s neighborhood above) -- scoped to *only* this
+# row via `_button`'s new `font_size` parameter, so every other `_button()`
+# call site in this file (meeting cards, month/week nav, the form) stays at
+# 11pt, unaffected. That plus the tighter spacing constants below measured
+# the worst case (`es`, list header) down to ~691px, leaving a verified
+# ~237px for column 0 at the 960px floor -- comfortably more than
+# `title_label`'s ~198px full-fidelity need, with real margin left over for
+# cross-environment font-metric variance (ClearType/DPI settings).
+_HEADER_BUTTON_PADX = 4
+_HEADER_BUTTON_GAP_PX = 1
+_HEADER_ACTIONS_OUTER_PADX = 4
+_HEADER_EXIT_SPACER_PX = 4
+_HEADER_BUTTON_FONT_SIZE = 9
+
+# `title_box`'s own external padding (see `_build_header`'s `.grid(padx=...)`
+# call) -- pulled out as a named constant because `_header_title_column_minsize`
+# below needs the exact same number to compute column 0's floor (title's own
+# natural text width alone isn't enough; this padding is real space Tk
+# reserves around it inside the column).
+_HEADER_TITLE_BOX_PADX = 14
+# Safety margin added on top of `title_label`'s measured natural width when
+# computing column 0's `minsize` (see `_header_title_column_minsize`) --
+# covers small cross-machine font-metric rounding (ClearType/DPI) without
+# eating meaningfully into the ~27px of slack the header-row changes above
+# leave at the 960px floor (see that comment block for the real numbers).
+_HEADER_TITLE_MIN_MARGIN_PX = 12
+# Trimmed off the *end* of the available width when truncating the header
+# subtitle (see `MainWindow._update_header_subtitle`) so the ellipsis never
+# sits flush against the header's own edge -- small and purely cosmetic,
+# unlike `_HEADER_TITLE_MIN_MARGIN_PX` above, which protects a hard
+# never-clip guarantee.
+_HEADER_SUBTITLE_SAFETY_MARGIN_PX = 4
+# `_update_header_subtitle`'s guard against measuring against a header that
+# hasn't had a real layout pass yet (either pre-`mainloop()`, or because it
+# belongs to a primary view that isn't the active one -- see that method's
+# docstring). A real header can never legitimately be narrower than this at
+# the app's own 960px `minsize` floor; a header that hasn't been through a
+# real layout pass yet reports Tk's pre-layout default instead (effectively
+# 1px), well below it -- mirrors `_WEEK_LINE_MIN_PLAUSIBLE_WIDTH_PX`'s
+# identical reasoning for the week view's own cold-start delay.
+_HEADER_SUBTITLE_MIN_PLAUSIBLE_WIDTH_PX = 100
 
 _RECURRENCE_LABEL_KEYS = [
     ("none", "recurrenceNone"),
@@ -186,12 +418,56 @@ class _CalendarCellWidgets:
 
 
 @dataclass
+class WeekCellData:
+    """One hour-cell's worth of display data for the weekly calendar view
+    (see SDD.md v2.9.0) -- reuses `CalendarEntry` unchanged (same
+    `time_text`/`title`/`color`/`meeting_id` shape the month view already
+    uses), just grouped by (day, hour) instead of by day alone."""
+
+    day: date
+    hour: int
+    entries: List[CalendarEntry]
+    overflow_count: int
+
+
+@dataclass
+class _WeekCellWidgets:
+    """No `day_label` here (unlike `_CalendarCellWidgets`) -- a week cell's
+    day identity lives in the one fixed day-header row above the scrollable
+    grid, not repeated in each of that column's 24 hour-cells."""
+
+    frame: tk.Frame
+    entry_labels: List[tk.Label]
+    overflow_label: tk.Label
+
+
+@dataclass
 class _HeaderWidgets:
     """Widget handles for one instance of the shared header (see
-    `_build_header`) -- `full_view` and `calendar_view` each get their own
-    instance, so `apply_translations`/`update_storage_status` must loop over
-    every entry in `MainWindow._headers` instead of assuming a single set of
-    header widgets exists."""
+    `_build_header`) -- `full_view`, `calendar_view`, and `week_view` each
+    get their own instance, so `apply_translations`/`update_storage_status`
+    must loop over every entry in `MainWindow._headers` instead of assuming
+    a single set of header widgets exists.
+
+    `view_switch_buttons` replaces what used to be a single
+    `calendar_toggle_button`/`calendar_toggle_key` pair now that List/Month/
+    Week are three mutually exclusive named views instead of a 2-way toggle
+    (SDD.md v2.9.0) -- each header gets up to 2 "go to view X" buttons
+    (never a 1-button cycle, which can't unambiguously represent 3
+    destinations), so this is a list of (button, i18n key) pairs instead of
+    one of each.
+
+    `header_frame`/`actions_frame` and `subtitle_truncate_job` exist purely
+    for `MainWindow._update_header_subtitle`'s dynamic ellipsis truncation
+    (see that method and `_schedule_subtitle_update`) -- `header_frame` is
+    read for its real current width, `actions_frame` for its (effectively
+    fixed, 0-weight) footprint, and `subtitle_truncate_job` is this specific
+    header instance's own `after_idle` debounce handle, mirroring
+    `_ScrollablePanel`'s `_canvas_width_job` pattern. Kept per-instance
+    (not a single `MainWindow`-level attribute) for the same reason
+    everything else here is: three header instances exist, each resizing
+    independently.
+    """
 
     title_label: tk.Label
     subtitle_label: tk.Label
@@ -199,12 +475,14 @@ class _HeaderWidgets:
     storage_chip: tk.Label
     notify_button: tk.Button
     language_button: tk.Button
-    calendar_toggle_button: tk.Button
-    calendar_toggle_key: str
+    view_switch_buttons: List[Tuple[tk.Button, str]]
     gadget_button: tk.Button
     tray_button: tk.Button
     donate_button: tk.Button
     exit_button: tk.Button
+    header_frame: tk.Frame
+    actions_frame: tk.Frame
+    subtitle_truncate_job: Optional[str] = None
 
 
 @dataclass
@@ -225,18 +503,25 @@ class Callbacks:
     on_remove_company: Callable[[str], None]
     on_toggle_gadget_mode: Callable[[], None]
     on_enter_tray_mode: Callable[[], None]
-    on_toggle_calendar_view: Callable[[], None]
+    on_set_active_view: Callable[[str], None]
     on_calendar_prev_month: Callable[[], None]
     on_calendar_next_month: Callable[[], None]
     on_calendar_today: Callable[[], None]
     on_calendar_day_click: Callable[[date], None]
+    on_week_prev: Callable[[], None]
+    on_week_next: Callable[[], None]
+    on_week_today: Callable[[], None]
+    on_week_slot_click: Callable[[date, int], None]
 
 
-def _button(parent, text: str, command, bg: str, fg: str, hover: Optional[str] = None, **extra) -> tk.Button:
+def _button(
+    parent, text: str, command, bg: str, fg: str, hover: Optional[str] = None,
+    padx: int = 12, pady: int = 6, font_size: int = 11, **extra,
+) -> tk.Button:
     hover = hover or bg
     btn = tk.Button(
         parent, text=text, command=command, bg=bg, fg=fg, activebackground=hover, activeforeground=fg,
-        relief="flat", borderwidth=0, padx=12, pady=6, cursor="hand2", font=(FONT_FAMILY, 11), **extra,
+        relief="flat", borderwidth=0, padx=padx, pady=pady, cursor="hand2", font=(FONT_FAMILY, font_size), **extra,
     )
     btn.bind("<Enter>", lambda _e: btn.configure(bg=hover))
     btn.bind("<Leave>", lambda _e: btn.configure(bg=bg))
@@ -257,12 +542,37 @@ class _ScrollablePanel(tk.Frame):
     un-overridden (callers that need to clear rendered content use
     `.body.winfo_children()`)."""
 
-    def __init__(self, parent, bg: str):
+    def __init__(
+        self, parent, bg: str, max_content_width: Optional[int] = None,
+        on_content_width_change: Optional[Callable[[int], None]] = None,
+    ):
+        """`max_content_width` caps how wide `.body` (and therefore anything
+        gridded into it with `sticky="ew"`, e.g. a meeting card) is ever
+        allowed to stretch -- `None` (the default, used by the meeting-form
+        panel) preserves the original unbounded behavior. Left `None` unless
+        a caller opts in; see the meeting-list panel in `_build_summary` for
+        the one caller that does.
+
+        `on_content_width_change`, if given, is called from
+        `_update_canvas_width` with the resolved width actually applied to
+        `.body` (post-`max_content_width` clamp) every time it changes --
+        added so a caller whose children stretch to fill `.body` (e.g. a
+        meeting card's title label) can keep something width-dependent
+        (wraplength) in sync without re-deriving this same clamped-width
+        logic a second time or adding its own separate `<Configure>` binding
+        on `.body` (which would silently clobber this class's own existing
+        `body.bind("<Configure>", ...)` scrollregion binding below unless it
+        also remembered to pass `add="+"`). `None` (the default) preserves
+        the original behavior for every other caller (the meeting-form
+        panel, and the meeting-list panel before this parameter existed)."""
         super().__init__(parent, bg=bg)
         self.canvas = tk.Canvas(self, bg=bg, highlightthickness=0)
         self.scrollbar = tk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
         self.body = tk.Frame(self.canvas, bg=bg)
         self._window = self.canvas.create_window((0, 0), window=self.body, anchor="nw")
+        self._max_content_width = max_content_width
+        self._on_content_width_change = on_content_width_change
+        self._last_content_width: Optional[int] = None
         self._scrollregion_job = None
         self._canvas_width_job = None
         self._pending_canvas_width = None
@@ -305,7 +615,20 @@ class _ScrollablePanel(tk.Frame):
     def _update_canvas_width(self) -> None:
         self._canvas_width_job = None
         if self._pending_canvas_width is not None:
-            self.canvas.itemconfig(self._window, width=self._pending_canvas_width)
+            width = self._pending_canvas_width
+            if self._max_content_width is not None:
+                # min(), not a hard override: below the cap this behaves
+                # exactly like the uncapped panel (content still stretches
+                # to fill a narrow window), and only clamps once the canvas
+                # is wider than the cap -- the extra width past that point
+                # is simply left as canvas background (already the same
+                # color as `.body`, so it reads as deliberate margin, not a
+                # gap) rather than stretching a meeting card to it.
+                width = min(width, self._max_content_width)
+            self.canvas.itemconfig(self._window, width=width)
+            if self._on_content_width_change is not None and width != self._last_content_width:
+                self._last_content_width = width
+                self._on_content_width_change(width)
 
     def _on_mousewheel(self, event) -> None:
         self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
@@ -375,16 +698,37 @@ class MainWindow:
         self._card_widgets: Dict[str, _CardWidgets] = {}
         self._card_language: Optional[str] = None
         self._empty_state_frame: Optional[tk.Frame] = None
-        # Which of the two *primary* (non-gadget) sibling frames is the
+        # Which of the three *primary* (non-gadget) sibling frames is the
         # logical "current view" -- read by `set_gadget_mode` on exit so
-        # leaving gadget mode restores whichever of list/calendar was active
-        # beforehand instead of always jumping back to the list (the bug
-        # documented in SDD.md's v2.7.0 section). Only `set_active_view` and
-        # `set_gadget_mode` ever change this.
+        # leaving gadget mode restores whichever of list/calendar/week was
+        # active beforehand instead of always jumping back to the list (the
+        # bug documented in SDD.md's v2.7.0 section, now extended to a third
+        # view in v2.9.0). Only `set_active_view` and `set_gadget_mode` ever
+        # change this.
         self._primary_view = "list"
         self._headers: List[_HeaderWidgets] = []
         self._calendar_weekday_labels: List[tk.Label] = []
         self._calendar_cells: List[_CalendarCellWidgets] = []
+        self._week_day_header_labels: List[tk.Label] = []
+        self._week_cells: List[_WeekCellWidgets] = []
+        self._week_now_line: Optional[tk.Frame] = None
+        self._week_live_state: Tuple[Optional[int], int, int] = (None, 0, 0)
+        self._week_live_retry_job: Optional[str] = None
+        self._week_live_retry_count = 0
+        # Lazily created/cached on first use (both need a live `tk.Tk()` to
+        # query font metrics, which doesn't exist yet at this point in
+        # `__init__`) -- see `_header_title_column_minsize`/`_subtitle_font`.
+        # `title_label`'s text/font never change (see the property below),
+        # so this is computed once and reused across all 3 header instances
+        # instead of re-measuring the same string 3 times.
+        self._title_natural_width_px: Optional[int] = None
+        self._subtitle_font_cache: Optional["tkfont.Font"] = None
+        # Set from `_ScrollablePanel`'s `on_content_width_change` hook (see
+        # `_build_summary`/`_on_meeting_list_width_change`) -- `None` until
+        # the meeting-list panel's first real `<Configure>` fires, at which
+        # point every meeting card built afterwards picks it up immediately
+        # (see `_create_card`) instead of waiting for its own resize event.
+        self._card_title_wraplength_px: Optional[int] = None
 
         self.root.configure(bg=WINDOW_BG)
         self._configure_ttk_style()
@@ -425,12 +769,14 @@ class MainWindow:
     # -- layout ---------------------------------------------------------------
 
     def _build_layout(self) -> None:
-        # root has exactly one grid cell, holding whichever of these three
+        # root has exactly one grid cell, holding whichever of these four
         # sibling frames is currently gridded -- full_view (the list view:
         # header+form+summary, unchanged), calendar_view (the monthly grid,
-        # see `_build_calendar_view`/`set_active_view`), or gadget_view (the
-        # borderless mini skin, see `_build_gadget_view`/`set_gadget_mode`).
-        # Only one is ever gridded at a time; the other two sit ungridded.
+        # see `_build_calendar_view`/`set_active_view`), week_view (the
+        # weekly grid, see `_build_week_view`/`set_active_view`), or
+        # gadget_view (the borderless mini skin, see
+        # `_build_gadget_view`/`set_gadget_mode`). Only one is ever gridded
+        # at a time; the other three sit ungridded.
         self.root.grid_columnconfigure(0, weight=1)
         self.root.grid_rowconfigure(0, weight=1)
 
@@ -439,7 +785,9 @@ class MainWindow:
         self.full_view.grid_columnconfigure(0, weight=1)
         self.full_view.grid_rowconfigure(1, weight=1)
 
-        self.full_header = self._build_header(self.full_view, "calendarViewButton")
+        self.full_header = self._build_header(
+            self.full_view, [("calendar", "calendarViewButton"), ("week", "weekViewButton")]
+        )
         self._headers.append(self.full_header)
 
         body = tk.Frame(self.full_view, bg=WINDOW_BG)
@@ -453,31 +801,40 @@ class MainWindow:
 
         self._build_gadget_view()
         self._build_calendar_view()
+        self._build_week_view()
 
-    def _build_header(self, parent, calendar_toggle_key: str) -> _HeaderWidgets:
+    def _build_header(self, parent, view_buttons: List[Tuple[str, str]]) -> _HeaderWidgets:
         """Builds one full copy of the header (title/version/storage chips +
-        the Notify/Language/Calendar-toggle/Gadget/Tray/Donate/Exit action
-        row) into `parent`, and returns handles to every widget it created
-        instead of stashing them on `self` directly -- this is called twice
-        (once for `full_view`, once for `calendar_view`, see
-        `_build_calendar_view`), and a plain `self.title_label = ...` would
-        have the second call silently overwrite the first view's widget
-        reference, leaving `full_view`'s header never updated again by
-        `apply_translations`/`update_storage_status`. Both call sites keep
-        every returned instance in `self._headers` and loop over it instead.
-        `calendar_toggle_key` is the only thing that differs between the two
-        headers' otherwise-identical action rows: "Vista calendario" on
-        `full_view`'s copy, "Vista de lista" on `calendar_view`'s -- both
-        buttons share the same `on_toggle_calendar_view` callback (it's a
-        toggle), exactly like "Modo gadget"/"Completo" already share
-        `on_toggle_gadget_mode`.
+        the Notify/Language/view-switch/Gadget/Tray/Donate/Exit action row)
+        into `parent`, and returns handles to every widget it created
+        instead of stashing them on `self` directly -- this is called once
+        per primary view (`full_view`, `calendar_view`, `week_view`), and a
+        plain `self.title_label = ...` would have each later call silently
+        overwrite the previous view's widget reference, leaving that view's
+        header never updated again by `apply_translations`/
+        `update_storage_status`. Every call site keeps its returned instance
+        in `self._headers` and loops over it instead.
+
+        `view_buttons` is a list of (target-view-name, i18n-key) pairs --
+        up to 2 per header, one "go to view X" button each (never a single
+        button cycling through all views: with three mutually exclusive
+        views, a 1-button cycle can't unambiguously say which of the other
+        two clicking it leads to, and it would also silently change the
+        already-shipped behavior of the month view's "Vista de lista"
+        button, see SDD.md's v2.9.0 section). Each button calls
+        `on_set_active_view(target)` directly.
         """
         header = tk.Frame(parent, bg=PANEL_BG)
         header.grid(row=0, column=0, sticky="ew", padx=16, pady=16)
-        header.grid_columnconfigure(0, weight=1)
+        # `minsize` is column 0's hard floor -- see `_header_title_column_minsize`
+        # and the big comment block above `_HEADER_BUTTON_PADX` for why a bare
+        # `weight=1` (the pre-fix state) let Tk compress this column, and
+        # `title_label` along with it, all the way down to ~1px whenever this
+        # row's `weight=0` actions column needed the deficit absorbed.
+        header.grid_columnconfigure(0, weight=1, minsize=self._header_title_column_minsize())
 
         title_box = tk.Frame(header, bg=PANEL_BG)
-        title_box.grid(row=0, column=0, sticky="w", padx=14, pady=14)
+        title_box.grid(row=0, column=0, sticky="w", padx=_HEADER_TITLE_BOX_PADX, pady=14)
         title_label = tk.Label(
             title_box, text="TimerMeet", font=(FONT_FAMILY, 24, "bold"), bg=PANEL_BG, fg=TEXT,
         )
@@ -499,35 +856,149 @@ class MainWindow:
         storage_chip.pack(side="left")
 
         actions = tk.Frame(header, bg=PANEL_BG)
-        actions.grid(row=0, column=1, sticky="e", padx=14, pady=14)
-        notify_button = _button(actions, "", self.callbacks.on_test_notification, GHOST_BG, GHOST_FG, GHOST_HOVER)
-        notify_button.pack(side="left", padx=4)
-        language_button = _button(actions, "EN", self.callbacks.on_toggle_language, GHOST_BG, GHOST_FG, GHOST_HOVER)
-        language_button.pack(side="left", padx=4)
-        calendar_toggle_button = _button(
-            actions, "", self.callbacks.on_toggle_calendar_view, GHOST_BG, GHOST_FG, GHOST_HOVER
+        actions.grid(row=0, column=1, sticky="e", padx=_HEADER_ACTIONS_OUTER_PADX, pady=14)
+        notify_button = _button(
+            actions, "", self.callbacks.on_test_notification, GHOST_BG, GHOST_FG, GHOST_HOVER,
+            padx=_HEADER_BUTTON_PADX, font_size=_HEADER_BUTTON_FONT_SIZE,
         )
-        calendar_toggle_button.pack(side="left", padx=4)
-        gadget_button = _button(actions, "", self.callbacks.on_toggle_gadget_mode, GHOST_BG, GHOST_FG, GHOST_HOVER)
-        gadget_button.pack(side="left", padx=4)
-        tray_button = _button(actions, "", self.callbacks.on_enter_tray_mode, GHOST_BG, GHOST_FG, GHOST_HOVER)
-        tray_button.pack(side="left", padx=4)
-        donate_button = _button(actions, "", self._open_donate, GOLD_BG, GOLD_FG, GOLD_HOVER)
-        donate_button.pack(side="left", padx=4)
+        notify_button.pack(side="left", padx=_HEADER_BUTTON_GAP_PX)
+        language_button = _button(
+            actions, "EN", self.callbacks.on_toggle_language, GHOST_BG, GHOST_FG, GHOST_HOVER,
+            padx=_HEADER_BUTTON_PADX, font_size=_HEADER_BUTTON_FONT_SIZE,
+        )
+        language_button.pack(side="left", padx=_HEADER_BUTTON_GAP_PX)
+        view_switch_buttons: List[Tuple[tk.Button, str]] = []
+        for target_view, key in view_buttons:
+            view_button = _button(
+                actions, "", lambda target=target_view: self.callbacks.on_set_active_view(target),
+                GHOST_BG, GHOST_FG, GHOST_HOVER, padx=_HEADER_BUTTON_PADX, font_size=_HEADER_BUTTON_FONT_SIZE,
+            )
+            view_button.pack(side="left", padx=_HEADER_BUTTON_GAP_PX)
+            view_switch_buttons.append((view_button, key))
+        gadget_button = _button(
+            actions, "", self.callbacks.on_toggle_gadget_mode, GHOST_BG, GHOST_FG, GHOST_HOVER,
+            padx=_HEADER_BUTTON_PADX, font_size=_HEADER_BUTTON_FONT_SIZE,
+        )
+        gadget_button.pack(side="left", padx=_HEADER_BUTTON_GAP_PX)
+        tray_button = _button(
+            actions, "", self.callbacks.on_enter_tray_mode, GHOST_BG, GHOST_FG, GHOST_HOVER,
+            padx=_HEADER_BUTTON_PADX, font_size=_HEADER_BUTTON_FONT_SIZE,
+        )
+        tray_button.pack(side="left", padx=_HEADER_BUTTON_GAP_PX)
+        donate_button = _button(
+            actions, "", self._open_donate, GOLD_BG, GOLD_FG, GOLD_HOVER,
+            padx=_HEADER_BUTTON_PADX, font_size=_HEADER_BUTTON_FONT_SIZE,
+        )
+        donate_button.pack(side="left", padx=_HEADER_BUTTON_GAP_PX)
         # A thin visual gap sets "Salir" apart from the utility buttons --
         # it's the one action in this row that ends the whole app, not just
         # toggles a setting or opens a link, so it shouldn't blend in.
-        tk.Frame(actions, bg=PANEL_BG, width=12).pack(side="left")
-        exit_button = _button(actions, "", self.callbacks.on_exit, DANGER, "#ffffff", DANGER_HOVER)
-        exit_button.pack(side="left", padx=4)
+        tk.Frame(actions, bg=PANEL_BG, width=_HEADER_EXIT_SPACER_PX).pack(side="left")
+        exit_button = _button(
+            actions, "", self.callbacks.on_exit, DANGER, "#ffffff", DANGER_HOVER,
+            padx=_HEADER_BUTTON_PADX, font_size=_HEADER_BUTTON_FONT_SIZE,
+        )
+        exit_button.pack(side="left", padx=_HEADER_BUTTON_GAP_PX)
 
-        return _HeaderWidgets(
+        header_widgets = _HeaderWidgets(
             title_label=title_label, subtitle_label=subtitle_label, version_chip=version_chip,
             storage_chip=storage_chip, notify_button=notify_button, language_button=language_button,
-            calendar_toggle_button=calendar_toggle_button, calendar_toggle_key=calendar_toggle_key,
+            view_switch_buttons=view_switch_buttons,
             gadget_button=gadget_button, tray_button=tray_button, donate_button=donate_button,
-            exit_button=exit_button,
+            exit_button=exit_button, header_frame=header, actions_frame=actions,
         )
+        # Recomputes the subtitle's ellipsis truncation whenever this specific
+        # header actually resizes (see `_schedule_subtitle_update`/
+        # `_update_header_subtitle`) -- `header`'s own width changes 1:1 with
+        # the window's width (it's the only weighted column's parent-of-parent,
+        # see `full_view.grid_columnconfigure(0, weight=1)` in `_build_layout`),
+        # so this is the one `<Configure>` this class needs to react to, not
+        # `title_box`'s own (which would be circular: shrinking the subtitle
+        # text shrinks `title_box`'s natural request, which would change
+        # `title_box`'s own `<Configure>` again).
+        header.bind("<Configure>", lambda _e, hw=header_widgets: self._schedule_subtitle_update(hw))
+        return header_widgets
+
+    def _header_title_column_minsize(self) -> int:
+        """Column 0's `grid_columnconfigure(minsize=...)` floor (see
+        `_build_header`) -- measured via `tkinter.font.Font.measure()`
+        against `title_label`'s own real font/text rather than a guessed
+        constant, so this stays correct if either ever changes. Cached after
+        the first call: `title_label`'s text ("TimerMeet") and font
+        (`FONT_FAMILY`, 24, bold) are the same in every header instance and
+        never change at runtime (unlike the subtitle, which is re-measured
+        per resize -- see `_update_header_subtitle`), so there's nothing to
+        gain from re-querying the same font metrics 3 times over.
+        """
+        if self._title_natural_width_px is None:
+            title_font = tkfont.Font(root=self.root, family=FONT_FAMILY, size=24, weight="bold")
+            self._title_natural_width_px = title_font.measure("TimerMeet")
+        # `title_box`'s own padding (see its `.grid(padx=_HEADER_TITLE_BOX_PADX)`
+        # call) is real space Tk reserves around the title inside this column
+        # -- omitting it here would let the column's floor be satisfied while
+        # `title_box` itself still gets squeezed by that missing padding.
+        return self._title_natural_width_px + (_HEADER_TITLE_BOX_PADX * 2) + _HEADER_TITLE_MIN_MARGIN_PX
+
+    def _get_subtitle_font(self) -> "tkfont.Font":
+        if self._subtitle_font_cache is None:
+            self._subtitle_font_cache = tkfont.Font(root=self.root, family=FONT_FAMILY, size=12)
+        return self._subtitle_font_cache
+
+    def _schedule_subtitle_update(self, header: _HeaderWidgets) -> None:
+        """Debounced the same way `_ScrollablePanel._schedule_canvas_width_update`
+        already is: a live window-resize drag fires a burst of `<Configure>`
+        events on `header` in a row, and re-measuring/re-truncating the
+        subtitle text on every single one of them is real (if small) work
+        this doesn't need to repeat for every intermediate frame."""
+        if header.subtitle_truncate_job is not None:
+            return
+        header.subtitle_truncate_job = self.root.after_idle(lambda: self._apply_subtitle_update(header))
+
+    def _apply_subtitle_update(self, header: _HeaderWidgets) -> None:
+        header.subtitle_truncate_job = None
+        self._update_header_subtitle(header)
+
+    def _update_header_subtitle(self, header: _HeaderWidgets) -> None:
+        """Recomputes `header.subtitle_label`'s displayed text to fit
+        whatever width column 0 actually has *right now* -- full text,
+        ellipsis-truncated (`_truncate_text_to_pixel_width`), or empty (this
+        app's stand-in for "hidden": an empty `tk.Label` occupies no visible
+        space) if even the ellipsis doesn't fit. Called from both
+        `_schedule_subtitle_update` (on resize) and `apply_translations` (on
+        a language toggle, which changes the full untruncated text) so the
+        two triggers never fall out of sync with two separate copies of this
+        arithmetic.
+
+        `header.header_frame.winfo_width()` can legitimately be tiny (Tk's
+        pre-layout default, effectively 1px) in two real situations: before
+        `mainloop()`'s first real layout pass (this runs once already, from
+        `MainWindow.__init__` -> `apply_translations`, before the window has
+        ever been mapped), and for the two header instances that belong to
+        whichever primary view *isn't* currently active (an ungridded frame
+        has no real allocated screen width -- see `set_active_view`). Bailing
+        out on an implausibly small width rather than truncating against it
+        avoids a visible flash to "" that would otherwise self-correct one
+        frame later anyway once a real `<Configure>` fires (on first paint,
+        or the moment this header's view becomes active) -- same reasoning
+        `_WEEK_LINE_MIN_PLAUSIBLE_WIDTH_PX` already documents for the
+        week view's own cold-start width delay.
+        """
+        full_text = i18n.t("appSubtitle", self.language)
+        header_width = header.header_frame.winfo_width()
+        if header_width <= _HEADER_SUBTITLE_MIN_PLAUSIBLE_WIDTH_PX:
+            return
+        # Column 1 (actions) never shrinks (see the `_HEADER_BUTTON_PADX`
+        # comment block) -- its own reqwidth plus its `.grid(padx=...)` is a
+        # reliable stand-in for "how much of `header_width` it's already
+        # claimed", leaving the rest for column 0 without needing to read
+        # column 0's own (possibly stale, see the docstring above) geometry.
+        actions_width = header.actions_frame.winfo_reqwidth() + (_HEADER_ACTIONS_OUTER_PADX * 2)
+        column0_width = max(header_width - actions_width, self._header_title_column_minsize())
+        available_for_subtitle = (
+            column0_width - (_HEADER_TITLE_BOX_PADX * 2) - _HEADER_SUBTITLE_SAFETY_MARGIN_PX
+        )
+        truncated = _truncate_text_to_pixel_width(full_text, self._get_subtitle_font(), available_for_subtitle)
+        header.subtitle_label.configure(text=truncated)
 
     def _open_donate(self) -> None:
         if security.is_http_url(DONATE_URL):
@@ -733,10 +1204,35 @@ class MainWindow:
         )
         self.meeting_count_label.pack(side="left", padx=(8, 0))
 
-        list_container = _ScrollablePanel(panel, bg=PANEL_BG)
+        list_container = _ScrollablePanel(
+            panel, bg=PANEL_BG, max_content_width=MEETING_CARD_MAX_WIDTH_PX,
+            on_content_width_change=self._on_meeting_list_width_change,
+        )
         list_container.grid(row=5, column=0, sticky="nsew", padx=14, pady=(0, 14))
         self.meeting_list_frame = list_container.body
         self.meeting_list_frame.grid_columnconfigure(0, weight=1)
+
+    def _on_meeting_list_width_change(self, width: int) -> None:
+        """Keeps every meeting card's title label wrapping at the card's
+        *actual current* width instead of a fixed guess -- needed because
+        `MEETING_CARD_MAX_WIDTH_PX` means that width isn't constant (it
+        scales with the window up to the cap, see `_ScrollablePanel`'s own
+        docstring). A card's title stretches to fill the card via its own
+        `sticky="ew"` (see `_create_card`), so `width` here -- the same
+        already-`min()`-clamped value `_ScrollablePanel` just applied to
+        `.body` -- minus the title label's own `padx` on each side is
+        exactly the pixel budget Tk will actually give the title to render
+        into. Wrapping (not truncating) was the choice for a card that
+        doesn't fit: unlike a calendar/week cell, a meeting card has no
+        fixed-height assumption elsewhere in this file that a taller,
+        2-line title would break (`_ScrollablePanel`'s own scrollregion
+        already recomputes from real content height on every change, see
+        its `_schedule_scrollregion_update`), so wrapping preserves the
+        full title instead of silently discarding part of it."""
+        wraplength = max(width - (_CARD_TITLE_PADX * 2), 1)
+        self._card_title_wraplength_px = wraplength
+        for widgets in self._card_widgets.values():
+            widgets.title_label.configure(wraplength=wraplength)
 
     def _stat_card(self, parent, column: int) -> Dict[str, tk.Label]:
         card = tk.Frame(parent, bg=CHIP_BG)
@@ -811,7 +1307,9 @@ class MainWindow:
         self.calendar_view.grid_columnconfigure(0, weight=1)
         self.calendar_view.grid_rowconfigure(3, weight=1)
 
-        self.calendar_header = self._build_header(self.calendar_view, "listViewButton")
+        self.calendar_header = self._build_header(
+            self.calendar_view, [("list", "listViewButton"), ("week", "weekViewButton")]
+        )
         self._headers.append(self.calendar_header)
 
         nav = tk.Frame(self.calendar_view, bg=PANEL_BG)
@@ -884,23 +1382,155 @@ class MainWindow:
             frame=cell, day_label=day_label, entry_labels=entry_labels, overflow_label=overflow_label,
         )
 
+    # -- weekly calendar view -----------------------------------------------------
+
+    def _build_week_view(self) -> None:
+        """The fourth sibling of `full_view`/`calendar_view`/`gadget_view` in
+        root's one grid cell (see `_build_gadget_view`'s docstring for why a
+        sibling frame, never a second Toplevel/Tk()). Built once, eagerly,
+        right alongside the other three -- per SDD.md's v2.9.0 decision #8,
+        this is the biggest fixed widget-count jump yet (~718 widgets) and
+        is measured against the .exe's 5s startup budget rather than assumed
+        safe; if a real regression ever shows up, this is the one call to
+        make lazy (build on first toggle instead of here), not
+        `full_view`/`calendar_view`. `set_active_view` grids it in/out; it
+        starts ungridded because the default primary view is the list.
+
+        Layout, top to bottom: its own header copy (Exit/Language/Donate/
+        Gadget/Tray stay reachable, same precedent as `calendar_view`), a
+        nav bar (Prev/Next/This-week + the date-range label), a day-header
+        row OUTSIDE the scrollable area (so the user never loses track of
+        which column is which day while scrolling vertically -- see SDD.md
+        decision #2), and a `_ScrollablePanel` holding the 24x7 hour/day
+        grid plus the always-on-top-of-it-but-never-`.grid()`ed live time
+        line (see `update_week_live_indicators`). The hour axis is column 0
+        of that SAME grid (scrolls with it, not pinned) -- SDD.md decision
+        #1 explains why a synced-scroll dual-canvas (the only way to pin it)
+        was deliberately rejected as a new surface for the exact class of
+        Tcl-command-leak bug this codebase has already hit twice.
+        """
+        self.week_view = tk.Frame(self.root, bg=WINDOW_BG)
+        self.week_view.grid_columnconfigure(0, weight=1)
+        self.week_view.grid_rowconfigure(3, weight=1)
+
+        self.week_header = self._build_header(
+            self.week_view, [("list", "listViewButton"), ("calendar", "calendarViewButton")]
+        )
+        self._headers.append(self.week_header)
+
+        nav = tk.Frame(self.week_view, bg=PANEL_BG)
+        nav.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 8))
+        self.week_prev_button = _button(nav, "", self.callbacks.on_week_prev, GHOST_BG, GHOST_FG, GHOST_HOVER)
+        self.week_prev_button.pack(side="left", padx=(0, 4))
+        self.week_range_label = tk.Label(
+            nav, text="", font=(FONT_FAMILY, 15, "bold"), bg=PANEL_BG, fg=TEXT, width=22, anchor="center",
+        )
+        self.week_range_label.pack(side="left", padx=4)
+        self.week_next_button = _button(nav, "", self.callbacks.on_week_next, GHOST_BG, GHOST_FG, GHOST_HOVER)
+        self.week_next_button.pack(side="left", padx=(4, 12))
+        self.week_today_button = _button(nav, "", self.callbacks.on_week_today, GHOST_BG, GHOST_FG, GHOST_HOVER)
+        self.week_today_button.pack(side="left")
+
+        day_header_row = tk.Frame(self.week_view, bg=WINDOW_BG)
+        day_header_row.grid(row=2, column=0, sticky="ew", padx=16)
+        day_header_row.grid_columnconfigure(0, minsize=HOUR_AXIS_WIDTH_PX)
+        for col in range(WEEK_COLS):
+            day_header_row.grid_columnconfigure(col + 1, weight=1)
+            label = tk.Label(
+                day_header_row, text="", font=(FONT_FAMILY, 10, "bold"), bg=WINDOW_BG, fg=MUTED, anchor="center",
+            )
+            label.grid(row=0, column=col + 1, sticky="ew", pady=(0, 4))
+            self._week_day_header_labels.append(label)
+        # Spacer matching the scrollable grid's own vertical scrollbar width
+        # (see `_WEEK_SCROLLBAR_SPACER_PX`) so this fixed header row's 7 day
+        # columns keep lining up with the day columns of the scrollable grid
+        # below it, which give up that same width to their scrollbar.
+        tk.Frame(day_header_row, bg=WINDOW_BG, width=_WEEK_SCROLLBAR_SPACER_PX).grid(row=0, column=WEEK_COLS + 1)
+
+        scroll_panel = _ScrollablePanel(self.week_view, bg=WINDOW_BG)
+        scroll_panel.grid(row=3, column=0, sticky="nsew", padx=16, pady=(0, 16))
+        # `scroll_panel.body` doubles as the "grid_frame" SDD.md describes --
+        # column 0 is the hour axis, columns 1-7 are the 7 day columns, and
+        # it scrolls as one unit (the hour axis is NOT pinned, see decision
+        # #1 above). Using `body` directly instead of adding one more nested
+        # Frame keeps the widget count down (see design-notes.md's "think
+        # twice before adding a widget" guidance for this exact fixed panel).
+        grid_frame = scroll_panel.body
+        grid_frame.grid_columnconfigure(0, minsize=HOUR_AXIS_WIDTH_PX)
+        for col in range(1, WEEK_COLS + 1):
+            grid_frame.grid_columnconfigure(col, weight=1)
+
+        for row in range(WEEK_ROWS):
+            grid_frame.grid_rowconfigure(row, minsize=WEEK_ROW_HEIGHT_PX)
+            # The hour axis is static (never translated, never re-configured
+            # after construction -- "00:00".."23:00" reads identically in
+            # both languages) so it needs no rebind/re-render bookkeeping at
+            # all, unlike every other label in this view.
+            hour_label = tk.Label(
+                grid_frame, text=f"{row:02d}:00", font=(FONT_FAMILY, 9), bg=WINDOW_BG, fg=MUTED, anchor="ne",
+            )
+            hour_label.grid(row=row, column=0, sticky="nsew", padx=(0, 4))
+            for col in range(WEEK_COLS):
+                self._week_cells.append(self._build_week_cell(grid_frame, row, col))
+
+        # A single thin Frame, built once and reused for the app's whole
+        # life: `update_week_live_indicators` only ever `.place()`s or
+        # `.place_forget()`s it (see SDD.md decision #3) -- it's a real
+        # pixel coordinate, not a grid cell, so `.grid()` is never used on
+        # it at all, and it's never destroyed/recreated.
+        self._week_now_line = tk.Frame(grid_frame, bg=NOW_LINE_COLOR, height=2)
+
+    def _build_week_cell(self, parent, row: int, col: int) -> _WeekCellWidgets:
+        cell = tk.Frame(
+            parent, bg=PANEL_BG, highlightthickness=1, highlightbackground=BORDER, cursor="hand2",
+        )
+        cell.grid(row=row, column=col + 1, sticky="nsew", padx=1, pady=1)
+        cell.grid_columnconfigure(0, weight=1)
+
+        entry_labels: List[tk.Label] = []
+        for slot in range(WEEK_MAX_ENTRIES_PER_CELL):
+            entry_label = tk.Label(
+                cell, text="", font=(FONT_FAMILY, 8), anchor="w", cursor="hand2", padx=3,
+            )
+            entry_label.grid(row=slot, column=0, sticky="ew", padx=3, pady=1)
+            entry_labels.append(entry_label)
+
+        overflow_label = tk.Label(cell, text="", font=(FONT_FAMILY, 8), bg=PANEL_BG, fg=MUTED, anchor="w")
+        overflow_label.grid(row=WEEK_MAX_ENTRIES_PER_CELL, column=0, sticky="ew", padx=4, pady=1)
+
+        return _WeekCellWidgets(frame=cell, entry_labels=entry_labels, overflow_label=overflow_label)
+
     def _primary_view_frame(self) -> tk.Frame:
-        return self.calendar_view if self._primary_view == "calendar" else self.full_view
+        if self._primary_view == "calendar":
+            return self.calendar_view
+        if self._primary_view == "week":
+            return self.week_view
+        return self.full_view
 
     def set_active_view(self, view: str) -> None:
         """Swap which of `full_view` ("list") / `calendar_view` ("calendar")
-        is gridded into root's cell -- the same swap mechanism
-        `set_gadget_mode` already uses, just between the two non-gadget
-        frames. Also records `_primary_view`, which `set_gadget_mode` reads
-        on exit so leaving gadget mode returns to whichever of these two was
-        active beforehand instead of unconditionally landing on the list
-        (see that method's docstring)."""
+        / `week_view` ("week") is gridded into root's cell -- the same swap
+        mechanism `set_gadget_mode` already uses, just between the three
+        non-gadget frames. Also records `_primary_view`, which
+        `set_gadget_mode` reads on exit so leaving gadget mode returns to
+        whichever of these three was active beforehand instead of
+        unconditionally landing on the list (see that method's docstring)."""
         if self._gadget_active:
-            # Defensive only: the toggle buttons that call this live in
-            # full_view's/calendar_view's own headers, neither of which is
-            # reachable while gadget_view is the one gridded frame -- this
-            # should never actually fire from the real UI.
+            # Defensive only: the view-switch buttons that call this live in
+            # full_view's/calendar_view's/week_view's own headers, none of
+            # which is reachable while gadget_view is the one gridded frame
+            # -- this should never actually fire from the real UI.
             return
+        if self._primary_view == "week" and view != "week":
+            # See SDD.md's v2.9.0 "Resultado real vs. diseño" section (second
+            # bug write-up) / `_apply_week_now_line`'s
+            # docstring: that method reschedules itself via `root.after(...)`
+            # while it's waiting out the cold-start width delay, entirely
+            # independent of app.py's own heartbeat gating. Leaving week view
+            # before that width resolves must stop the chain here -- without
+            # this, the retry keeps firing every 300ms for the rest of the
+            # session even though week view is no longer on screen.
+            self._cancel_week_live_retry()
         self._primary_view_frame().grid_remove()
         self._primary_view = view
         self._primary_view_frame().grid(row=0, column=0, sticky="nsew")
@@ -986,24 +1616,204 @@ class MainWindow:
 
     def _handle_calendar_entry_click(self, meeting_id: str) -> None:
         # Same edit flow as the list view's "Editar" button, then hand the
-        # view-toggle back to app.py so its `active_view` bookkeeping (used
+        # view-switch back to app.py so its `active_view` bookkeeping (used
         # to skip calendar recompute while the list is showing, see
-        # `_refresh_calendar`) stays correct -- reusing the toggle callback
-        # is safe here specifically because this can only ever fire while
-        # the calendar is already the active view.
+        # `_refresh_calendar`) stays correct.
         self.callbacks.on_edit(meeting_id)
-        self.callbacks.on_toggle_calendar_view()
+        self.callbacks.on_set_active_view("list")
 
     def _handle_calendar_day_click(self, day: date) -> None:
         # Mirrors `_handle_calendar_entry_click`'s two-step pattern (data
-        # action first, then hand the view-toggle to app.py) -- here the
+        # action first, then hand the view-switch to app.py) -- here the
         # "data action" is preparing a blank form for `day` instead of
         # populating one from an existing meeting. Tkinter doesn't propagate
         # a child widget's click up to its parent, so this only ever fires
         # from a click on the day number or the cell's own empty background,
         # never as a duplicate of an `entry_label` click (see SDD.md v2.8.0).
         self.callbacks.on_calendar_day_click(day)
-        self.callbacks.on_toggle_calendar_view()
+        self.callbacks.on_set_active_view("list")
+
+    def render_week_grid(self, week_range_label: str, day_header_texts: List[str], cells: List[WeekCellData]) -> None:
+        """Nivel A (see SDD.md v2.9.0 decision #4): incremental, like
+        `render_calendar` -- reuses the 168 pre-built cell widgets via
+        `.configure()`/`.grid()`/`.grid_remove()` every call, never
+        destroys/recreates one. Called from app.py only while the week view
+        is active AND only when its own dirty-check signature changed (see
+        `_refresh_week`) -- that signature deliberately excludes hour/minute,
+        so a bare heartbeat tick with unchanged data never reaches the
+        `.bind()` calls in `_update_week_cell` below. The live time-line's
+        per-minute movement is handled entirely by `update_week_live_indicators`
+        instead (Nivel B) -- mixing the two would reintroduce the exact
+        Tcl-command-leak class already found and fixed twice in this
+        codebase (see module-map.md)."""
+        self.week_range_label.configure(text=week_range_label)
+        for label_widget, text in zip(self._week_day_header_labels, day_header_texts):
+            label_widget.configure(text=text)
+        for widgets, cell_data in zip(self._week_cells, cells):
+            self._update_week_cell(widgets, cell_data)
+
+    def _update_week_cell(self, widgets: _WeekCellWidgets, cell_data: WeekCellData) -> None:
+        # Same "rebind a fresh closure on every render, never once at
+        # construction" reasoning `_update_calendar_cell` already documents
+        # for `day_label`/`frame`: this cell is a fixed grid *position*
+        # (one hour of one weekday column), not a fixed date -- which real
+        # date/hour it represents changes every time the user navigates
+        # weeks. Safe from leaking Tcl commands for the identical reason:
+        # gated behind `render_week_grid`'s own dirty-check in app.py.
+        slot_click = lambda _e, d=cell_data.day, h=cell_data.hour: self._handle_week_slot_click(d, h)
+        widgets.frame.bind("<Button-1>", slot_click)
+
+        for index, entry_label in enumerate(widgets.entry_labels):
+            if index < len(cell_data.entries):
+                entry = cell_data.entries[index]
+                entry_label.configure(
+                    text=_truncate_week_entry(f"{entry.time_text} {entry.title}"),
+                    bg=entry.color, fg="black",
+                )
+                entry_label.bind(
+                    "<Button-1>", lambda _e, mid=entry.meeting_id: self._handle_week_entry_click(mid)
+                )
+                entry_label.grid()
+            else:
+                entry_label.grid_remove()
+
+        if cell_data.overflow_count > 0:
+            widgets.overflow_label.configure(
+                text=i18n.format_text("calendarMoreLabel", self.language, count=cell_data.overflow_count)
+            )
+            widgets.overflow_label.grid()
+        else:
+            widgets.overflow_label.grid_remove()
+
+    def update_week_live_indicators(self, today_index: Optional[int], hour: int, minute: int) -> None:
+        """Nivel B (see SDD.md v2.9.0 decision #4): the ONLY two things this
+        touches are the 7 day-header labels' colors (highlighting "today")
+        and the live time-line's `.place()`/`.place_forget()` -- NEVER
+        `.bind()`. That split is what makes it safe to call this as often as
+        app.py's own gate allows (at most once a real minute while the shown
+        week is the current one, see `_refresh_week`) for as long as the app
+        stays open, with none of the unbounded-Tcl-command-leak risk
+        `render_week_grid`/`_update_week_cell` have to guard against above.
+        `today_index` is `None` whenever the visible week is not the real
+        current week (see SDD.md decision #5) -- the line is hidden and no
+        day header is highlighted in that case.
+        """
+        for index, label in enumerate(self._week_day_header_labels):
+            if index == today_index:
+                label.configure(bg=ACCENT, fg=ACCENT_FG)
+            else:
+                label.configure(bg=WINDOW_BG, fg=MUTED)
+
+        self._week_live_state = (today_index, hour, minute)
+        # A fresh state to place is a fresh attempt at resolving real
+        # geometry -- reset the retry counter so a legitimate later call
+        # (e.g. the user left and re-entered week view) isn't penalized by
+        # retries an earlier, unrelated call already spent.
+        self._week_live_retry_count = 0
+        self._cancel_week_live_retry()
+        self._apply_week_now_line()
+
+    def _cancel_week_live_retry(self) -> None:
+        """Best-effort cancellation of a pending `_apply_week_now_line`
+        self-reschedule (see that method's docstring for what it's retrying
+        and why). Wrapped in the same defensive try/except
+        `alarm_ui.py::AlarmController.dismiss()` already uses for its own
+        job cancellation: `after_cancel` on an id whose callback already ran
+        raises in some Tk states, and failing to cancel a stale job is far
+        cheaper than raising out of a view switch."""
+        if self._week_live_retry_job is not None:
+            try:
+                self.root.after_cancel(self._week_live_retry_job)
+            except Exception:  # nosec B110
+                pass
+            self._week_live_retry_job = None
+
+    def _apply_week_now_line(self) -> None:
+        """Places (or hides) the live time-line from `self._week_live_state`
+        (the last values `update_week_live_indicators` recorded). Split out
+        from `update_week_live_indicators` so it can also be re-invoked by
+        `self.root.after(...)` retries below, without re-doing the
+        day-header color pass or re-recording state each retry tick.
+
+        Y is pure arithmetic against the declared row-height constant
+        (never derived from `winfo_y()` of a real row -- see SDD.md decision
+        #3). X/width DO need a live query because column width is
+        proportional to the window's (resizable) actual width, taken from
+        the row-0 cell of the "today" column (`self._week_cells[today_index]`,
+        since row 0's cells are the first `WEEK_COLS` entries in that
+        row-major list).
+
+        The `width < _WEEK_LINE_MIN_PLAUSIBLE_WIDTH_PX` guard and retry
+        below exist because of a real, empirically-confirmed one-time
+        cold-start delay: the very first time the week view is ever
+        activated in a session, `winfo_width()` on a just-`.grid()`ed hour
+        cell does NOT reliably read as an obvious "not mapped" sentinel
+        (`<=1`) -- it measured a small, real-looking but WRONG ~18px
+        (this widget's own pre-layout natural size) for up to ~1.5s before
+        Tk finished propagating the newly-mapped grid's real column widths,
+        confirmed directly with a live widget tree, not assumed. A day
+        column can never legitimately be that narrow: at this app's
+        `root.minsize(960, 640)` floor, 7 columns of the available width
+        (minus the fixed hour axis + scrollbar) works out to ~120px each --
+        so `_WEEK_LINE_MIN_PLAUSIBLE_WIDTH_PX` sits well below that real
+        floor and well above the observed stale value, with margin on both
+        sides. Retrying on a real timer (never `update()`/`update_idletasks()`,
+        per this project's hard rule) self-heals within about a second and
+        never recurs for the rest of the session once real geometry has
+        resolved once -- confirmed empirically that a later switch away and
+        back reuses the already-correct cached geometry immediately.
+
+        Two termination guards, both required (fixed together after a real
+        bug: this used to reschedule itself unconditionally forever if the
+        user switched away from week view before the width resolved): the
+        active-view check right below bails out -- doing no work and,
+        critically, NOT rescheduling -- the moment week view is no longer
+        the visible primary frame (covers both a plain List/Month switch via
+        `set_active_view`, which also proactively cancels any pending job
+        itself, and a gadget-mode toggle, which doesn't call
+        `set_active_view` at all but is still caught here); and
+        `_WEEK_LINE_MAX_RETRIES` caps the retry count as defense-in-depth for
+        a window state that hypothetically never resolves, so a gap in the
+        active-view check can never again turn into an unconditional
+        forever-loop."""
+        if self._primary_view != "week" or self._gadget_active:
+            # Week view isn't the visible primary frame anymore -- either a
+            # plain view switch (which already cancelled any pending retry
+            # job before getting here, see `set_active_view`) or a
+            # gadget-mode toggle (which doesn't go through `set_active_view`
+            # at all, so this is the only place that catches it). Either
+            # way: no widget to place a line onto, and no reschedule.
+            return
+        today_index, hour, minute = self._week_live_state
+        if today_index is None:
+            self._week_now_line.place_forget()
+            return
+        reference_cell = self._week_cells[today_index].frame
+        width = reference_cell.winfo_width()
+        if width < _WEEK_LINE_MIN_PLAUSIBLE_WIDTH_PX:
+            self._week_now_line.place_forget()
+            self._week_live_retry_count += 1
+            if self._week_live_retry_count > _WEEK_LINE_MAX_RETRIES:
+                # Give up -- see the cap's own comment for why this margin
+                # is generous. Leaves the line hidden rather than placed
+                # with implausible geometry; a later `update_week_live_indicators`
+                # call (next heartbeat tick, still gated to once a minute)
+                # resets the counter and gets a fresh set of attempts.
+                self._week_live_retry_job = None
+                return
+            self._week_live_retry_job = self.root.after(300, self._apply_week_now_line)
+            return
+        x = reference_cell.winfo_x()
+        y = WEEK_ROW_HEIGHT_PX * (hour + minute / 60)
+        self._week_now_line.place(x=x, y=y, width=width, height=2)
+
+    def _handle_week_entry_click(self, meeting_id: str) -> None:
+        self.callbacks.on_edit(meeting_id)
+        self.callbacks.on_set_active_view("list")
+
+    def _handle_week_slot_click(self, day: date, hour: int) -> None:
+        self.callbacks.on_week_slot_click(day, hour)
+        self.callbacks.on_set_active_view("list")
 
     def _start_gadget_drag(self, event) -> None:
         # Guards against a real, reproduced bug: double-clicking the gadget
@@ -1089,12 +1899,13 @@ class MainWindow:
         alarm_ui.py) whose own visibility never depended on root's mapped
         state, size, or decoration -- only on its own attributes.
 
-        Which of `full_view`/`calendar_view` gets grid_remove()d on entry and
-        grid()ed back on exit is resolved through `_primary_view_frame()`
-        (backed by `_primary_view`), not hardcoded to `full_view` -- with a
-        third primary view added in v2.7.0, hardcoding it here was a real
-        bug: entering gadget mode from the calendar and leaving it again
-        used to always land back on the list instead of the calendar. Only
+        Which of `full_view`/`calendar_view`/`week_view` gets grid_remove()d
+        on entry and grid()ed back on exit is resolved through
+        `_primary_view_frame()` (backed by `_primary_view`), not hardcoded
+        to `full_view` -- with a third primary view added in v2.7.0 (and a
+        fourth in v2.9.0), hardcoding it here was a real bug: entering
+        gadget mode from the calendar and leaving it again used to always
+        land back on the list instead of the calendar. Only
         `set_active_view` ever changes `_primary_view`, so whichever primary
         view was showing before this call is exactly what reappears after
         it, regardless of how many times gadget mode is toggled in between.
@@ -1345,13 +2156,20 @@ class MainWindow:
         self.form_feedback_label.configure(text="")
         self._handle_recurrence_change(self._recurrence_var.get())
 
-    def prefill_new_meeting(self, target_date: date) -> None:
-        """Calendar-day-click entry point (SDD.md v2.8.0): reset the form to
+    def prefill_new_meeting(self, target_date: date, hour: Optional[int] = None) -> None:
+        """Calendar-day-click entry point (SDD.md v2.8.0), extended in
+        v2.9.0 for the week view's empty-hour-cell click: reset the form to
         the exact same blank state the "Limpiar" button produces, then set
-        only the date field -- workName/time/reminder/sound/recurrence all
-        stay at `clear_form`'s defaults, no inference from calendar context."""
+        the date field -- and, when `hour` is given, the time field to
+        `HH:00` -- workName/reminder/sound/recurrence all stay at
+        `clear_form`'s defaults either way, no inference beyond date/hour
+        from the calendar/week context. `hour` defaults to `None` so the
+        month calendar's existing day-click call site (which never has an
+        hour to offer) keeps its exact previously-shipped behavior."""
         self.clear_form()
         self._set_entry(self.date_entry, target_date.isoformat())
+        if hour is not None:
+            self._set_entry(self.time_entry, f"{hour:02d}:00")
 
     def set_now_values(self, date_str: str, time_str: str) -> None:
         self._set_entry(self.date_entry, date_str)
@@ -1495,9 +2313,19 @@ class MainWindow:
         status_label.grid(row=0, column=1, sticky="e")
 
         title_label = tk.Label(
-            card, font=(FONT_FAMILY, 14, "bold"), anchor="w", bg=palette["card_bg"], fg=palette["title_fg"],
+            card, font=(FONT_FAMILY, 14, "bold"), anchor="w", justify="left",
+            bg=palette["card_bg"], fg=palette["title_fg"],
+            # Seeded from the last width `_on_meeting_list_width_change`
+            # observed, if any, so a card created mid-session (after the
+            # panel's first resize already fired) wraps correctly from its
+            # very first render instead of showing one un-wrapped frame at
+            # Tk's default (no-wrap) width until the next resize event.
+            # `0` (Tk's own "no wraplength configured" default) only when
+            # this is the first card ever built, before any real
+            # `<Configure>` on the meeting-list panel has fired yet.
+            wraplength=self._card_title_wraplength_px or 0,
         )
-        title_label.grid(row=1, column=0, sticky="ew", padx=12)
+        title_label.grid(row=1, column=0, sticky="ew", padx=_CARD_TITLE_PADX)
 
         # Countdown + recurrence share one line (instead of two separate
         # labels) -- one less widget per card and a less cluttered card.
@@ -1548,15 +2376,23 @@ class MainWindow:
             return i18n.t(key, language)
 
         self.root.title(tr("appTitle"))
-        # Both header instances (full_view's and calendar_view's) share this
-        # loop -- see `_HeaderWidgets`/`_build_header` for why there are two.
+        # All three header instances (full_view's, calendar_view's,
+        # week_view's) share this loop -- see `_HeaderWidgets`/`_build_header`
+        # for why there are three.
         for header in self._headers:
             header.title_label.configure(text=tr("appTitle"))
-            header.subtitle_label.configure(text=tr("appSubtitle"))
+            # Not a plain `.configure(text=tr("appSubtitle"))`: the subtitle
+            # must stay truncated-to-fit after a language toggle too (the
+            # two languages' subtitle strings are different lengths -- see
+            # `_HEADER_BUTTON_PADX`'s comment block), so this goes through
+            # the same width-aware logic `_schedule_subtitle_update` uses on
+            # resize instead of duplicating it here with the untruncated text.
+            self._update_header_subtitle(header)
             header.version_chip.configure(text=f"{tr('versionLabel')}: v{__version__}")
             header.notify_button.configure(text=tr("enableNotifications"))
             header.language_button.configure(text="EN" if language == "es" else "ES")
-            header.calendar_toggle_button.configure(text=tr(header.calendar_toggle_key))
+            for button, key in header.view_switch_buttons:
+                button.configure(text=tr(key))
             header.gadget_button.configure(text=tr("gadgetModeButton"))
             header.tray_button.configure(text=tr("trayModeButton"))
             header.donate_button.configure(text=tr("buyBeer"))
@@ -1569,6 +2405,10 @@ class MainWindow:
         self.calendar_prev_button.configure(text=tr("calendarPrevMonthButton"))
         self.calendar_next_button.configure(text=tr("calendarNextMonthButton"))
         self.calendar_today_button.configure(text=tr("calendarTodayButton"))
+
+        self.week_prev_button.configure(text=tr("weekPrevButton"))
+        self.week_next_button.configure(text=tr("weekNextButton"))
+        self.week_today_button.configure(text=tr("weekTodayButton"))
 
         self.form_eyebrow.configure(text=tr("formEyebrow"))
         self.form_title_label.configure(text=tr("formTitle"))

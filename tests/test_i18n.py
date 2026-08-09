@@ -2,6 +2,7 @@
 tables silently drifting apart (a key present in one but not the other)."""
 
 import unittest
+from datetime import date
 
 from timermeet_app import i18n
 
@@ -22,6 +23,39 @@ class TranslationParityTests(unittest.TestCase):
     def test_format_text_substitutes_named_placeholders(self):
         text = i18n.format_text("repeatOccurrenceLabel", "en", index=2, total=5)
         self.assertEqual(text, "Event 2 of 5")
+
+
+class FormatWeekRangeTests(unittest.TestCase):
+    def test_same_month_es(self):
+        text = i18n.format_week_range(date(2026, 8, 10), date(2026, 8, 16), "es")
+        self.assertEqual(text, "10-16 Ago 2026")
+
+    def test_same_month_en(self):
+        text = i18n.format_week_range(date(2026, 8, 10), date(2026, 8, 16), "en")
+        self.assertEqual(text, "Aug 10-16, 2026")
+
+    def test_month_crossing_es(self):
+        text = i18n.format_week_range(date(2026, 7, 27), date(2026, 8, 2), "es")
+        self.assertEqual(text, "27 Jul - 2 Ago 2026")
+
+    def test_month_crossing_en(self):
+        text = i18n.format_week_range(date(2026, 7, 27), date(2026, 8, 2), "en")
+        self.assertEqual(text, "Jul 27 - Aug 2, 2026")
+
+    def test_year_crossing_es(self):
+        text = i18n.format_week_range(date(2025, 12, 29), date(2026, 1, 4), "es")
+        self.assertEqual(text, "29 Dic 2025 - 4 Ene 2026")
+
+    def test_year_crossing_en(self):
+        text = i18n.format_week_range(date(2025, 12, 29), date(2026, 1, 4), "en")
+        self.assertEqual(text, "Dec 29, 2025 - Jan 4, 2026")
+
+
+class WeekViewTranslationKeysTests(unittest.TestCase):
+    def test_week_view_keys_exist_in_both_languages(self):
+        for key in ("weekViewButton", "weekPrevButton", "weekNextButton", "weekTodayButton"):
+            self.assertIn(key, i18n.translations["es"])
+            self.assertIn(key, i18n.translations["en"])
 
 
 if __name__ == "__main__":

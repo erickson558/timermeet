@@ -30,3 +30,7 @@ TimerMeet is a local, single-user Windows desktop app with **no server and no li
 ## References
 
 - `references/checklist.md` -- the concrete hardening checklist to walk through before every release.
+
+## Deeper audits
+
+This skill is the fast, cheap gate for every release. When the user explicitly asks for a real vulnerability hunt (worried about "being hacked", wants a security audit/pentest-style review, or before a major version), use the `timermeet-security-audit` skill instead/in addition -- it runs a slower, adversarially-verified multi-angle hunt this routine checklist isn't designed to catch on its own.

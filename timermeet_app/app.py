@@ -22,11 +22,13 @@ from . import i18n, models, notifications, recurrence, retention, security, stor
 from .alarm_ui import AlarmController
 from .main_window import (
     CALENDAR_MAX_ENTRIES_PER_CELL,
+    WEEK_MAX_ENTRIES_PER_CELL,
     Callbacks,
     CalendarCellData,
     CalendarEntry,
     MainWindow,
     MeetingCardData,
+    WeekCellData,
 )
 from .tray_icon import TrayIcon
 
@@ -239,6 +241,11 @@ class TimerMeetApp:
         now = datetime.now()
         self._calendar_year = now.year
         self._calendar_month = now.month
+        # Any date inside the shown week -- `recurrence.week_dates` derives
+        # the real 7 dates from this on every render (never cached as "today
+        # was X when the view opened"), same spirit as `_calendar_year`/
+        # `_calendar_month` above.
+        self._week_anchor: date = now.date()
         self.meetings: List[models.Meeting] = storage.load_meetings()
         self._pending_deleted_ids: set = set()
 
@@ -261,6 +268,8 @@ class TimerMeetApp:
         self._purge_accumulator_ms = 0
         self._last_rendered_signature = None
         self._last_rendered_calendar_signature = None
+        self._last_rendered_week_signature = None  # Nivel A, see `_refresh_week`
+        self._last_rendered_week_live_state = None  # Nivel B, see `_refresh_week`
 
         callbacks = Callbacks(
             on_save=self.handle_save,
@@ -279,11 +288,15 @@ class TimerMeetApp:
             on_remove_company=self.handle_remove_company,
             on_toggle_gadget_mode=self.handle_toggle_gadget_mode,
             on_enter_tray_mode=self.handle_enter_tray_mode,
-            on_toggle_calendar_view=self.handle_toggle_calendar_view,
+            on_set_active_view=self.handle_set_active_view,
             on_calendar_prev_month=self.handle_calendar_prev_month,
             on_calendar_next_month=self.handle_calendar_next_month,
             on_calendar_today=self.handle_calendar_today,
             on_calendar_day_click=self.handle_calendar_day_click,
+            on_week_prev=self.handle_week_prev,
+            on_week_next=self.handle_week_next,
+            on_week_today=self.handle_week_today,
+            on_week_slot_click=self.handle_week_slot_click,
         )
         self.view = MainWindow(self.root, callbacks)
         self.view.apply_translations(self.language)
@@ -572,6 +585,8 @@ class TimerMeetApp:
         # and physically invisible.
         if self.active_view == "calendar" and not self.gadget_mode:
             self._refresh_calendar(now)
+        elif self.active_view == "week" and not self.gadget_mode:
+            self._refresh_week(now)
 
         # A near-zero-cost no-op unless gadget mode is active; piggybacks on
         # this existing 1s heartbeat instead of a separate self-rescheduling
@@ -657,6 +672,107 @@ class TimerMeetApp:
         if signature != self._last_rendered_calendar_signature:
             self.view.render_calendar(month_label, weekday_labels, cells)
             self._last_rendered_calendar_signature = signature
+
+    def _refresh_week(self, now: datetime) -> None:
+        """Build this heartbeat's display data for the weekly calendar view.
+        Split into two independent dirty-checks, per SDD.md v2.9.0 decision
+        #4 -- this is the load-bearing part of this whole feature, not a
+        stylistic choice:
+
+        - Nivel A (`render_week_grid`): rebinds `.bind()` click handlers on
+          all 168 cells, gated by `_last_rendered_week_signature`, which
+          deliberately has NO hour/minute component. If the live time-line's
+          per-minute movement were folded into this same signature, every
+          minute would force a full `.bind()` rebind pass over 168 cells
+          forever -- reintroducing, just 60x less often, the exact
+          Tcl-command-leak class this codebase already found and fixed
+          twice (`render_calendar`'s entry labels in v2.7.0,
+          `_ScrollablePanel`'s `bind_all` in v2.8.0; see module-map.md).
+        - Nivel B (`update_week_live_indicators`): only `.configure()`s the
+          day-header colors and `.place()`s the time-line -- never
+          `.bind()` -- so it's safe to re-apply up to once a real minute
+          without any of that risk. Only called while `active_view ==
+          "week"` (see `_refresh_all`), same guard `_refresh_calendar` uses.
+        """
+        days = recurrence.week_dates(self._week_anchor)
+        grouped = _group_meetings_by_date(self.meetings)
+
+        # First level of grouping reuses `_group_meetings_by_date` (by
+        # calendar date, across the whole app); the second level -- by hour
+        # within that date -- is local to this view, per SDD.md (no new
+        # public helper for it, same as `_refresh_calendar` doesn't factor
+        # out its own per-day slicing/ordering/overflow counting either).
+        meetings_by_day_and_hour: Dict[date, Dict[int, List[models.Meeting]]] = {}
+        for day in days:
+            by_hour: Dict[int, List[models.Meeting]] = {}
+            for meeting in grouped.get(day, []):
+                by_hour.setdefault(meeting.local_datetime().hour, []).append(meeting)
+            meetings_by_day_and_hour[day] = by_hour
+
+        cells: List[WeekCellData] = []
+        for hour in range(24):
+            for day in days:
+                hour_meetings = sorted(
+                    meetings_by_day_and_hour[day].get(hour, []), key=_meeting_sort_key
+                )
+                entries = [
+                    CalendarEntry(
+                        meeting_id=meeting.id,
+                        time_text=meeting.local_datetime().strftime("%H:%M"),
+                        title=meeting.title,
+                        color=_color_for_work_name(meeting.workName),
+                    )
+                    for meeting in hour_meetings[:WEEK_MAX_ENTRIES_PER_CELL]
+                ]
+                cells.append(
+                    WeekCellData(
+                        day=day,
+                        hour=hour,
+                        entries=entries,
+                        overflow_count=max(0, len(hour_meetings) - WEEK_MAX_ENTRIES_PER_CELL),
+                    )
+                )
+
+        week_range_label = i18n.format_week_range(days[0], days[-1], self.language)
+        day_header_texts = [
+            f"{i18n.t(key, self.language)} {day.day}" for key, day in zip(_CALENDAR_WEEKDAY_KEYS, days)
+        ]
+
+        # Nivel A's dirty-check -- see this method's docstring for why
+        # hour/minute must never be part of this tuple.
+        signature = (
+            self.language,
+            week_range_label,
+            tuple(day_header_texts),
+            tuple(
+                (
+                    cell.day,
+                    cell.hour,
+                    tuple((e.meeting_id, e.time_text, e.title, e.color) for e in cell.entries),
+                    cell.overflow_count,
+                )
+                for cell in cells
+            ),
+        )
+        if signature != self._last_rendered_week_signature:
+            self.view.render_week_grid(week_range_label, day_header_texts, cells)
+            self._last_rendered_week_signature = signature
+
+        # Nivel B's dirty-check -- cheap to recompute every heartbeat (plain
+        # date/int comparisons), but only actually touches widgets when this
+        # tuple changes, which happens at most once a real minute while the
+        # shown week is the current one. `today_index` is `None` whenever
+        # the visible week is any week other than the real current one (see
+        # SDD.md decision #5) -- unlike the month view, no separate
+        # "showing_current_month"-style flag is needed here, because a
+        # week's 7 days are never padded with days from a neighboring week,
+        # so `now.date() in days` alone is already 100% correct.
+        today_date = now.date()
+        today_index = days.index(today_date) if today_date in days else None
+        live_state = (today_index, now.hour, now.minute)
+        if live_state != self._last_rendered_week_live_state:
+            self.view.update_week_live_indicators(today_index, now.hour, now.minute)
+            self._last_rendered_week_live_state = live_state
 
     def _find_meeting(self, meeting_id: str) -> Optional[models.Meeting]:
         return next((m for m in self.meetings if m.id == meeting_id), None)
@@ -908,20 +1024,23 @@ class TimerMeetApp:
         self.tray.hide()
         self._force_show_window()
 
-    # -- calendar view ----------------------------------------------------------
+    # -- view switching (list / month / week) ------------------------------------
 
-    def handle_toggle_calendar_view(self) -> None:
-        # Shared by both directions -- "Vista calendario" on the list's
-        # header and "Vista de lista" on the calendar's header both wire to
-        # this same callback (see `_build_header` in main_window.py), the
-        # same pattern "Modo gadget"/"Completo" already use for
-        # `on_toggle_gadget_mode`. Unlike gadget/tray mode, this isn't
-        # blocked while an alarm is active: both views live inside the same
-        # normal, decorated root window, so switching between them can never
-        # interfere with AlarmController's independent Toplevel overlay.
-        self.active_view = "calendar" if self.active_view == "list" else "list"
-        self.view.set_active_view(self.active_view)
+    def handle_set_active_view(self, view: str) -> None:
+        # Replaces the old 2-way `handle_toggle_calendar_view` now that
+        # List/Month/Week are three mutually exclusive named views (SDD.md
+        # v2.9.0) -- every view-switch button in every header (see
+        # `_build_header` in main_window.py) calls this directly with its
+        # own target name instead of sharing one ambiguous toggle. Unlike
+        # gadget/tray mode, this isn't blocked while an alarm is active: all
+        # three views live inside the same normal, decorated root window, so
+        # switching between them can never interfere with AlarmController's
+        # independent Toplevel overlay.
+        self.active_view = view
+        self.view.set_active_view(view)
         self._refresh_all()
+
+    # -- calendar view ----------------------------------------------------------
 
     def handle_calendar_prev_month(self) -> None:
         self._calendar_year, self._calendar_month = _shift_month(self._calendar_year, self._calendar_month, -1)
@@ -941,3 +1060,22 @@ class TimerMeetApp:
         # `self.meetings` mutation -- the real creation still happens only
         # when the user submits the normal form via `handle_save`/`_save_new`.
         self.view.prefill_new_meeting(day)
+
+    # -- weekly calendar view -----------------------------------------------------
+
+    def handle_week_prev(self) -> None:
+        self._week_anchor -= timedelta(weeks=1)
+        self._refresh_all()
+
+    def handle_week_next(self) -> None:
+        self._week_anchor += timedelta(weeks=1)
+        self._refresh_all()
+
+    def handle_week_today(self) -> None:
+        self._week_anchor = datetime.now().date()
+        self._refresh_all()
+
+    def handle_week_slot_click(self, day: date, hour: int) -> None:
+        # Thin by design, same as `handle_calendar_day_click`: no business
+        # logic here, no `self.meetings` mutation.
+        self.view.prefill_new_meeting(day, hour)

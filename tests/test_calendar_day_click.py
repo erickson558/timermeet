@@ -56,11 +56,15 @@ def _make_callbacks(**overrides):
         "on_remove_company": _no_op,
         "on_toggle_gadget_mode": _no_op,
         "on_enter_tray_mode": _no_op,
-        "on_toggle_calendar_view": _no_op,
+        "on_set_active_view": _no_op,
         "on_calendar_prev_month": _no_op,
         "on_calendar_next_month": _no_op,
         "on_calendar_today": _no_op,
         "on_calendar_day_click": _no_op,
+        "on_week_prev": _no_op,
+        "on_week_next": _no_op,
+        "on_week_today": _no_op,
+        "on_week_slot_click": _no_op,
     }
     fields.update(overrides)
     return main_window.Callbacks(**fields)
@@ -117,10 +121,10 @@ class CalendarDayClickCreateTests(unittest.TestCase):
         return self.view._calendar_cells[0]
 
     def test_clicking_the_day_number_prefills_only_the_date_and_switches_view(self):
-        calls = {"day": None, "toggled": 0}
+        calls = {"day": None, "views": []}
         self.view.callbacks = _make_callbacks(
             on_calendar_day_click=lambda d: calls.__setitem__("day", d),
-            on_toggle_calendar_view=lambda: calls.__setitem__("toggled", calls["toggled"] + 1),
+            on_set_active_view=lambda view: calls["views"].append(view),
         )
         target = date(2026, 8, 21)
         widgets = self._render_single_cell(_blank_cell(target))
@@ -128,13 +132,13 @@ class CalendarDayClickCreateTests(unittest.TestCase):
         widgets.day_label.event_generate("<Button-1>")
 
         self.assertEqual(calls["day"], target)
-        self.assertEqual(calls["toggled"], 1)
+        self.assertEqual(calls["views"], ["list"])
 
     def test_clicking_empty_cell_background_behaves_like_clicking_the_day_number(self):
-        calls = {"day": None, "toggled": 0}
+        calls = {"day": None, "views": []}
         self.view.callbacks = _make_callbacks(
             on_calendar_day_click=lambda d: calls.__setitem__("day", d),
-            on_toggle_calendar_view=lambda: calls.__setitem__("toggled", calls["toggled"] + 1),
+            on_set_active_view=lambda view: calls["views"].append(view),
         )
         target = date(2026, 8, 22)
         widgets = self._render_single_cell(_blank_cell(target))
@@ -142,7 +146,7 @@ class CalendarDayClickCreateTests(unittest.TestCase):
         widgets.frame.event_generate("<Button-1>")
 
         self.assertEqual(calls["day"], target)
-        self.assertEqual(calls["toggled"], 1)
+        self.assertEqual(calls["views"], ["list"])
 
     def test_clicking_empty_background_of_a_cell_that_also_has_meetings_still_creates(self):
         """A cell with existing meetings still has clickable empty

@@ -160,6 +160,35 @@ class MonthGridTests(unittest.TestCase):
         self.assertIn(date(2027, 1, 1), flat)
 
 
+class WeekDatesTests(unittest.TestCase):
+    def test_mid_week_anchor_returns_the_full_monday_first_week(self):
+        anchor = date(2026, 8, 12)  # Wednesday
+        days = recurrence.week_dates(anchor)
+        self.assertEqual(days, [date(2026, 8, 10) + timedelta(days=i) for i in range(7)])
+        self.assertEqual(days[0].weekday(), 0)  # Mon=0
+        self.assertIn(anchor, days)
+
+    def test_anchor_already_monday_is_the_first_day_returned(self):
+        anchor = date(2026, 8, 10)  # Monday
+        days = recurrence.week_dates(anchor)
+        self.assertEqual(days[0], anchor)
+        self.assertEqual(days[-1], date(2026, 8, 16))
+
+    def test_anchor_already_sunday_is_the_last_day_returned(self):
+        anchor = date(2026, 8, 16)  # Sunday
+        days = recurrence.week_dates(anchor)
+        self.assertEqual(days[0], date(2026, 8, 10))
+        self.assertEqual(days[-1], anchor)
+
+    def test_year_rollover_week_stays_seven_consecutive_days(self):
+        anchor = date(2025, 12, 31)  # Wednesday, week is Dec 29 - Jan 4
+        days = recurrence.week_dates(anchor)
+        self.assertEqual(days[0], date(2025, 12, 29))
+        self.assertEqual(days[-1], date(2026, 1, 4))
+        for previous, current in zip(days, days[1:]):
+            self.assertEqual(current - previous, timedelta(days=1))
+
+
 class MostRecentFridayEodTests(unittest.TestCase):
     def test_returns_this_friday_when_its_trigger_already_passed(self):
         now = datetime(2026, 8, 7, 19, 0)  # Friday 19:00, after 18:00

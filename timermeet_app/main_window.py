@@ -1659,8 +1659,18 @@ class MainWindow:
         day_header_row.grid_columnconfigure(0, minsize=HOUR_AXIS_WIDTH_PX)
         for col in range(WEEK_COLS):
             day_header_row.grid_columnconfigure(col + 1, weight=1)
+            # Same visible-chip convention as the month view's day-number
+            # badges (`_update_calendar_cell`): every header gets a real,
+            # non-window-color background so "today" (ACCENT fill, applied
+            # in `update_week_live_indicators`) reads as a color swap on an
+            # already-consistent shape, not the only header with a box at
+            # all. Using WINDOW_BG here (this row's own parent background)
+            # made the other 6 headers render as bare floating text with no
+            # visible box whatsoever -- reported from a real screenshot and
+            # confirmed by measurement to be a color issue, not a geometry
+            # one (see SDD.md).
             label = tk.Label(
-                day_header_row, text="", font=(FONT_FAMILY, 10, "bold"), bg=WINDOW_BG, fg=MUTED, anchor="center",
+                day_header_row, text="", font=(FONT_FAMILY, 10, "bold"), bg=PANEL_BG, fg=TEXT, anchor="center",
             )
             label.grid(row=0, column=col + 1, sticky="ew", pady=(0, 4))
             self._week_day_header_labels.append(label)
@@ -2116,7 +2126,12 @@ class MainWindow:
             if index == today_index:
                 label.configure(bg=ACCENT, fg=ACCENT_FG)
             else:
-                label.configure(bg=WINDOW_BG, fg=MUTED)
+                # Same PANEL_BG/TEXT chip as this label's own construction
+                # default (see `_build_week_view`) -- restores the
+                # always-visible chip after a previous tick highlighted this
+                # header as "today" and a later tick un-highlights it (e.g.
+                # week navigation, or midnight rollover).
+                label.configure(bg=PANEL_BG, fg=TEXT)
 
         self._week_live_state = (today_index, hour, minute)
         # A fresh state to place is a fresh attempt at resolving real

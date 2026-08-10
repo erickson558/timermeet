@@ -310,6 +310,7 @@ class TimerMeetApp:
             on_week_today=self.handle_week_today,
             on_week_slot_click=self.handle_week_slot_click,
             on_toggle_week_column_mode=self.handle_toggle_week_column_mode,
+            on_delete_series=self.handle_delete_series,
         )
         self.view = MainWindow(self.root, callbacks)
         self.view.apply_translations(self.language)
@@ -636,6 +637,15 @@ class TimerMeetApp:
         "calendar"` (see `_refresh_all`)."""
         weeks = recurrence.month_grid(self._calendar_year, self._calendar_month)
         grouped = _group_meetings_by_date(self.meetings)
+        # Real, live sibling counts per series (SDD.md v2.11.0) -- computed
+        # once per refresh, never read from `meeting.seriesSize`, which
+        # `retention.py` never decrements on a partial purge and so can be
+        # stale/inflated (a series that was once 8 occurrences can survive
+        # with just 1 real record still claiming `seriesSize == 8`). Feeds
+        # `CalendarEntry.series_occurrence_count` below, which is what the
+        # right-click menu's "Eliminar serie completa" enablement actually
+        # checks -- see that field's own docstring in main_window.py.
+        series_sizes = {sid: len(group) for sid, group in recurrence.group_meetings_by_series(self.meetings).items()}
         # "Today" is only highlighted while the *visible* month is the real
         # current month (see SDD.md) -- comparing bare dates would wrongly
         # highlight a leading/trailing padding cell that happens to literally
@@ -658,6 +668,11 @@ class TimerMeetApp:
                         time_text=meeting.local_datetime().strftime("%H:%M"),
                         title=meeting.title,
                         color=_color_for_work_name(meeting.workName),
+                        series_occurrence_count=(
+                            series_sizes.get(meeting.seriesId, 0)
+                            if meeting.recurrenceType != "none" and meeting.seriesId
+                            else 0
+                        ),
                     )
                     for meeting in day_meetings[:CALENDAR_MAX_ENTRIES_PER_CELL]
                 ]
@@ -698,7 +713,10 @@ class TimerMeetApp:
                     cell.day,
                     cell.in_current_month,
                     cell.is_today,
-                    tuple((e.meeting_id, e.time_text, e.title, e.color) for e in cell.entries),
+                    tuple(
+                        (e.meeting_id, e.time_text, e.title, e.color, e.series_occurrence_count)
+                        for e in cell.entries
+                    ),
                     cell.overflow_count,
                 )
                 for cell in cells
@@ -731,6 +749,12 @@ class TimerMeetApp:
         """
         days = recurrence.week_dates(self._week_anchor)
         grouped = _group_meetings_by_date(self.meetings)
+        # Same live-sibling-count computation as `_refresh_calendar` -- see
+        # that method's comment for why `meeting.seriesSize` itself isn't
+        # trustworthy here (SDD.md v2.11.0). Deliberately not factored into
+        # a shared helper (see the "no new public helper" note just below
+        # for the per-hour grouping, same reasoning applies here).
+        series_sizes = {sid: len(group) for sid, group in recurrence.group_meetings_by_series(self.meetings).items()}
 
         # First level of grouping reuses `_group_meetings_by_date` (by
         # calendar date, across the whole app); the second level -- by hour
@@ -756,6 +780,11 @@ class TimerMeetApp:
                         time_text=meeting.local_datetime().strftime("%H:%M"),
                         title=meeting.title,
                         color=_color_for_work_name(meeting.workName),
+                        series_occurrence_count=(
+                            series_sizes.get(meeting.seriesId, 0)
+                            if meeting.recurrenceType != "none" and meeting.seriesId
+                            else 0
+                        ),
                     )
                     for meeting in hour_meetings[:WEEK_MAX_ENTRIES_PER_CELL]
                 ]
@@ -783,7 +812,10 @@ class TimerMeetApp:
                 (
                     cell.day,
                     cell.hour,
-                    tuple((e.meeting_id, e.time_text, e.title, e.color) for e in cell.entries),
+                    tuple(
+                        (e.meeting_id, e.time_text, e.title, e.color, e.series_occurrence_count)
+                        for e in cell.entries
+                    ),
                     cell.overflow_count,
                 )
                 for cell in cells
@@ -931,6 +963,56 @@ class TimerMeetApp:
         if removed:
             self._persist(silent=False)
             self.view.show_toast(i18n.t("deleted", self.language))
+            self._refresh_all()
+
+    def handle_delete_series(self, meeting_id: str) -> None:
+        """Removes EVERY occurrence sharing this meeting's `seriesId` --
+        past and future, no anchor kept (SDD.md v2.11.0) -- unlike
+        `retention.purge_stale_meetings`/`clear_past_meetings`, which always
+        keep a series' latest occurrence so it doesn't silently stop
+        reminding. This is the opposite: an explicit, one-shot user action
+        to end the series entirely, so nothing is preserved on purpose.
+
+        Goes through `_apply_meetings` exactly like `handle_delete` --
+        removing 1 id or 8 ids in the same call is the same set-based diff
+        either way, so there is no special-casing for a multi-record
+        delete. This is also what makes the deletion tombstone-safe: without
+        routing through `_apply_meetings`'s `_pending_deleted_ids`
+        bookkeeping, a still-pending disk read from another OneDrive-synced
+        machine would look identical to "that machine added these and we
+        haven't seen them yet" and silently resurrect them on the next
+        merge (the exact v2.3.0 bug this path exists to prevent).
+
+        `not target.seriesId` is checked BEFORE the filter runs, not after
+        -- this is the one guard that actually matters here, not a
+        cosmetic nicety: every standalone (non-recurring) meeting has
+        `seriesId == ""` by construction (see `_save_new`), so
+        `m.seriesId != target.seriesId` with an empty `target.seriesId`
+        would keep only the non-empty-`seriesId` meetings -- i.e. delete
+        every standalone meeting in the app in one call. The menu that
+        calls this already only offers "Eliminar serie completa" when
+        `series_occurrence_count > 1` (which itself requires a non-empty,
+        actively-recurring `seriesId`), so this is a second, defensive
+        check, not the first line of defense.
+
+        Deliberately filters by bare `seriesId` alone here, NOT also
+        requiring `recurrenceType != "none"` the way the menu's own
+        enablement check does -- see SDD.md's v2.11.0 section for the
+        documented edge case this causes (a lagging occurrence whose own
+        `recurrenceType` was individually edited to "none" via `_save_edit`
+        stays deletable as part of the series from any OTHER sibling's
+        menu, just not offered as a target to right-click itself): "sin
+        rastro histórico" means a materialized occurrence of that series
+        must not survive just because its own `recurrenceType` field was
+        edited afterwards.
+        """
+        target = self._find_meeting(meeting_id)
+        if target is None or not target.seriesId:
+            return
+        removed = self._apply_meetings([m for m in self.meetings if m.seriesId != target.seriesId])
+        if removed:
+            self._persist(silent=False)
+            self.view.show_toast(i18n.format_text("deletedSeriesToast", self.language, count=removed))
             self._refresh_all()
 
     def handle_clear_past(self) -> None:

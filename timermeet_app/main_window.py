@@ -24,7 +24,7 @@ import tkinter.font as tkfont
 import tkinter.messagebox as messagebox
 import webbrowser
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from tkinter import ttk
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -398,12 +398,24 @@ class _CardWidgets:
 class CalendarEntry:
     """One meeting row inside a calendar day-cell -- already formatted/
     pre-colored by app.py (the color reuses `_color_for_work_name`, the same
-    helper the list view's cards use), so this module stays display-only."""
+    helper the list view's cards use), so this module stays display-only.
+
+    `series_occurrence_count` (SDD.md v2.11.0): `0` if this entry isn't (or
+    is no longer, see the `recurrenceType`-edited-to-"none" edge case in
+    SDD.md) part of an active recurring series; otherwise the real number of
+    live siblings sharing its `seriesId` this same refresh, computed once
+    per refresh in `app.py` via `recurrence.group_meetings_by_series` --
+    deliberately NOT `meeting.seriesSize`, which `retention.py` never
+    decrements on a partial purge and so can be stale/inflated. `>= 2`
+    enables "Eliminar serie completa" in the context menu; `0` or `1`
+    doesn't. Never persisted -- presentation data only, recomputed every
+    refresh."""
 
     meeting_id: str
     time_text: str
     title: str
     color: str
+    series_occurrence_count: int = 0
 
 
 @dataclass
@@ -458,6 +470,14 @@ class _WeekCellWidgets:
     # Same funcid-tracking purpose as `_CalendarCellWidgets.bind_funcids`
     # above -- see `_rebind()`'s docstring.
     bind_funcids: Dict[str, Optional[str]] = field(default_factory=dict)
+    # Parallel to `entry_labels` (SDD.md v2.11.0): which `meeting_id`, if
+    # any, each entry slot is currently showing -- `None` for an unused
+    # slot. Needed because the week-view selection highlight is applied
+    # through two independent paths (the immediate click handler and
+    # `_update_week_cell`'s render-time fallback, see
+    # `_apply_week_selection_highlight`) that must agree on which widget
+    # currently represents which meeting.
+    entry_meeting_ids: List[Optional[str]] = field(default_factory=list)
 
 
 @dataclass
@@ -532,6 +552,7 @@ class Callbacks:
     on_week_today: Callable[[], None]
     on_week_slot_click: Callable[[date, int], None]
     on_toggle_week_column_mode: Callable[[], None]
+    on_delete_series: Callable[[str], None]
 
 
 def _button(
@@ -543,7 +564,15 @@ def _button(
         parent, text=text, command=command, bg=bg, fg=fg, activebackground=hover, activeforeground=fg,
         relief="flat", borderwidth=0, padx=padx, pady=pady, cursor="hand2", font=(FONT_FAMILY, font_size), **extra,
     )
-    btn.bind("<Enter>", lambda _e: btn.configure(bg=hover))
+    # `str(btn["state"])` check (SDD.md v2.11.0): the week-view toolbar's
+    # "Editar"/"Eliminar" buttons are this file's first use of
+    # `state="disabled"` on a `tk.Button` (see
+    # `_update_week_toolbar_button_states`) -- without this guard, a
+    # disabled button still lit up on hover even though its `command`
+    # can't fire, a visual inconsistency nobody had reason to hit before
+    # now. `<Leave>` needs no matching check: always restoring the base
+    # color is correct regardless of state.
+    btn.bind("<Enter>", lambda _e: btn.configure(bg=hover) if str(btn["state"]) != "disabled" else None)
     btn.bind("<Leave>", lambda _e: btn.configure(bg=bg))
     return btn
 
@@ -810,6 +839,14 @@ class MainWindow:
         # `_ScrollablePanel._canvas_width_job` already uses for its own
         # `<Configure>` burst during a live window-resize drag.
         self._week_now_line_configure_job: Optional[str] = None
+        # "last click selected" state for the week view only (SDD.md
+        # v2.11.0) -- lives here, not in app.py, per that section's explicit
+        # decision: it's purely presentational (which entry has an accent
+        # border, which toolbar buttons are enabled), never a business
+        # decision, so it doesn't need to cross the view/controller
+        # boundary. See `clear_week_selection`/`_handle_week_entry_select`/
+        # `_apply_week_selection_highlight`.
+        self._week_selected_meeting_id: Optional[str] = None
         # "full" (Mon-Sun, 7 columns) or "work" (Mon-Fri, 2 columns
         # collapsed) -- see `set_week_column_mode`. app.py sets the real
         # persisted value right after construction; "full" here is only
@@ -1556,15 +1593,21 @@ class MainWindow:
 
         nav = tk.Frame(self.week_view, bg=PANEL_BG)
         nav.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 8))
-        self.week_prev_button = _button(nav, "", self.callbacks.on_week_prev, GHOST_BG, GHOST_FG, GHOST_HOVER)
+        # Prev/Next/Today route through small wrapper methods rather than
+        # straight to the callbacks (SDD.md v2.11.0): each wrapper clears
+        # the week-view selection before forwarding to the real callback,
+        # so navigating away from a selected entry can never leave the
+        # toolbar's Editar/Eliminar buttons enabled over a now-different
+        # week's data. See `clear_week_selection`.
+        self.week_prev_button = _button(nav, "", self._handle_week_prev_click, GHOST_BG, GHOST_FG, GHOST_HOVER)
         self.week_prev_button.pack(side="left", padx=(0, 4))
         self.week_range_label = tk.Label(
             nav, text="", font=(FONT_FAMILY, 15, "bold"), bg=PANEL_BG, fg=TEXT, width=22, anchor="center",
         )
         self.week_range_label.pack(side="left", padx=4)
-        self.week_next_button = _button(nav, "", self.callbacks.on_week_next, GHOST_BG, GHOST_FG, GHOST_HOVER)
+        self.week_next_button = _button(nav, "", self._handle_week_next_click, GHOST_BG, GHOST_FG, GHOST_HOVER)
         self.week_next_button.pack(side="left", padx=(4, 12))
-        self.week_today_button = _button(nav, "", self.callbacks.on_week_today, GHOST_BG, GHOST_FG, GHOST_HOVER)
+        self.week_today_button = _button(nav, "", self._handle_week_today_click, GHOST_BG, GHOST_FG, GHOST_HOVER)
         self.week_today_button.pack(side="left")
         # Work-week/full-week toggle (SDD.md v2.10.0): lives in this nav bar,
         # not the header's action row, which is already at its width budget
@@ -1577,6 +1620,35 @@ class MainWindow:
             nav, "", self.callbacks.on_toggle_week_column_mode, GHOST_BG, GHOST_FG, GHOST_HOVER,
         )
         self.week_column_toggle_button.pack(side="left", padx=(12, 0))
+
+        # Action toolbar (SDD.md v2.11.0): Agregar/Editar/Eliminar operating
+        # on `self._week_selected_meeting_id`. Lives in this nav bar, not
+        # the header's action row -- same precedent as the work-week toggle
+        # above. Built once here, for the app's whole life (like every
+        # other button in this nav bar); never rebuilt or `.bind()`-rebound
+        # per render, so none of this needs `_rebind()`. "Agregar" reuses
+        # `_handle_week_slot_click` (the exact method an empty-cell click
+        # already calls) with today's date/current hour -- zero new
+        # callback. "Editar"/"Eliminar" start disabled (no selection yet at
+        # construction) and `_update_week_toolbar_button_states` keeps them
+        # in sync afterwards.
+        self.week_add_button = _button(
+            nav, "", lambda: self._handle_week_slot_click(date.today(), datetime.now().hour),
+            GHOST_BG, GHOST_FG, GHOST_HOVER,
+        )
+        self.week_add_button.pack(side="left", padx=(12, 4))
+        self.week_edit_button = _button(
+            nav, "", lambda: self._handle_week_entry_click(self._week_selected_meeting_id),
+            GHOST_BG, GHOST_FG, GHOST_HOVER,
+        )
+        self.week_edit_button.pack(side="left", padx=4)
+        self.week_delete_button = _button(
+            nav, "", lambda: self._confirm_delete(self._week_selected_meeting_id),
+            GHOST_BG, GHOST_FG, GHOST_HOVER,
+        )
+        self.week_delete_button.pack(side="left", padx=4)
+        self.week_edit_button.configure(state="disabled")
+        self.week_delete_button.configure(state="disabled")
 
         day_header_row = tk.Frame(self.week_view, bg=WINDOW_BG)
         # Stashed on `self` (used to be a bare local) so `set_week_column_mode`
@@ -1673,7 +1745,10 @@ class MainWindow:
         overflow_label = tk.Label(cell, text="", font=(FONT_FAMILY, 8), bg=PANEL_BG, fg=MUTED, anchor="w")
         overflow_label.grid(row=WEEK_MAX_ENTRIES_PER_CELL, column=0, sticky="ew", padx=4, pady=1)
 
-        return _WeekCellWidgets(frame=cell, entry_labels=entry_labels, overflow_label=overflow_label)
+        return _WeekCellWidgets(
+            frame=cell, entry_labels=entry_labels, overflow_label=overflow_label,
+            entry_meeting_ids=[None] * WEEK_MAX_ENTRIES_PER_CELL,
+        )
 
     def set_week_column_mode(self, mode: str) -> None:
         """Toggles between "full" (Mon-Sun, all 7 day columns visible) and
@@ -1714,6 +1789,12 @@ class MainWindow:
         `_build_week_view` is what reliably catches the moment Tk's real
         recompute actually finishes and re-applies then, race-free.
         """
+        # SDD.md v2.11.0: an entry selected in a weekend column would keep
+        # the toolbar's Editar/Eliminar buttons enabled over something
+        # `.grid_remove()`'d below the instant "work week" mode is toggled
+        # on -- clear first, unconditionally, rather than only when the
+        # selected entry actually happens to be in Sat/Sun.
+        self.clear_week_selection()
         self._week_column_mode = mode
         show_weekend = mode != "work"
         for offset in _WEEKEND_COLUMN_INDICES:
@@ -1779,6 +1860,14 @@ class MainWindow:
             # this, the retry keeps firing every 300ms for the rest of the
             # session even though week view is no longer on screen.
             self._cancel_week_live_retry()
+            # SDD.md v2.11.0: clear on LEAVING week view (not on entering
+            # it) -- by the time the user comes back, it's already empty,
+            # so no second clear-on-entry call site is needed. Deliberately
+            # NOT paired with the `set_gadget_mode` round trip below (that
+            # path never reaches this method at all -- see its own
+            # docstring -- which is exactly why a gadget round trip
+            # preserves the selection, per SDD.md's explicit decision).
+            self.clear_week_selection()
         self._primary_view_frame().grid_remove()
         self._primary_view = view
         self._primary_view_frame().grid(row=0, column=0, sticky="nsew")
@@ -1867,7 +1956,9 @@ class MainWindow:
                 )
                 widgets.bind_funcids[right_key] = _rebind(
                     entry_label, "<Button-3>",
-                    lambda e, mid=entry.meeting_id: self._show_calendar_entry_context_menu(e, mid),
+                    lambda e, mid=entry.meeting_id, n=entry.series_occurrence_count: (
+                        self._show_calendar_entry_context_menu(e, mid, n)
+                    ),
                     widgets.bind_funcids.get(right_key),
                 )
                 entry_label.grid()
@@ -1920,6 +2011,23 @@ class MainWindow:
         for widgets, cell_data in zip(self._week_cells, cells):
             self._update_week_cell(widgets, cell_data)
 
+        # SDD.md v2.11.0: the guaranteed-correct backstop for a selection
+        # that no longer refers to anything visible -- covers every deletion
+        # route (the toolbar's own "Eliminar", the context menu, "Eliminar
+        # eventos pasados", the automatic retention purge) with a single
+        # check instead of one per route, because all of them end up back
+        # here via `_refresh_all` -> `_refresh_week` -> `render_week_grid`.
+        # Known, accepted limit (documented, not fixed): this only sees
+        # `cell.entries` (already capped at WEEK_MAX_ENTRIES_PER_CELL), so a
+        # selected entry pushed into "+N más" by a new arrival reads as
+        # "gone" here too, same as if it had actually been deleted.
+        visible_meeting_ids = {
+            entry.meeting_id for cell_data in cells for entry in cell_data.entries
+        }
+        if self._week_selected_meeting_id is not None and self._week_selected_meeting_id not in visible_meeting_ids:
+            self._week_selected_meeting_id = None
+        self._update_week_toolbar_button_states()
+
     def _update_week_cell(self, widgets: _WeekCellWidgets, cell_data: WeekCellData) -> None:
         # Same "rebind a fresh closure on every render, never once at
         # construction" reasoning `_update_calendar_cell` already documents
@@ -1945,23 +2053,42 @@ class MainWindow:
         for index, entry_label in enumerate(widgets.entry_labels):
             if index < len(cell_data.entries):
                 entry = cell_data.entries[index]
+                widgets.entry_meeting_ids[index] = entry.meeting_id
+                # Render-time fallback for the selection highlight (SDD.md
+                # v2.11.0, camino 2 of 2 -- see `_apply_week_selection_highlight`
+                # for camino 1, the immediate click path): derived fresh from
+                # `self._week_selected_meeting_id` on every real render, so
+                # this cell's border can never drift out of sync with the
+                # real selection state even if the immediate path was somehow
+                # skipped (a resync from disk, an edit made elsewhere).
+                is_selected = entry.meeting_id == self._week_selected_meeting_id
                 entry_label.configure(
                     text=_truncate_week_entry(f"{entry.time_text} {entry.title}"),
                     bg=entry.color, fg="black",
+                    highlightthickness=2 if is_selected else 0,
+                    highlightbackground=ACCENT,
                 )
                 left_key, right_key = f"entry_left_{index}", f"entry_right_{index}"
+                # Left-click now SELECTS instead of editing directly (SDD.md
+                # v2.11.0) -- week-view-only behavior change; the month
+                # view's `_handle_calendar_entry_click` above is untouched.
+                # `_handle_week_entry_click` itself is unchanged and still
+                # used by "Editar" (context menu + toolbar).
                 widgets.bind_funcids[left_key] = _rebind(
                     entry_label, "<Button-1>",
-                    lambda _e, mid=entry.meeting_id: self._handle_week_entry_click(mid),
+                    lambda _e, mid=entry.meeting_id: self._handle_week_entry_select(mid),
                     widgets.bind_funcids.get(left_key),
                 )
                 widgets.bind_funcids[right_key] = _rebind(
                     entry_label, "<Button-3>",
-                    lambda e, mid=entry.meeting_id: self._show_week_entry_context_menu(e, mid),
+                    lambda e, mid=entry.meeting_id, n=entry.series_occurrence_count: (
+                        self._show_week_entry_context_menu(e, mid, n)
+                    ),
                     widgets.bind_funcids.get(right_key),
                 )
                 entry_label.grid()
             else:
+                widgets.entry_meeting_ids[index] = None
                 entry_label.grid_remove()
 
         if cell_data.overflow_count > 0:
@@ -2145,6 +2272,75 @@ class MainWindow:
         self.callbacks.on_week_slot_click(day, hour)
         self.callbacks.on_set_active_view("list")
 
+    # -- week-view "last click" selection + action toolbar (SDD.md v2.11.0) ----
+
+    def _handle_week_entry_select(self, meeting_id: str) -> None:
+        """What left-click on a week-view entry does now, instead of
+        `_handle_week_entry_click` (edit). Deliberately does NOT call
+        `on_edit`/`on_set_active_view` -- selecting stays in week view. A
+        second click on the already-selected entry re-selects the same id
+        (idempotent no-op), and clicking a different entry simply moves the
+        selection (no multi-select, per SDD.md's explicit non-goal)."""
+        self._week_selected_meeting_id = meeting_id
+        self._apply_week_selection_highlight()
+        self._update_week_toolbar_button_states()
+
+    def clear_week_selection(self) -> None:
+        """Called from the specific set of places SDD.md v2.11.0 names
+        explicitly (week nav Prev/Next/Today, the work-week/full-week
+        toggle, leaving week view for another primary view, and
+        `render_week_grid`'s own render-time backstop for a
+        deleted/no-longer-visible selection) -- deliberately NOT called on a
+        gadget-mode round trip (see `set_gadget_mode`'s docstring/SDD.md for
+        why that case is excluded on purpose)."""
+        if self._week_selected_meeting_id is None:
+            return
+        self._week_selected_meeting_id = None
+        self._apply_week_selection_highlight()
+        self._update_week_toolbar_button_states()
+
+    def _apply_week_selection_highlight(self) -> None:
+        """Camino 1 of 2 (SDD.md v2.11.0): the immediate, same-click path --
+        walks the already-built entry labels comparing against
+        `entry_meeting_ids` and flips `highlightthickness`/
+        `highlightbackground` on whichever ones changed. Purely
+        `.configure()`, same category as `update_week_live_indicators`
+        (Nivel B) -- never `.bind()`, so this is not a new Tcl-command-leak
+        surface. `_update_week_cell` (camino 2, the render-time fallback)
+        re-derives the same styling independently on every real render, so
+        this path being imperfect could never leave a stale border
+        permanently -- but responding on the same click, without waiting for
+        the next heartbeat, is the whole point of having it."""
+        for widgets in self._week_cells:
+            for index, label in enumerate(widgets.entry_labels):
+                is_selected = (
+                    widgets.entry_meeting_ids[index] is not None
+                    and widgets.entry_meeting_ids[index] == self._week_selected_meeting_id
+                )
+                label.configure(highlightthickness=2 if is_selected else 0, highlightbackground=ACCENT)
+
+    def _update_week_toolbar_button_states(self) -> None:
+        """Centralizes SDD.md v2.11.0's `state="disabled"`/`"normal"` toggle
+        for "Editar"/"Eliminar" -- called from every place the selection can
+        change (`_handle_week_entry_select`, `clear_week_selection`, and
+        `render_week_grid`'s own backstop) so these two buttons can never
+        drift out of sync with whether a selection actually exists."""
+        state = "normal" if self._week_selected_meeting_id is not None else "disabled"
+        self.week_edit_button.configure(state=state)
+        self.week_delete_button.configure(state=state)
+
+    def _handle_week_prev_click(self) -> None:
+        self.clear_week_selection()
+        self.callbacks.on_week_prev()
+
+    def _handle_week_next_click(self) -> None:
+        self.clear_week_selection()
+        self.callbacks.on_week_next()
+
+    def _handle_week_today_click(self) -> None:
+        self.clear_week_selection()
+        self.callbacks.on_week_today()
+
     # -- right-click context menu (month/week only, SDD.md v2.10.0) -------------
 
     def _show_context_menu(self, event) -> None:
@@ -2171,7 +2367,7 @@ class MainWindow:
         )
         self._show_context_menu(event)
 
-    def _show_calendar_entry_context_menu(self, event, meeting_id: str) -> None:
+    def _show_calendar_entry_context_menu(self, event, meeting_id: str, series_occurrence_count: int = 0) -> None:
         self._context_menu.delete(0, "end")
         self._context_menu.add_command(
             label=i18n.t("edit", self.language), command=lambda mid=meeting_id: self._handle_calendar_entry_click(mid)
@@ -2185,6 +2381,18 @@ class MainWindow:
         self._context_menu.add_command(
             label=i18n.t("delete", self.language), command=lambda mid=meeting_id: self._confirm_delete(mid)
         )
+        # "Eliminar serie completa" (SDD.md v2.11.0): only offered when
+        # there are 2+ LIVE siblings sharing this entry's `seriesId` this
+        # same refresh (computed in app.py via
+        # `recurrence.group_meetings_by_series`, never `meeting.seriesSize`
+        # -- see `CalendarEntry.series_occurrence_count`'s docstring for why
+        # that field can be stale). `1` means "recurring but only one
+        # occurrence exists right now" -- not enough to offer this.
+        if series_occurrence_count > 1:
+            self._context_menu.add_command(
+                label=i18n.t("deleteSeries", self.language),
+                command=lambda mid=meeting_id, n=series_occurrence_count: self._confirm_delete_series(mid, n),
+            )
         self._show_context_menu(event)
 
     def _show_week_slot_context_menu(self, event, day: date, hour: int) -> None:
@@ -2195,7 +2403,15 @@ class MainWindow:
         )
         self._show_context_menu(event)
 
-    def _show_week_entry_context_menu(self, event, meeting_id: str) -> None:
+    def _show_week_entry_context_menu(self, event, meeting_id: str, series_occurrence_count: int = 0) -> None:
+        # SDD.md v2.11.0: right-click also selects, as a deliberate side
+        # effect -- matches Windows' own precedent (right-click on an
+        # unselected item selects it first) and avoids the confusing state
+        # of "right-clicked A to delete it, but the toolbar still shows B as
+        # selected". Right-click on empty slot background
+        # (`_show_week_slot_context_menu`) never touches selection -- no
+        # entry under the cursor to select.
+        self._handle_week_entry_select(meeting_id)
         self._context_menu.delete(0, "end")
         self._context_menu.add_command(
             label=i18n.t("edit", self.language), command=lambda mid=meeting_id: self._handle_week_entry_click(mid)
@@ -2204,6 +2420,12 @@ class MainWindow:
         self._context_menu.add_command(
             label=i18n.t("delete", self.language), command=lambda mid=meeting_id: self._confirm_delete(mid)
         )
+        # Same enablement rule as the month view's menu above.
+        if series_occurrence_count > 1:
+            self._context_menu.add_command(
+                label=i18n.t("deleteSeries", self.language),
+                command=lambda mid=meeting_id, n=series_occurrence_count: self._confirm_delete_series(mid, n),
+            )
         self._show_context_menu(event)
 
     def _start_gadget_drag(self, event) -> None:
@@ -2400,6 +2622,19 @@ class MainWindow:
     def _confirm_delete(self, meeting_id: str) -> None:
         if messagebox.askyesno(i18n.t("delete", self.language), i18n.t("deleteConfirm", self.language)):
             self.callbacks.on_delete(meeting_id)
+
+    def _confirm_delete_series(self, meeting_id: str, occurrence_count: int) -> None:
+        """Same `messagebox.askyesno` pattern as `_confirm_delete`, deliberate
+        different wording (SDD.md v2.11.0): must be unmistakable that this
+        removes ALL `occurrence_count` occurrences of the series, past and
+        future, not just the one that was right-clicked. `occurrence_count`
+        arrives already computed from app.py (via
+        `recurrence.group_meetings_by_series`) -- this view never touches
+        `self.meetings` to recompute it."""
+        title = i18n.t("deleteSeries", self.language)
+        message = i18n.format_text("deleteSeriesConfirm", self.language, count=occurrence_count)
+        if messagebox.askyesno(title, message):
+            self.callbacks.on_delete_series(meeting_id)
 
     def _confirm_clear_past(self) -> None:
         if messagebox.askyesno(
@@ -2808,6 +3043,14 @@ class MainWindow:
         self.week_column_toggle_button.configure(
             text=tr("weekViewFullWeekButton" if self._week_column_mode == "work" else "weekViewWorkWeekButton")
         )
+        # Action toolbar (SDD.md v2.11.0) -- "Editar"/"Eliminar" reuse the
+        # same `edit`/`delete` keys the meeting cards and context menu
+        # already use (no semantic divergence to protect, see SDD.md); only
+        # "Agregar" gets its own key since `addCompanyButton` means
+        # something semantically different despite matching text today.
+        self.week_add_button.configure(text=tr("weekToolbarAddButton"))
+        self.week_edit_button.configure(text=tr("edit"))
+        self.week_delete_button.configure(text=tr("delete"))
 
         self.form_eyebrow.configure(text=tr("formEyebrow"))
         self.form_title_label.configure(text=tr("formTitle"))

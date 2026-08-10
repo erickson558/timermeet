@@ -187,6 +187,13 @@ translations = {
         "contextMenuNewMeeting": "Nueva reunión",
         "weekViewWorkWeekButton": "Ver lun-vie",
         "weekViewFullWeekButton": "Ver semana completa",
+        "deleteSeries": "Eliminar serie completa",
+        "deleteSeriesConfirm": (
+            "Se eliminarán TODAS las {count} reuniones de esta serie, pasadas y futuras. "
+            "Esta acción no se puede deshacer."
+        ),
+        "deletedSeriesToast": "Se eliminaron {count} reuniones de la serie.",
+        "weekToolbarAddButton": "Agregar",
         "meetingsSkippedToast": "{count} reunión(es) no se pudieron cargar -- revisa el registro.",
         "meetingsFileCorruptToast": (
             "No se pudo leer el archivo de reuniones guardado; se guardó una copia de respaldo "
@@ -362,6 +369,10 @@ translations = {
         "contextMenuNewMeeting": "New meeting",
         "weekViewWorkWeekButton": "View Mon-Fri",
         "weekViewFullWeekButton": "View full week",
+        "deleteSeries": "Delete entire series",
+        "deleteSeriesConfirm": "ALL {count} meetings in this series will be deleted, past and future. This cannot be undone.",
+        "deletedSeriesToast": "{count} meetings in the series were deleted.",
+        "weekToolbarAddButton": "Add",
         "meetingsSkippedToast": "{count} meeting(s) could not be loaded -- check the log.",
         "meetingsFileCorruptToast": (
             "Could not read the saved meetings file; a backup copy was created and the app "

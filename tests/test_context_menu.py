@@ -52,6 +52,7 @@ def _make_callbacks(**overrides):
         "on_calendar_prev_month": _no_op, "on_calendar_next_month": _no_op, "on_calendar_today": _no_op,
         "on_calendar_day_click": _no_op, "on_week_prev": _no_op, "on_week_next": _no_op,
         "on_week_today": _no_op, "on_week_slot_click": _no_op, "on_toggle_week_column_mode": _no_op,
+        "on_delete_series": _no_op,
     }
     fields.update(overrides)
     return main_window.Callbacks(**fields)
@@ -61,8 +62,13 @@ def _blank_calendar_cell(day: date) -> "main_window.CalendarCellData":
     return main_window.CalendarCellData(day=day, in_current_month=True, is_today=False, entries=[], overflow_count=0)
 
 
-def _calendar_cell_with_entry(day: date, meeting_id: str) -> "main_window.CalendarCellData":
-    entry = main_window.CalendarEntry(meeting_id=meeting_id, time_text="09:00", title="Standup", color="#ffffff")
+def _calendar_cell_with_entry(
+    day: date, meeting_id: str, series_occurrence_count: int = 0
+) -> "main_window.CalendarCellData":
+    entry = main_window.CalendarEntry(
+        meeting_id=meeting_id, time_text="09:00", title="Standup", color="#ffffff",
+        series_occurrence_count=series_occurrence_count,
+    )
     return main_window.CalendarCellData(day=day, in_current_month=True, is_today=False, entries=[entry], overflow_count=0)
 
 
@@ -70,8 +76,13 @@ def _blank_week_cell(day: date, hour: int) -> "main_window.WeekCellData":
     return main_window.WeekCellData(day=day, hour=hour, entries=[], overflow_count=0)
 
 
-def _week_cell_with_entry(day: date, hour: int, meeting_id: str) -> "main_window.WeekCellData":
-    entry = main_window.CalendarEntry(meeting_id=meeting_id, time_text="09:00", title="Standup", color="#ffffff")
+def _week_cell_with_entry(
+    day: date, hour: int, meeting_id: str, series_occurrence_count: int = 0
+) -> "main_window.WeekCellData":
+    entry = main_window.CalendarEntry(
+        meeting_id=meeting_id, time_text="09:00", title="Standup", color="#ffffff",
+        series_occurrence_count=series_occurrence_count,
+    )
     return main_window.WeekCellData(day=day, hour=hour, entries=[entry], overflow_count=0)
 
 
@@ -246,6 +257,85 @@ class ContextMenuTests(unittest.TestCase):
 
         self.assertEqual(self.popup_calls, [], "the overflow label must never show a context menu")
 
+    # -- "Eliminar serie completa" (SDD.md v2.11.0) -----------------------------
+
+    def test_right_click_on_calendar_entry_with_no_live_siblings_hides_delete_series(self):
+        """`series_occurrence_count` of 0 (not part of an active recurring
+        series) or 1 (recurring, but only one occurrence exists right now)
+        must both leave the menu at exactly 2 items -- "Eliminar serie
+        completa" only ever appears at 2+."""
+        self.view.set_active_view("calendar")
+        self.root.update()
+        for count in (0, 1):
+            target = date(2026, 8, 21)
+            cells = [_calendar_cell_with_entry(target, "meeting-1", series_occurrence_count=count)] + [
+                _blank_calendar_cell(date(2025, 12, 1) + timedelta(days=i)) for i in range(41)
+            ]
+            self.view.render_calendar("Agosto 2026", ["L", "M", "M", "J", "V", "S", "D"], cells)
+            widgets = self.view._calendar_cells[0]
+
+            widgets.entry_labels[0].event_generate("<Button-3>")
+
+            self.assertEqual(
+                self._menu_labels(), [i18n.t("edit", "es"), i18n.t("delete", "es")],
+                f"series_occurrence_count={count} must not offer 'Eliminar serie completa'",
+            )
+
+    def test_right_click_on_calendar_entry_with_live_siblings_shows_delete_series(self):
+        self.view.set_active_view("calendar")
+        self.root.update()
+        target = date(2026, 8, 21)
+        cells = [_calendar_cell_with_entry(target, "meeting-1", series_occurrence_count=3)] + [
+            _blank_calendar_cell(date(2025, 12, 1) + timedelta(days=i)) for i in range(41)
+        ]
+        self.view.render_calendar("Agosto 2026", ["L", "M", "M", "J", "V", "S", "D"], cells)
+        widgets = self.view._calendar_cells[0]
+
+        widgets.entry_labels[0].event_generate("<Button-3>")
+
+        self.assertEqual(
+            self._menu_labels(), [i18n.t("edit", "es"), i18n.t("delete", "es"), i18n.t("deleteSeries", "es")]
+        )
+
+    def test_calendar_entry_menu_delete_series_confirms_with_count_and_calls_on_delete_series(self):
+        self.view.set_active_view("calendar")
+        self.root.update()
+        target = date(2026, 8, 21)
+        cells = [_calendar_cell_with_entry(target, "meeting-1", series_occurrence_count=5)] + [
+            _blank_calendar_cell(date(2025, 12, 1) + timedelta(days=i)) for i in range(41)
+        ]
+        self.view.render_calendar("Agosto 2026", ["L", "M", "M", "J", "V", "S", "D"], cells)
+        widgets = self.view._calendar_cells[0]
+        calls = {"deleted_series": None}
+        self.view.callbacks = _make_callbacks(on_delete_series=lambda mid: calls.__setitem__("deleted_series", mid))
+
+        widgets.entry_labels[0].event_generate("<Button-3>")
+        with patch.object(main_window.messagebox, "askyesno", return_value=True) as askyesno:
+            self.view._context_menu.invoke(2)  # "Eliminar serie completa"
+            askyesno.assert_called_once_with(
+                i18n.t("deleteSeries", "es"), i18n.format_text("deleteSeriesConfirm", "es", count=5)
+            )
+
+        self.assertEqual(calls["deleted_series"], "meeting-1")
+
+    def test_calendar_entry_menu_delete_series_declined_does_not_call_callback(self):
+        self.view.set_active_view("calendar")
+        self.root.update()
+        target = date(2026, 8, 21)
+        cells = [_calendar_cell_with_entry(target, "meeting-1", series_occurrence_count=2)] + [
+            _blank_calendar_cell(date(2025, 12, 1) + timedelta(days=i)) for i in range(41)
+        ]
+        self.view.render_calendar("Agosto 2026", ["L", "M", "M", "J", "V", "S", "D"], cells)
+        widgets = self.view._calendar_cells[0]
+        calls = {"deleted_series": None}
+        self.view.callbacks = _make_callbacks(on_delete_series=lambda mid: calls.__setitem__("deleted_series", mid))
+
+        widgets.entry_labels[0].event_generate("<Button-3>")
+        with patch.object(main_window.messagebox, "askyesno", return_value=False):
+            self.view._context_menu.invoke(2)
+
+        self.assertIsNone(calls["deleted_series"])
+
     # -- week view --------------------------------------------------------------
 
     def test_right_click_on_week_entry_shows_edit_and_delete(self):
@@ -339,6 +429,104 @@ class ContextMenuTests(unittest.TestCase):
         widgets.overflow_label.event_generate("<Button-3>")
 
         self.assertEqual(self.popup_calls, [])
+
+    # -- "Eliminar serie completa" (SDD.md v2.11.0), week view ------------------
+
+    def test_right_click_on_week_entry_with_no_live_siblings_hides_delete_series(self):
+        self.view.set_active_view("week")
+        self.root.update()
+        monday = date(2026, 8, 10)
+        for count in (0, 1):
+            cell = _week_cell_with_entry(monday, 9, "meeting-week-1", series_occurrence_count=count)
+            cells = _full_week(monday, cell, filled_row=9, filled_col=0)
+            self.view.render_week_grid(
+                "10-16 Ago 2026", ["L 10", "M 11", "M 12", "J 13", "V 14", "S 15", "D 16"], cells
+            )
+            widgets = self.view._week_cells[9 * main_window.WEEK_COLS + 0]
+
+            widgets.entry_labels[0].event_generate("<Button-3>")
+
+            self.assertEqual(
+                self._menu_labels(), [i18n.t("edit", "es"), i18n.t("delete", "es")],
+                f"series_occurrence_count={count} must not offer 'Eliminar serie completa'",
+            )
+        self.view.clear_week_selection()
+
+    def test_right_click_on_week_entry_with_live_siblings_shows_delete_series(self):
+        self.view.set_active_view("week")
+        self.root.update()
+        monday = date(2026, 8, 10)
+        cell = _week_cell_with_entry(monday, 9, "meeting-week-1", series_occurrence_count=4)
+        cells = _full_week(monday, cell, filled_row=9, filled_col=0)
+        self.view.render_week_grid("10-16 Ago 2026", ["L 10", "M 11", "M 12", "J 13", "V 14", "S 15", "D 16"], cells)
+        widgets = self.view._week_cells[9 * main_window.WEEK_COLS + 0]
+
+        widgets.entry_labels[0].event_generate("<Button-3>")
+
+        self.assertEqual(
+            self._menu_labels(), [i18n.t("edit", "es"), i18n.t("delete", "es"), i18n.t("deleteSeries", "es")]
+        )
+        self.view.clear_week_selection()
+
+    def test_week_entry_menu_delete_series_confirms_with_count_and_calls_on_delete_series(self):
+        self.view.set_active_view("week")
+        self.root.update()
+        monday = date(2026, 8, 10)
+        cell = _week_cell_with_entry(monday, 9, "meeting-week-1", series_occurrence_count=6)
+        cells = _full_week(monday, cell, filled_row=9, filled_col=0)
+        self.view.render_week_grid("10-16 Ago 2026", ["L 10", "M 11", "M 12", "J 13", "V 14", "S 15", "D 16"], cells)
+        widgets = self.view._week_cells[9 * main_window.WEEK_COLS + 0]
+        calls = {"deleted_series": None}
+        self.view.callbacks = _make_callbacks(on_delete_series=lambda mid: calls.__setitem__("deleted_series", mid))
+
+        widgets.entry_labels[0].event_generate("<Button-3>")
+        with patch.object(main_window.messagebox, "askyesno", return_value=True) as askyesno:
+            self.view._context_menu.invoke(2)
+            askyesno.assert_called_once_with(
+                i18n.t("deleteSeries", "es"), i18n.format_text("deleteSeriesConfirm", "es", count=6)
+            )
+
+        self.assertEqual(calls["deleted_series"], "meeting-week-1")
+        self.view.clear_week_selection()
+
+    def test_right_click_on_week_entry_also_selects_it_as_a_side_effect(self):
+        """SDD.md v2.11.0's explicit decision: right-click on an entry
+        selects it too (Windows' own precedent), so the action toolbar
+        never disagrees with what the context menu is about to act on."""
+        self.view.set_active_view("week")
+        self.root.update()
+        monday = date(2026, 8, 10)
+        cell = _week_cell_with_entry(monday, 9, "meeting-week-1")
+        cells = _full_week(monday, cell, filled_row=9, filled_col=0)
+        self.view.render_week_grid("10-16 Ago 2026", ["L 10", "M 11", "M 12", "J 13", "V 14", "S 15", "D 16"], cells)
+        widgets = self.view._week_cells[9 * main_window.WEEK_COLS + 0]
+
+        widgets.entry_labels[0].event_generate("<Button-3>")
+
+        self.assertEqual(self.view._week_selected_meeting_id, "meeting-week-1")
+        self.assertEqual(str(self.view.week_edit_button["state"]), "normal")
+        self.assertEqual(str(self.view.week_delete_button["state"]), "normal")
+        self.view.clear_week_selection()
+
+    def test_right_click_on_empty_week_slot_does_not_touch_an_existing_selection(self):
+        self.view.set_active_view("week")
+        self.root.update()
+        monday = date(2026, 8, 10)
+        cell = _week_cell_with_entry(monday, 9, "meeting-week-1")
+        cells = _full_week(monday, cell, filled_row=9, filled_col=0)
+        self.view.render_week_grid("10-16 Ago 2026", ["L 10", "M 11", "M 12", "J 13", "V 14", "S 15", "D 16"], cells)
+        entry_widgets = self.view._week_cells[9 * main_window.WEEK_COLS + 0]
+        slot_widgets = self.view._week_cells[10 * main_window.WEEK_COLS + 1]
+        entry_widgets.entry_labels[0].event_generate("<Button-1>")  # select it first
+        self.assertEqual(self.view._week_selected_meeting_id, "meeting-week-1")
+
+        slot_widgets.frame.event_generate("<Button-3>")
+
+        self.assertEqual(
+            self.view._week_selected_meeting_id, "meeting-week-1",
+            "right-click on empty slot background must not change or clear the selection",
+        )
+        self.view.clear_week_selection()
 
     # -- shared-menu / leak-safety proofs ---------------------------------------
 

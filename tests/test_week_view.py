@@ -73,6 +73,7 @@ def _make_callbacks(**overrides):
         "on_week_today": _no_op,
         "on_week_slot_click": _no_op,
         "on_toggle_week_column_mode": _no_op,
+        "on_delete_series": _no_op,
     }
     fields.update(overrides)
     return main_window.Callbacks(**fields)
@@ -144,7 +145,15 @@ class WeekViewWidgetTests(unittest.TestCase):
         self.assertEqual(calls["slot"], (monday + timedelta(days=2), target_hour))
         self.assertEqual(calls["views"], ["list"])
 
-    def test_clicking_an_existing_week_entry_still_edits_and_does_not_trigger_slot_click(self):
+    def test_clicking_an_existing_week_entry_selects_it_instead_of_editing_directly(self):
+        """SDD.md v2.11.0: left-click on a week-view entry now SELECTS it
+        (accent border + toolbar enablement, see tests/test_week_selection.py
+        for the dedicated coverage) instead of jumping straight to edit --
+        a deliberate, week-view-only behavior change (the month view's own
+        click-to-edit is untouched, see test_calendar_day_click.py).
+        `_handle_week_entry_click` (the old left-click target) still exists
+        unchanged and is still reachable via "Editar" (context menu +
+        toolbar) -- only what left-click itself is bound to changed."""
         edit_calls = []
         slot_calls = []
         self.view.callbacks = _make_callbacks(
@@ -157,10 +166,18 @@ class WeekViewWidgetTests(unittest.TestCase):
         self.view.render_week_grid("10-16 Ago 2026", ["L 10", "M 11", "M 12", "J 13", "V 14", "S 15", "D 16"], cells)
         widgets = self.view._week_cells[9 * main_window.WEEK_COLS + 0]
 
-        widgets.entry_labels[0].event_generate("<Button-1>")
+        try:
+            widgets.entry_labels[0].event_generate("<Button-1>")
 
-        self.assertEqual(edit_calls, ["meeting-week-1"])
-        self.assertEqual(slot_calls, [], "clicking an entry must not also fire the empty-slot handler")
+            self.assertEqual(edit_calls, [], "left-click in week view must no longer edit directly")
+            self.assertEqual(slot_calls, [], "clicking an entry must not also fire the empty-slot handler")
+            self.assertEqual(self.view._week_selected_meeting_id, "meeting-week-1")
+        finally:
+            # This class shares one `MainWindow` across every test in it
+            # (see setUpClass) -- leave selection state clean for later
+            # tests, same discipline `WeekColumnModeWidgetTests.tearDown`
+            # already applies to the column-mode toggle.
+            self.view.clear_week_selection()
 
     def test_prefill_new_meeting_with_hour_sets_time_field(self):
         self.view.callbacks = _make_callbacks()

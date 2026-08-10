@@ -17,6 +17,7 @@ import json
 import logging
 import sys
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, FrozenSet, List, Optional
@@ -64,14 +65,23 @@ def _same_machine_lock(directory: Path):
     handle = None
     locked = False
     try:
-        handle = open(lock_path, "a+b")
         try:
-            import msvcrt
+            handle = open(lock_path, "a+b")
+        except Exception:  # noqa: BLE001 - e.g. lock_path was pre-created as a
+            # directory (or is otherwise unopenable); treat exactly like a
+            # failure to acquire the lock further below rather than letting
+            # this propagate and permanently blocking every future save --
+            # real corruption protection comes from atomic_write_text's
+            # os.replace(), not from this advisory lock.
+            handle = None
+        if handle is not None:
+            try:
+                import msvcrt
 
-            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-            locked = True
-        except Exception:  # noqa: BLE001 - locking is best-effort, never fatal
-            locked = False
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                locked = True
+            except Exception:  # noqa: BLE001 - locking is best-effort, never fatal
+                locked = False
         yield
     finally:
         if handle is not None:
@@ -98,34 +108,97 @@ def _quarantine_corrupt_file(path: Path) -> None:
         logger.warning("Could not quarantine corrupt data file %s: %s", path, exc)
 
 
-def load_meetings() -> List[models.Meeting]:
-    """Read and normalize every meeting on disk. Never raises: a missing
-    file yields an empty list, and an unreadable/corrupt file is quarantined
-    (not deleted) and also yields an empty list rather than crashing the app."""
+@dataclass(frozen=True)
+class MeetingLoadReport:
+    """Everything a single ``load_meetings_report()`` read found, including
+    whether anything was dropped getting there.
+
+    ``load_meetings()`` (below) stays a bare ``List[models.Meeting]`` for
+    every existing caller -- most of them (``save_meetings``'s
+    read-before-merge, ``TimerMeetApp._resync_from_disk``) only ever want
+    the meetings and would gain nothing from this signal. ``TimerMeetApp``'s
+    *startup* path is the one exception: before this report existed, a
+    quarantined file or a skipped record only ever reached
+    ``logger.warning(...)`` -- durably written to ``data/timermeet.log``,
+    but invisible to a user who will likely never open it. For an app whose
+    whole purpose is "never let the user miss a meeting", losing meetings
+    without telling the user is a trust problem regardless of whether the
+    cause was bad data (the thing this broad exception handling is deliberately
+    resilient against) or a future code bug in ``normalize_meeting()`` that
+    happens to raise on every record -- both look identical from here, and
+    both deserve a visible toast, not just a log line."""
+
+    meetings: List[models.Meeting]
+    quarantined: bool = False
+    skipped_records: int = 0
+
+
+def load_meetings_report() -> MeetingLoadReport:
+    """Read and normalize every meeting on disk, same as ``load_meetings()``,
+    but also report whether the whole file was quarantined (unreadable/
+    corrupt) or individual records were skipped (bad field data) along the
+    way. Never raises, for the same reasons ``load_meetings()``'s docstring
+    describes below."""
     path = meetings_path()
     if not path.exists():
-        return []
+        return MeetingLoadReport(meetings=[])
 
     try:
         raw = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        logger.warning("Could not read %s: %s", path, exc)
-        return []
-
-    if not raw.strip():
-        return []
-
-    try:
+        if not raw.strip():
+            return MeetingLoadReport(meetings=[])
         decoded = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        logger.warning("Corrupt data file %s (%s)", path, exc)
+    except Exception as exc:  # noqa: BLE001 - deliberately broad, see below
+        # Deliberately catches everything, not just OSError (read_text) and
+        # json.JSONDecodeError (json.loads) as this used to. A file can be
+        # syntactically-valid-but-extreme in ways that raise neither of
+        # those: an invalid UTF-8 byte raises UnicodeDecodeError (not an
+        # OSError subclass), and ~100k levels of nested "[" raises
+        # RecursionError from deep inside json.loads() itself (not a
+        # JSONDecodeError subclass). Every one of those must degrade the
+        # same way this function's docstring promises -- quarantine the file
+        # so the identical crash can't reproduce on the next launch, and
+        # start empty instead of propagating. There's no way to know how
+        # many meetings were in a file that never even parsed, so this is
+        # reported as `quarantined=True` rather than a fabricated count --
+        # see MeetingLoadReport's docstring for why the caller still surfaces
+        # this to the user.
+        logger.warning("Could not read/parse %s: %s", path, exc)
         _quarantine_corrupt_file(path)
-        return []
+        return MeetingLoadReport(meetings=[], quarantined=True)
 
     if not isinstance(decoded, list):
-        return []
+        return MeetingLoadReport(meetings=[])
 
-    return [models.normalize_meeting(item) for item in decoded if isinstance(item, dict)]
+    meetings: List[models.Meeting] = []
+    skipped_records = 0
+    for item in decoded:
+        if not isinstance(item, dict):
+            continue
+        try:
+            meetings.append(models.normalize_meeting(item))
+        except Exception as exc:  # noqa: BLE001 - one bad record must not
+            # sink the whole file's data. E.g. {"reminderMinutes": 1e400}
+            # decodes cleanly to float("inf") (json.loads never raises for
+            # this), but int(float("inf")) inside models._as_int() raises
+            # OverflowError -- a type _as_int's own except clause doesn't
+            # catch. Skip only this record; every other valid record in the
+            # same file still loads.
+            logger.warning("Skipping unparseable meeting record in %s: %s", path, exc)
+            skipped_records += 1
+    return MeetingLoadReport(meetings=meetings, skipped_records=skipped_records)
+
+
+def load_meetings() -> List[models.Meeting]:
+    """Read and normalize every meeting on disk. Never raises: a missing
+    file yields an empty list, and an unreadable/corrupt file is quarantined
+    (not deleted) and also yields an empty list rather than crashing the app.
+
+    Thin wrapper around ``load_meetings_report()`` for the common case where
+    the caller only wants the meetings, not whether anything was dropped
+    getting there -- see that function (and ``MeetingLoadReport``) for
+    callers that do care."""
+    return load_meetings_report().meetings
 
 
 def _parse_iso(value: str) -> datetime:

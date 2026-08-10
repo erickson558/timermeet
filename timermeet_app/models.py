@@ -93,6 +93,17 @@ def normalize_meeting(data: dict) -> Meeting:
     meeting_id = str(data.get("id") or "").strip() or new_id()
     created_at = str(data.get("createdAt") or "").strip() or now_iso()
     updated_at = str(data.get("updatedAt") or "").strip() or created_at
+    teams_url = security.clamp_text(data.get("teamsUrl"), security.MAX_TEAMS_URL_LENGTH)
+    if teams_url and not security.is_http_url(teams_url):
+        # Enforce the http(s)-only allow-list once, here at the disk-
+        # ingestion trust boundary, instead of relying solely on every
+        # future consumption site (app.py::handle_open_link,
+        # alarm_ui.py::open_link) remembering to re-check the scheme before
+        # opening it. An invalid-scheme value (e.g. a hand-edited
+        # "javascript:..."/"file://...") is dropped rather than stored
+        # inert, so the safety property holds even if a future call site
+        # forgets to re-validate.
+        teams_url = ""
     return Meeting(
         id=meeting_id,
         workName=security.clamp_text(data.get("workName"), security.MAX_WORK_NAME_LENGTH),
@@ -100,7 +111,7 @@ def normalize_meeting(data: dict) -> Meeting:
         datetime=str(data.get("datetime") or "").strip(),
         reminderMinutes=max(1, _as_int(data.get("reminderMinutes"), DEFAULT_REMINDER_MINUTES)),
         soundProfile=normalize_sound_profile(data.get("soundProfile")),
-        teamsUrl=security.clamp_text(data.get("teamsUrl"), security.MAX_TEAMS_URL_LENGTH),
+        teamsUrl=teams_url,
         notes=security.clamp_text(data.get("notes"), security.MAX_NOTES_LENGTH),
         recurrenceType=normalize_recurrence_type(data.get("recurrenceType")),
         seriesId=str(data.get("seriesId") or "").strip(),

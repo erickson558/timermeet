@@ -14,7 +14,7 @@ TimerMeet is a local, single-user Windows desktop app with **no server and no li
 1. Run the static/dependency scans:
    ```powershell
    python -m bandit -r timermeet_app timermeet.py build_exe.py -f txt
-   python -m pip_audit -r requirements.txt
+   python -m pip_audit -r requirements.txt -r requirements-dev.txt
    ```
 2. Every bandit finding must end up either fixed or annotated `# nosec B<code> - <one-line reason>` directly in the diff -- never suppressed via a blanket config with no visible reason.
 3. Any `pip_audit` finding (a known CVE in a pinned/installed version) must be resolved by upgrading, or explicitly written up as an accepted risk in `SECURITY.md` -- never silently ignored.

@@ -246,7 +246,11 @@ class TimerMeetApp:
         # was X when the view opened"), same spirit as `_calendar_year`/
         # `_calendar_month` above.
         self._week_anchor: date = now.date()
-        self.meetings: List[models.Meeting] = storage.load_meetings()
+        # Captured as a report (not a bare list) purely so the startup toast
+        # below can tell the user something was actually dropped -- see
+        # `_maybe_show_startup_load_toast` and `storage.MeetingLoadReport`.
+        startup_load = storage.load_meetings_report()
+        self.meetings: List[models.Meeting] = startup_load.meetings
         self._pending_deleted_ids: set = set()
 
         # First run under this feature (no "companies" key at all yet): seed
@@ -303,6 +307,7 @@ class TimerMeetApp:
         self.view.update_company_options(self.companies)
         if self.gadget_mode:
             self.view.set_gadget_mode(True, self._gadget_x, self._gadget_y)
+        self._maybe_show_startup_load_toast(startup_load)
 
         self.alarms = AlarmController(self.root, get_language=lambda: self.language)
         self.alarms.set_base_title(i18n.t("appTitle", self.language))
@@ -357,6 +362,26 @@ class TimerMeetApp:
             self.root.focus_force()
         except Exception as exc:  # nosec B110 - defensive nicety, must never block startup
             logger.warning("Could not force-show the main window: %s", exc)
+
+    def _maybe_show_startup_load_toast(self, report: "storage.MeetingLoadReport") -> None:
+        """Surface the one-time startup load report as a toast instead of
+        letting it live only in ``data/timermeet.log`` (see
+        ``storage.MeetingLoadReport``'s docstring for why this matters: bad
+        data and a future code bug in ``normalize_meeting()`` degrade
+        identically here, and both must be visible, not just logged). Quiet
+        no-op on the ordinary clean-load path (``quarantined=False`` and
+        ``skipped_records=0``), which is every launch except the two failure
+        cases this exists for."""
+        if report.quarantined:
+            # The file never even parsed, so there's no way to know how many
+            # meetings were in it -- a fabricated count would be worse than
+            # none, so this case gets its own count-free message instead of
+            # reusing meetingsSkippedToast with a made-up number.
+            self.view.show_toast(i18n.t("meetingsFileCorruptToast", self.language))
+        elif report.skipped_records:
+            self.view.show_toast(
+                i18n.format_text("meetingsSkippedToast", self.language, count=report.skipped_records)
+            )
 
     # -- persistence ----------------------------------------------------------
 

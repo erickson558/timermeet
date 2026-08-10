@@ -81,6 +81,17 @@ class IsHttpUrlTests(unittest.TestCase):
         self.assertTrue(security.is_http_url("http://example.com"))
         self.assertTrue(security.is_http_url("https://example.com"))
 
+    def test_accepts_ordinary_leading_and_trailing_whitespace(self):
+        self.assertTrue(security.is_http_url(" https://example.com "))
+
+    def test_rejects_control_character_that_strip_would_otherwise_remove(self):
+        # \x1f is treated as whitespace by str.strip() (a CPython/Unicode
+        # quirk covering the ASCII "information separator" range
+        # \x1c-\x1f), so it used to vanish before the unsafe-character check
+        # ever saw it -- confirming the check now runs on the raw value.
+        self.assertFalse(security.is_http_url("https://example.com/path\x1f"))
+        self.assertFalse(security.is_http_url("\x1fhttps://example.com/path"))
+
 
 if __name__ == "__main__":
     unittest.main()

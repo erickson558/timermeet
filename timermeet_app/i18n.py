@@ -184,6 +184,11 @@ translations = {
         "weekPrevButton": "‹",
         "weekNextButton": "›",
         "weekTodayButton": "Esta semana",
+        "meetingsSkippedToast": "{count} reunión(es) no se pudieron cargar -- revisa el registro.",
+        "meetingsFileCorruptToast": (
+            "No se pudo leer el archivo de reuniones guardado; se guardó una copia de respaldo "
+            "y la app inició con la lista vacía. Revisa el registro."
+        ),
     },
     "en": {
         "appTitle": "TimerMeet",
@@ -351,6 +356,11 @@ translations = {
         "weekPrevButton": "‹",
         "weekNextButton": "›",
         "weekTodayButton": "This week",
+        "meetingsSkippedToast": "{count} meeting(s) could not be loaded -- check the log.",
+        "meetingsFileCorruptToast": (
+            "Could not read the saved meetings file; a backup copy was created and the app "
+            "started with an empty list. Check the log."
+        ),
     },
 }
 
@@ -371,7 +381,12 @@ def format_text(key: str, language: str = DEFAULT_LANGUAGE, **replacements) -> s
     text = t(key, language)
     for name, value in replacements.items():
         pattern = _PLACEHOLDER_RE_CACHE.setdefault(name, re.compile(r"\{" + re.escape(name) + r"\}"))
-        text = pattern.sub(str(value), text)
+        # A lambda replacement is used verbatim by re.sub, bypassing its
+        # backslash-digit/`\g<name>` special-case handling that a plain
+        # string replacement would otherwise trigger. Not reachable today
+        # (every call site only passes internal integers), but `value` isn't
+        # guaranteed to stay that way forever.
+        text = pattern.sub(lambda _match: str(value), text)
     return text
 
 

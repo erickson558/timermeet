@@ -72,6 +72,7 @@ def _make_callbacks(**overrides):
         "on_week_next": _no_op,
         "on_week_today": _no_op,
         "on_week_slot_click": _no_op,
+        "on_toggle_week_column_mode": _no_op,
     }
     fields.update(overrides)
     return main_window.Callbacks(**fields)
@@ -287,7 +288,11 @@ class WeekViewWidgetTests(unittest.TestCase):
         calls = []
         self.view.callbacks = _make_callbacks(on_set_active_view=lambda v: calls.append(v))
         expected = {
-            "full": ["calendarViewButton", "weekViewButton"],
+            # "week" listed before "calendar" on the list/full header only
+            # (SDD.md v2.10.0 discoverability fix) -- the launch screen
+            # where a user actually picks a view for the first time; the
+            # month header's own pairing is untouched.
+            "full": ["weekViewButton", "calendarViewButton"],
             "calendar": ["listViewButton", "weekViewButton"],
             "week": ["listViewButton", "calendarViewButton"],
         }

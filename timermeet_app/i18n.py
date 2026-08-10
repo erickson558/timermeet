@@ -184,6 +184,9 @@ translations = {
         "weekPrevButton": "‹",
         "weekNextButton": "›",
         "weekTodayButton": "Esta semana",
+        "contextMenuNewMeeting": "Nueva reunión",
+        "weekViewWorkWeekButton": "Ver lun-vie",
+        "weekViewFullWeekButton": "Ver semana completa",
         "meetingsSkippedToast": "{count} reunión(es) no se pudieron cargar -- revisa el registro.",
         "meetingsFileCorruptToast": (
             "No se pudo leer el archivo de reuniones guardado; se guardó una copia de respaldo "
@@ -356,6 +359,9 @@ translations = {
         "weekPrevButton": "‹",
         "weekNextButton": "›",
         "weekTodayButton": "This week",
+        "contextMenuNewMeeting": "New meeting",
+        "weekViewWorkWeekButton": "View Mon-Fri",
+        "weekViewFullWeekButton": "View full week",
         "meetingsSkippedToast": "{count} meeting(s) could not be loaded -- check the log.",
         "meetingsFileCorruptToast": (
             "Could not read the saved meetings file; a backup copy was created and the app "

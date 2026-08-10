@@ -23,7 +23,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 import tkinter.messagebox as messagebox
 import webbrowser
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from tkinter import ttk
 from typing import Callable, Dict, List, Optional, Tuple
@@ -162,6 +162,12 @@ def _truncate_calendar_entry(text: str) -> str:
 # decision, the Nivel A/Nivel B split for the live time-line, etc.).
 WEEK_ROWS = 24
 WEEK_COLS = 7
+# 0-based column index within WEEK_COLS (Monday=0, per `week_dates`'s own
+# `firstweekday=0` convention) -- the two columns "work-week" mode (v2.10.0)
+# hides. Named rather than inlined so `set_week_column_mode` and any future
+# reader don't have to re-derive "5 and 6 mean Saturday/Sunday" from bare
+# integers.
+_WEEKEND_COLUMN_INDICES = (5, 6)
 # 2, not the month view's 3: an hour-row is much shorter than a full day
 # cell (see SDD.md decision #7) -- deliberately lower, not a copy-paste of
 # CALENDAR_MAX_ENTRIES_PER_CELL.
@@ -415,6 +421,16 @@ class _CalendarCellWidgets:
     day_label: tk.Label
     entry_labels: List[tk.Label]
     overflow_label: tk.Label
+    # Tracks the funcid the most recent `.bind()` call returned for each
+    # rebound widget+sequence pair on this cell, so the NEXT real re-render
+    # can release the PREVIOUS Tcl command first via `_rebind()` (see that
+    # function's docstring, and module-map.md's "Recurring footgun" note --
+    # this cell's `day_label`/`frame`/`entry_labels` are long-lived widgets
+    # tied to a fixed grid *position*, rebound with a fresh closure every
+    # real render). Keys are short, stable labels ("day_left", "day_right",
+    # "frame_left", "frame_right", "entry_left_0", "entry_right_0", ...)
+    # rather than one dataclass field per widget+sequence pair.
+    bind_funcids: Dict[str, Optional[str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -439,6 +455,9 @@ class _WeekCellWidgets:
     frame: tk.Frame
     entry_labels: List[tk.Label]
     overflow_label: tk.Label
+    # Same funcid-tracking purpose as `_CalendarCellWidgets.bind_funcids`
+    # above -- see `_rebind()`'s docstring.
+    bind_funcids: Dict[str, Optional[str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -512,6 +531,7 @@ class Callbacks:
     on_week_next: Callable[[], None]
     on_week_today: Callable[[], None]
     on_week_slot_click: Callable[[date, int], None]
+    on_toggle_week_column_mode: Callable[[], None]
 
 
 def _button(
@@ -534,6 +554,76 @@ def _entry(parent, **extra) -> tk.Entry:
         highlightthickness=1, highlightbackground=BORDER, highlightcolor=ACCENT,
         font=(FONT_FAMILY, 11), **extra,
     )
+
+
+def _rebind(widget: tk.Widget, sequence: str, handler: Callable, previous_funcid: Optional[str]) -> str:
+    """Rebinds `sequence` on `widget` to a fresh `handler`, releasing the
+    Tcl command a PREVIOUS `.bind()` call on this same widget+sequence
+    registered first -- see module-map.md's "Recurring footgun" note.
+
+    This is the fix for a real, confirmed leak in `_update_calendar_cell`/
+    `_update_week_cell`: those two functions rebind a fresh closure onto
+    long-lived cell widgets on every real re-render (a month/week
+    navigation, an edit, a language toggle -- gated behind app.py's own
+    dirty-check signature, so this never runs on an unchanged heartbeat
+    tick). Being *gated* only stops WASTED rebinds when nothing changed;
+    it does nothing about the Tcl command a real, correctly-triggered
+    rebind leaves behind. On this Tk/Python version, calling `.bind()`
+    again on the same widget+sequence replaces which callback *fires* but
+    never releases the previous callback's underlying Tcl command --
+    confirmed empirically (500 rebinds via plain `.bind()`, no release: the
+    real interpreter-wide command count, `info commands`, grew by 500; the
+    same 500 rebinds through this helper grew it by exactly 1, the one
+    still live).
+
+    Which widget to call `deletecommand` on matters and is NOT the same
+    for every kind of bind: `_ScrollablePanel._unbind_wheel` already
+    documents that `bind_all`'s funcid is tracked against the ROOT widget
+    (`self._root()._bind(('bind', 'all'), ...)`), never the widget
+    `bind_all()` was called on. A plain, non-"all" `.bind()` (this
+    function's only use) is different -- confirmed empirically, not
+    assumed: it registers its funcid via `self._register()` on the WIDGET
+    ITSELF, so release must go through `widget.deletecommand(...)`, never
+    `widget._root().deletecommand(...)`.
+
+    The wrong target does NOT silently fail to release the Tcl command --
+    `Misc.deletecommand()` calls `self.tk.deletecommand(name)` against the
+    one Tcl interpreter shared by every widget under this `Tk()` root, so
+    the underlying command is genuinely deleted no matter which widget
+    object you call it through. What actually goes wrong, confirmed
+    directly against CPython's own `tkinter.Misc.deletecommand`/`destroy`
+    source (not assumed): that same method ALSO does its Python-side
+    bookkeeping (`self._tclCommands.remove(name)`) against whichever
+    object you called it on. A plain `.bind()`'s funcid lives in the
+    WIDGET's own `_tclCommands` list (only `bind_all` routes that
+    bookkeeping through `_root()`), so calling `deletecommand()` via the
+    wrong (`_root()`) target tries to remove it from ROOT's list instead --
+    a harmless no-op there (caught by that method's own `except
+    ValueError`) -- while leaving the now-stale funcid behind in the
+    WIDGET's own list. `Misc.destroy()` later iterates that same list and
+    calls `self.tk.deletecommand(name)` on every entry unconditionally, so
+    that stale, already-deleted funcid raises an uncaught `TclError: can't
+    delete Tcl command` the moment this widget is ever `.destroy()`ed --
+    e.g. cascading from `root.destroy()` at app shutdown. A double-delete
+    crash at teardown, not a silent leak.
+
+    Also the reason `root._tclCommands` (the metric `tests/
+    test_scrollable_panel.py` uses, correctly, for the `bind_all` case)
+    must NOT be trusted as the sole leak signal for a plain `.bind()` on a
+    non-root widget -- confirmed empirically: 500 leaked plain-`.bind()`
+    commands moved `root._tclCommands`'s count by exactly 0. Tests for
+    this class of bug use `tests/testutils.py::count_tcl_commands`
+    (`info commands`, the real interpreter-wide count) instead."""
+    if previous_funcid is not None:
+        try:
+            widget.deletecommand(previous_funcid)
+        except tk.TclError:
+            # Already released is harmless -- bandit's B110 check only
+            # flags a bare/`Exception`-typed try/except/pass by default
+            # (see `try_except_pass.py`'s `check_typed_exception` config),
+            # so this specific, narrow exception type needs no `# nosec`.
+            pass
+    return widget.bind(sequence, handler)
 
 
 class _ScrollablePanel(tk.Frame):
@@ -715,6 +805,23 @@ class MainWindow:
         self._week_live_state: Tuple[Optional[int], int, int] = (None, 0, 0)
         self._week_live_retry_job: Optional[str] = None
         self._week_live_retry_count = 0
+        # Debounce handle for `_schedule_week_now_line_update` (see that
+        # method) -- the same `after_idle`-coalescing pattern
+        # `_ScrollablePanel._canvas_width_job` already uses for its own
+        # `<Configure>` burst during a live window-resize drag.
+        self._week_now_line_configure_job: Optional[str] = None
+        # "full" (Mon-Sun, 7 columns) or "work" (Mon-Fri, 2 columns
+        # collapsed) -- see `set_week_column_mode`. app.py sets the real
+        # persisted value right after construction; "full" here is only
+        # this attribute's pre-persistence default, matching
+        # `settings.json`'s own default for `weekColumnMode`.
+        self._week_column_mode = "full"
+        # Set by `_build_week_view` (today local variables `day_header_row`/
+        # `grid_frame`) -- `set_week_column_mode` needs both afterwards to
+        # collapse/restore the weekend columns' `grid_columnconfigure`
+        # weight in both frames that declare those columns.
+        self._week_day_header_row: Optional[tk.Frame] = None
+        self._week_grid_frame: Optional[tk.Frame] = None
         # Lazily created/cached on first use (both need a live `tk.Tk()` to
         # query font metrics, which doesn't exist yet at this point in
         # `__init__`) -- see `_header_title_column_minsize`/`_subtitle_font`.
@@ -731,6 +838,16 @@ class MainWindow:
         self._card_title_wraplength_px: Optional[int] = None
 
         self.root.configure(bg=WINDOW_BG)
+        # A single, long-lived context menu (SDD.md v2.10.0), reused for
+        # every right-click on month/week cells -- never rebuilt per cell or
+        # per click. Its contents are cleared and re-added just before each
+        # `tk_popup()` call (see `_show_context_menu`); `tkinter.Menu.delete`
+        # itself calls `deletecommand()` for every entry with a `command=`
+        # it removes (verified against the stdlib source), so rebuilding its
+        # contents on every right-click does not accumulate orphaned Tcl
+        # commands the way a repeated plain `.bind()` would (see `_rebind`'s
+        # docstring) -- this widget is deliberately never destroyed/recreated.
+        self._context_menu = tk.Menu(self.root, tearoff=0)
         self._configure_ttk_style()
         self._build_layout()
         self.apply_translations(i18n.DEFAULT_LANGUAGE)
@@ -785,8 +902,15 @@ class MainWindow:
         self.full_view.grid_columnconfigure(0, weight=1)
         self.full_view.grid_rowconfigure(1, weight=1)
 
+        # "week" listed before "calendar" (SDD.md v2.10.0 discoverability
+        # fix): on this, the launch screen where the user actually decides
+        # which view to try, the hour-axis week view previously read second
+        # with identical visual weight to the monthly calendar and went
+        # unnoticed. Zero behavior change -- both buttons already existed
+        # and already did the same thing; only construction order (and, see
+        # `_build_header`, this one button's color) changes.
         self.full_header = self._build_header(
-            self.full_view, [("calendar", "calendarViewButton"), ("week", "weekViewButton")]
+            self.full_view, [("week", "weekViewButton"), ("calendar", "calendarViewButton")]
         )
         self._headers.append(self.full_header)
 
@@ -869,9 +993,21 @@ class MainWindow:
         language_button.pack(side="left", padx=_HEADER_BUTTON_GAP_PX)
         view_switch_buttons: List[Tuple[tk.Button, str]] = []
         for target_view, key in view_buttons:
+            # Discoverability fix (SDD.md v2.10.0): the button that jumps to
+            # the hour-axis week view gets the app's accent palette instead
+            # of the same GHOST_BG every other action-row button uses --
+            # same precedent as `donate_button`'s own distinct GOLD_*
+            # palette below. Applies to this button wherever it appears
+            # (full_view and calendar_view); week_view itself never has a
+            # "week" target in its own `view_buttons` (you're already
+            # there), so this never fires out of place.
+            if target_view == "week":
+                btn_bg, btn_fg, btn_hover = ACCENT, ACCENT_FG, ACCENT_HOVER
+            else:
+                btn_bg, btn_fg, btn_hover = GHOST_BG, GHOST_FG, GHOST_HOVER
             view_button = _button(
                 actions, "", lambda target=target_view: self.callbacks.on_set_active_view(target),
-                GHOST_BG, GHOST_FG, GHOST_HOVER, padx=_HEADER_BUTTON_PADX, font_size=_HEADER_BUTTON_FONT_SIZE,
+                btn_bg, btn_fg, btn_hover, padx=_HEADER_BUTTON_PADX, font_size=_HEADER_BUTTON_FONT_SIZE,
             )
             view_button.pack(side="left", padx=_HEADER_BUTTON_GAP_PX)
             view_switch_buttons.append((view_button, key))
@@ -1430,8 +1566,23 @@ class MainWindow:
         self.week_next_button.pack(side="left", padx=(4, 12))
         self.week_today_button = _button(nav, "", self.callbacks.on_week_today, GHOST_BG, GHOST_FG, GHOST_HOVER)
         self.week_today_button.pack(side="left")
+        # Work-week/full-week toggle (SDD.md v2.10.0): lives in this nav bar,
+        # not the header's action row, which is already at its width budget
+        # at the app's 960px floor (see `_HEADER_BUTTON_PADX`'s comment
+        # block) -- this nav bar has room to spare. One button whose own
+        # text announces the state a click switches TO, same pattern
+        # `language_button` already uses (its text is the *other*
+        # language's code, not the current one).
+        self.week_column_toggle_button = _button(
+            nav, "", self.callbacks.on_toggle_week_column_mode, GHOST_BG, GHOST_FG, GHOST_HOVER,
+        )
+        self.week_column_toggle_button.pack(side="left", padx=(12, 0))
 
         day_header_row = tk.Frame(self.week_view, bg=WINDOW_BG)
+        # Stashed on `self` (used to be a bare local) so `set_week_column_mode`
+        # can reach this frame's `grid_columnconfigure` later, for the
+        # work-week toggle (SDD.md v2.10.0) -- see that method.
+        self._week_day_header_row = day_header_row
         day_header_row.grid(row=2, column=0, sticky="ew", padx=16)
         day_header_row.grid_columnconfigure(0, minsize=HOUR_AXIS_WIDTH_PX)
         for col in range(WEEK_COLS):
@@ -1456,6 +1607,10 @@ class MainWindow:
         # Frame keeps the widget count down (see design-notes.md's "think
         # twice before adding a widget" guidance for this exact fixed panel).
         grid_frame = scroll_panel.body
+        # Same reason as `self._week_day_header_row` above -- `set_week_column_mode`
+        # needs this frame's `grid_columnconfigure` too (the weekend
+        # columns' widget rows AND their column weight both live here).
+        self._week_grid_frame = grid_frame
         grid_frame.grid_columnconfigure(0, minsize=HOUR_AXIS_WIDTH_PX)
         for col in range(1, WEEK_COLS + 1):
             grid_frame.grid_columnconfigure(col, weight=1)
@@ -1480,6 +1635,26 @@ class MainWindow:
         # it at all, and it's never destroyed/recreated.
         self._week_now_line = tk.Frame(grid_frame, bg=NOW_LINE_COLOR, height=2)
 
+        # `_apply_week_now_line` only ever measures ROW 0's cell for a given
+        # day column (every row in that column shares its width, see that
+        # method's docstring) -- row 0's cells are exactly
+        # `self._week_cells[0:WEEK_COLS]` (row-major order, row 0 * WEEK_COLS
+        # + col == col). Binding `<Configure>` on these 7 long-lived cells
+        # here, once, at construction is what lets the live line self-correct
+        # the instant Tk finishes an actual column-width recompute (a window
+        # resize, or `set_week_column_mode`'s weight/`.grid_remove()`
+        # changes) instead of staying rendered at a stale pixel width/x until
+        # the next per-minute heartbeat tick happens to re-invoke
+        # `update_week_live_indicators` on its own (SDD.md v2.10.0) -- see
+        # `_schedule_week_now_line_update`'s docstring for why a real
+        # `<Configure>` listener, not a fixed delay or `update_idletasks()`,
+        # is the correct fix. A one-time bind on 7 permanent widgets, never
+        # repeated per-toggle or per-render, so this adds none of the
+        # unbounded-rebind leak risk `_rebind()` exists to guard against
+        # elsewhere in this file.
+        for col in range(WEEK_COLS):
+            self._week_cells[col].frame.bind("<Configure>", self._schedule_week_now_line_update)
+
     def _build_week_cell(self, parent, row: int, col: int) -> _WeekCellWidgets:
         cell = tk.Frame(
             parent, bg=PANEL_BG, highlightthickness=1, highlightbackground=BORDER, cursor="hand2",
@@ -1499,6 +1674,79 @@ class MainWindow:
         overflow_label.grid(row=WEEK_MAX_ENTRIES_PER_CELL, column=0, sticky="ew", padx=4, pady=1)
 
         return _WeekCellWidgets(frame=cell, entry_labels=entry_labels, overflow_label=overflow_label)
+
+    def set_week_column_mode(self, mode: str) -> None:
+        """Toggles between "full" (Mon-Sun, all 7 day columns visible) and
+        "work" (Mon-Fri, the Saturday/Sunday columns collapsed) -- SDD.md
+        v2.10.0. Purely visual: `recurrence.week_dates` always returns the
+        same 7 real dates either way, and `_update_week_cell`'s `.bind()`
+        rebinding (and its own dirty-check gate) is completely unaffected --
+        this only ever touches `.grid()`/`.grid_remove()`/
+        `grid_columnconfigure`, never `.bind()`.
+
+        `grid_remove()` alone does NOT collapse a `weight=1` column to 0px
+        -- confirmed against real Tk behavior, not assumed: an empty
+        weighted column still claims its proportional share of the grid's
+        extra space. Both halves are required together: `.grid_remove()`
+        the weekend widgets (so they stop reserving a spot for the geometry
+        manager to distribute space around) AND zero that column's own
+        `weight` in BOTH frames that declare it (`_week_day_header_row` and
+        `_week_grid_frame` -- the fixed day-header row and the scrollable
+        grid are two separate frames, each with their own
+        `grid_columnconfigure` for the same 7 day columns). Restoring
+        "full" mode re-applies `weight=1` and calls a bare `.grid()` (no
+        arguments -- Tk remembers each widget's last row/column/sticky) on
+        the exact same widgets; nothing is ever destroyed or rebuilt here.
+
+        The trailing `_apply_week_now_line()` call below is a real bug fix
+        (SDD.md v2.10.0), not a no-op: the live "now" line is a separately
+        `.place()`d widget with absolute pixel geometry (see that method's
+        docstring), which Tk does NOT retroactively recompute just because a
+        sibling column's grid weight changed -- without this call, toggling
+        this mode left the line rendered at its pre-toggle width/x for as
+        long as ~60 seconds, until the next per-minute heartbeat tick
+        happened to re-invoke `update_week_live_indicators` on its own. This
+        call alone is only a best-effort immediate attempt, since Tk's own
+        column-width recompute for the `grid_columnconfigure`/
+        `.grid_remove()` calls above is itself deferred (confirmed
+        empirically, not assumed -- see `_schedule_week_now_line_update`'s
+        docstring); the `<Configure>` listener bound on each day column in
+        `_build_week_view` is what reliably catches the moment Tk's real
+        recompute actually finishes and re-applies then, race-free.
+        """
+        self._week_column_mode = mode
+        show_weekend = mode != "work"
+        for offset in _WEEKEND_COLUMN_INDICES:
+            # Day-header row: columns are offset by 1 there (column 0 is the
+            # hour-axis spacer -- see `_build_week_view`).
+            self._week_day_header_row.grid_columnconfigure(offset + 1, weight=1 if show_weekend else 0)
+            self._week_grid_frame.grid_columnconfigure(offset + 1, weight=1 if show_weekend else 0)
+            if show_weekend:
+                self._week_day_header_labels[offset].grid()
+            else:
+                self._week_day_header_labels[offset].grid_remove()
+            for row in range(WEEK_ROWS):
+                cell = self._week_cells[row * WEEK_COLS + offset]
+                if show_weekend:
+                    cell.frame.grid()
+                else:
+                    cell.frame.grid_remove()
+        if hasattr(self, "week_column_toggle_button"):
+            # Guarded with `hasattr`: `app.py` calls this once at startup
+            # with the persisted setting, right after `MainWindow(...)` is
+            # constructed -- by then the button already exists (it's built
+            # eagerly in `_build_week_view`, part of the same `__init__` call
+            # that runs this), but keeping this defensive costs nothing and
+            # protects any future caller that might run this earlier.
+            self.week_column_toggle_button.configure(
+                text=i18n.t(
+                    "weekViewFullWeekButton" if mode == "work" else "weekViewWorkWeekButton", self.language
+                )
+            )
+        # See this method's docstring: best-effort immediate re-placement:
+        # the `<Configure>`-triggered `_schedule_week_now_line_update` is
+        # what actually catches the real, post-recompute geometry.
+        self._apply_week_now_line()
 
     def _primary_view_frame(self) -> tk.Frame:
         if self._primary_view == "calendar":
@@ -1564,14 +1812,35 @@ class MainWindow:
         # construction" reasoning as `entry_label` below: `day_label`/`frame`
         # are long-lived widgets tied to a fixed grid *position*, not to a
         # fixed date, so the date this closure should create a meeting for
-        # changes every time the user navigates months. Safe from leaking
-        # Tcl commands for the identical reason -- gated behind
-        # `render_calendar`'s own dirty-check in app.py, whose signature
-        # already keys on `cell.day` first, so an unchanged heartbeat tick
-        # never reaches this line at all.
+        # changes every time the user navigates months. This is safe from
+        # WASTED rebinds (gated behind `render_calendar`'s own dirty-check in
+        # app.py, whose signature already keys on `cell.day` first, so an
+        # unchanged heartbeat tick never reaches this line at all) -- but
+        # gating alone does not stop a real, correctly-triggered rebind from
+        # leaking: on this Tk/Python version, `.bind()` on the same
+        # widget+sequence again does NOT release the previous call's Tcl
+        # command, only replaces which one fires (confirmed empirically --
+        # see `_rebind`'s docstring for the exact numbers). `_rebind()`
+        # captures and releases that previous command every time, so a
+        # month navigation, an edit, or a language toggle -- all real,
+        # legitimate rebinds -- no longer leave anything behind.
         day_click = lambda _e, d=cell_data.day: self._handle_calendar_day_click(d)
-        widgets.day_label.bind("<Button-1>", day_click)
-        widgets.frame.bind("<Button-1>", day_click)
+        widgets.bind_funcids["day_left"] = _rebind(
+            widgets.day_label, "<Button-1>", day_click, widgets.bind_funcids.get("day_left")
+        )
+        widgets.bind_funcids["frame_left"] = _rebind(
+            widgets.frame, "<Button-1>", day_click, widgets.bind_funcids.get("frame_left")
+        )
+        # Right-click context menu (SDD.md v2.10.0): "Nueva reunión" on the
+        # cell's own empty background/day number -- same rebind discipline,
+        # same gate, as the left-click above.
+        day_context = lambda e, d=cell_data.day: self._show_calendar_day_context_menu(e, d)
+        widgets.bind_funcids["day_right"] = _rebind(
+            widgets.day_label, "<Button-3>", day_context, widgets.bind_funcids.get("day_right")
+        )
+        widgets.bind_funcids["frame_right"] = _rebind(
+            widgets.frame, "<Button-3>", day_context, widgets.bind_funcids.get("frame_right")
+        )
 
         for index, entry_label in enumerate(widgets.entry_labels):
             if index < len(cell_data.entries):
@@ -1586,21 +1855,20 @@ class MainWindow:
                 # meeting card -- one card per meeting, built once for that
                 # meeting's whole lifetime in the list -- a calendar cell is
                 # a fixed *position* in the grid whose displayed meeting
-                # changes every time the user navigates months.
-                #
-                # This is safe from leaking Tcl commands ONLY because
-                # `render_calendar` is now gated by app.py's own dirty-check
-                # (`_last_rendered_calendar_signature`): repeated `.bind()`
-                # calls on the same widget+sequence do NOT release the
-                # previous Tcl command on this Tk/Python version -- verified
-                # directly, 2000 rebinds left 2000 orphaned entries in
-                # `widget._tclCommands`, growing unbounded for as long as the
-                # calendar stayed open. Rebinding only happens here when this
-                # slot's actual displayed meeting changed (a month
-                # navigation, an edit, etc.), not on every idle heartbeat
-                # tick with unchanged data -- see app.py's `_refresh_calendar`.
-                entry_label.bind(
-                    "<Button-1>", lambda _e, mid=entry.meeting_id: self._handle_calendar_entry_click(mid)
+                # changes every time the user navigates months. See the
+                # `day_click`/`day_context` comment above for why `_rebind`
+                # (not a plain `.bind()`) is required here, not just the
+                # dirty-check gate.
+                left_key, right_key = f"entry_left_{index}", f"entry_right_{index}"
+                widgets.bind_funcids[left_key] = _rebind(
+                    entry_label, "<Button-1>",
+                    lambda _e, mid=entry.meeting_id: self._handle_calendar_entry_click(mid),
+                    widgets.bind_funcids.get(left_key),
+                )
+                widgets.bind_funcids[right_key] = _rebind(
+                    entry_label, "<Button-3>",
+                    lambda e, mid=entry.meeting_id: self._show_calendar_entry_context_menu(e, mid),
+                    widgets.bind_funcids.get(right_key),
                 )
                 entry_label.grid()
             else:
@@ -1658,10 +1926,21 @@ class MainWindow:
         # for `day_label`/`frame`: this cell is a fixed grid *position*
         # (one hour of one weekday column), not a fixed date -- which real
         # date/hour it represents changes every time the user navigates
-        # weeks. Safe from leaking Tcl commands for the identical reason:
-        # gated behind `render_week_grid`'s own dirty-check in app.py.
+        # weeks. Gated behind `render_week_grid`'s own dirty-check in app.py
+        # so this only runs on a real re-render, but (same as
+        # `_update_calendar_cell`) that gate alone doesn't stop a real
+        # rebind from leaking a Tcl command -- `_rebind()` captures and
+        # releases the previous one every time (see its docstring).
         slot_click = lambda _e, d=cell_data.day, h=cell_data.hour: self._handle_week_slot_click(d, h)
-        widgets.frame.bind("<Button-1>", slot_click)
+        widgets.bind_funcids["frame_left"] = _rebind(
+            widgets.frame, "<Button-1>", slot_click, widgets.bind_funcids.get("frame_left")
+        )
+        # Right-click context menu (SDD.md v2.10.0): "Nueva reunión" on the
+        # cell's own empty background -- same rebind discipline, same gate.
+        slot_context = lambda e, d=cell_data.day, h=cell_data.hour: self._show_week_slot_context_menu(e, d, h)
+        widgets.bind_funcids["frame_right"] = _rebind(
+            widgets.frame, "<Button-3>", slot_context, widgets.bind_funcids.get("frame_right")
+        )
 
         for index, entry_label in enumerate(widgets.entry_labels):
             if index < len(cell_data.entries):
@@ -1670,8 +1949,16 @@ class MainWindow:
                     text=_truncate_week_entry(f"{entry.time_text} {entry.title}"),
                     bg=entry.color, fg="black",
                 )
-                entry_label.bind(
-                    "<Button-1>", lambda _e, mid=entry.meeting_id: self._handle_week_entry_click(mid)
+                left_key, right_key = f"entry_left_{index}", f"entry_right_{index}"
+                widgets.bind_funcids[left_key] = _rebind(
+                    entry_label, "<Button-1>",
+                    lambda _e, mid=entry.meeting_id: self._handle_week_entry_click(mid),
+                    widgets.bind_funcids.get(left_key),
+                )
+                widgets.bind_funcids[right_key] = _rebind(
+                    entry_label, "<Button-3>",
+                    lambda e, mid=entry.meeting_id: self._show_week_entry_context_menu(e, mid),
+                    widgets.bind_funcids.get(right_key),
                 )
                 entry_label.grid()
             else:
@@ -1727,6 +2014,49 @@ class MainWindow:
             except Exception:  # nosec B110
                 pass
             self._week_live_retry_job = None
+
+    def _schedule_week_now_line_update(self, _event=None) -> None:
+        """Bound (once, at construction -- see `_build_week_view`) to
+        `<Configure>` on each of the 7 row-0 week cells. Fixes a real,
+        empirically-confirmed bug (SDD.md v2.10.0): `_apply_week_now_line`
+        `.place()`s the live line at an ABSOLUTE pixel x/width read from
+        `winfo_width()`/`winfo_x()` at the moment it runs -- Tk's grid
+        geometry manager does NOT retroactively move an already-`.place()`d
+        sibling when a column's real width changes afterwards (confirmed
+        directly: toggling `set_week_column_mode` alone, with no listener,
+        left the line rendered at its pre-toggle width/x indefinitely, until
+        the next per-minute heartbeat tick happened to re-invoke
+        `update_week_live_indicators` on its own -- up to ~60 real seconds
+        later). The same gap existed for a plain window resize, with no
+        toggle involved at all.
+
+        A real `<Configure>` is the correct, race-free signal to react to
+        here instead of a fixed delay or `update_idletasks()` (forbidden by
+        this project's hard rule): confirmed directly (not assumed) that Tk
+        does NOT recompute a grid column's real width synchronously inside
+        the same call that changes `grid_columnconfigure`/`.grid_remove()`
+        -- `winfo_width()` read immediately after, or even after several
+        chained `after_idle`/`after(0, ...)` callbacks queued from within
+        that same call, still reports the OLD width; only a genuine
+        `<Configure>` notification (fired once Tk actually finishes the
+        real recompute) reflects the new one. Reacting to that event is
+        therefore the only race-free way to catch the right moment, short
+        of the forbidden synchronous `update_idletasks()` call.
+
+        Debounced the same way `_ScrollablePanel._schedule_canvas_width_update`
+        already is: a live window-resize drag fires a burst of `<Configure>`
+        events across all 7 watched cells in quick succession, and
+        `set_week_column_mode` itself touches 2 of them at once -- collapsing
+        that burst into a single `_apply_week_now_line()` call is strictly
+        cheaper and avoids placing at an intermediate, still-settling width.
+        """
+        if self._week_now_line_configure_job is not None:
+            return
+        self._week_now_line_configure_job = self.root.after_idle(self._run_week_now_line_configure_update)
+
+    def _run_week_now_line_configure_update(self) -> None:
+        self._week_now_line_configure_job = None
+        self._apply_week_now_line()
 
     def _apply_week_now_line(self) -> None:
         """Places (or hides) the live time-line from `self._week_live_state`
@@ -1814,6 +2144,67 @@ class MainWindow:
     def _handle_week_slot_click(self, day: date, hour: int) -> None:
         self.callbacks.on_week_slot_click(day, hour)
         self.callbacks.on_set_active_view("list")
+
+    # -- right-click context menu (month/week only, SDD.md v2.10.0) -------------
+
+    def _show_context_menu(self, event) -> None:
+        """Shared `tk_popup` call for all four context-menu entry points
+        below. `self._context_menu` is the single, long-lived `tk.Menu`
+        built once in `__init__` -- never rebuilt here, never `.destroy()`ed
+        after use: `tk_popup` positions the menu and returns immediately
+        (it does not block until the menu closes), so destroying it in this
+        same call would close it before the user could ever see or click
+        it. `grab_release()` in `finally` mirrors Tk's own documented
+        `tk_popup` idiom -- releases the temporary grab `tk_popup` sets even
+        if the menu is dismissed by a click outside it rather than a real
+        selection."""
+        try:
+            self._context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self._context_menu.grab_release()
+
+    def _show_calendar_day_context_menu(self, event, day: date) -> None:
+        self._context_menu.delete(0, "end")
+        self._context_menu.add_command(
+            label=i18n.t("contextMenuNewMeeting", self.language),
+            command=lambda d=day: self._handle_calendar_day_click(d),
+        )
+        self._show_context_menu(event)
+
+    def _show_calendar_entry_context_menu(self, event, meeting_id: str) -> None:
+        self._context_menu.delete(0, "end")
+        self._context_menu.add_command(
+            label=i18n.t("edit", self.language), command=lambda mid=meeting_id: self._handle_calendar_entry_click(mid)
+        )
+        # Deliberately does NOT call `on_set_active_view("list")` (unlike
+        # "Editar" above) -- matches the list view's own "Eliminar" button,
+        # which never forces a view switch either; `handle_delete` in
+        # app.py already calls `_refresh_all()` on its own, so the deleted
+        # entry disappears from this cell on the next heartbeat without
+        # needing to leave month/week view first (SDD.md v2.10.0).
+        self._context_menu.add_command(
+            label=i18n.t("delete", self.language), command=lambda mid=meeting_id: self._confirm_delete(mid)
+        )
+        self._show_context_menu(event)
+
+    def _show_week_slot_context_menu(self, event, day: date, hour: int) -> None:
+        self._context_menu.delete(0, "end")
+        self._context_menu.add_command(
+            label=i18n.t("contextMenuNewMeeting", self.language),
+            command=lambda d=day, h=hour: self._handle_week_slot_click(d, h),
+        )
+        self._show_context_menu(event)
+
+    def _show_week_entry_context_menu(self, event, meeting_id: str) -> None:
+        self._context_menu.delete(0, "end")
+        self._context_menu.add_command(
+            label=i18n.t("edit", self.language), command=lambda mid=meeting_id: self._handle_week_entry_click(mid)
+        )
+        # Same no-view-switch reasoning as `_show_calendar_entry_context_menu`.
+        self._context_menu.add_command(
+            label=i18n.t("delete", self.language), command=lambda mid=meeting_id: self._confirm_delete(mid)
+        )
+        self._show_context_menu(event)
 
     def _start_gadget_drag(self, event) -> None:
         # Guards against a real, reproduced bug: double-clicking the gadget
@@ -2409,6 +2800,14 @@ class MainWindow:
         self.week_prev_button.configure(text=tr("weekPrevButton"))
         self.week_next_button.configure(text=tr("weekNextButton"))
         self.week_today_button.configure(text=tr("weekTodayButton"))
+        # Re-derives its own label from the *current* mode rather than a
+        # bare fixed key, same reason `language_button` above isn't a plain
+        # `tr("...")` either -- its text announces the state a click leads
+        # to, and that depends on `self._week_column_mode`, not just which
+        # language is active.
+        self.week_column_toggle_button.configure(
+            text=tr("weekViewFullWeekButton" if self._week_column_mode == "work" else "weekViewWorkWeekButton")
+        )
 
         self.form_eyebrow.configure(text=tr("formEyebrow"))
         self.form_title_label.configure(text=tr("formTitle"))

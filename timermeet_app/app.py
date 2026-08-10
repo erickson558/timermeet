@@ -193,6 +193,14 @@ class TimerMeetApp:
         self.gadget_mode = bool(settings.get("gadgetMode", False))
         self._gadget_x = _coerce_gadget_coordinate(settings.get("gadgetX"))
         self._gadget_y = _coerce_gadget_coordinate(settings.get("gadgetY"))
+        # Persisted the same way `gadgetMode` is (a stable per-machine UI
+        # preference, unlike `active_view`/`_week_anchor`, which are
+        # deliberately reset every launch -- see SDD.md v2.10.0). Only
+        # trusted if it's exactly one of the two real values; anything else
+        # (absent, corrupted, hand-edited) falls back to "full", same
+        # defensive style already used for `saved_language` above.
+        saved_week_column_mode = settings.get("weekColumnMode")
+        self.week_column_mode = saved_week_column_mode if saved_week_column_mode in ("work", "full") else "full"
 
         # Belt-and-suspenders against a packaged build ever ending up with a
         # window that exists but never gets shown (observed once under
@@ -301,10 +309,12 @@ class TimerMeetApp:
             on_week_next=self.handle_week_next,
             on_week_today=self.handle_week_today,
             on_week_slot_click=self.handle_week_slot_click,
+            on_toggle_week_column_mode=self.handle_toggle_week_column_mode,
         )
         self.view = MainWindow(self.root, callbacks)
         self.view.apply_translations(self.language)
         self.view.update_company_options(self.companies)
+        self.view.set_week_column_mode(self.week_column_mode)
         if self.gadget_mode:
             self.view.set_gadget_mode(True, self._gadget_x, self._gadget_y)
         self._maybe_show_startup_load_toast(startup_load)
@@ -794,6 +804,20 @@ class TimerMeetApp:
         # so `now.date() in days` alone is already 100% correct.
         today_date = now.date()
         today_index = days.index(today_date) if today_date in days else None
+        # Edge case found while designing the work-week toggle (SDD.md
+        # v2.10.0): if today is a Saturday/Sunday AND the active mode is
+        # "work" (those two columns collapsed to 0px), `today_index` would
+        # otherwise still point at a real column index that just happens to
+        # have no width -- `_apply_week_now_line` would then measure an
+        # implausible width against a column that's *permanently* collapsed
+        # (not the one-time cold-start delay its retry mechanism exists
+        # for) and burn through all of its retries every time this fires,
+        # never actually showing the line. Folding this into the same
+        # `today_index = None` branch the "not the current week" case
+        # already uses (SDD.md v2.9.0 decision #5) reuses that already-
+        # proven "hide cleanly" path instead of adding a second one.
+        if self.week_column_mode == "work" and today_date.weekday() >= 5:
+            today_index = None
         live_state = (today_index, now.hour, now.minute)
         if live_state != self._last_rendered_week_live_state:
             self.view.update_week_live_indicators(today_index, now.hour, now.minute)
@@ -1104,3 +1128,16 @@ class TimerMeetApp:
         # Thin by design, same as `handle_calendar_day_click`: no business
         # logic here, no `self.meetings` mutation.
         self.view.prefill_new_meeting(day, hour)
+
+    def handle_toggle_week_column_mode(self) -> None:
+        """Work-week (Mon-Fri) / full-week (Mon-Sun) toggle for the week
+        view (SDD.md v2.10.0) -- purely a display preference, persisted the
+        same read-merge-write way `language`/`gadgetMode` already are
+        (never a partial `save_settings()` call, which would silently wipe
+        out the other keys in `settings.json`)."""
+        self.week_column_mode = "full" if self.week_column_mode == "work" else "work"
+        settings = storage.load_settings()
+        settings["weekColumnMode"] = self.week_column_mode
+        storage.save_settings(settings)
+        self.view.set_week_column_mode(self.week_column_mode)
+        self._refresh_all()

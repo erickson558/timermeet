@@ -616,6 +616,47 @@ class ContextMenuTests(unittest.TestCase):
             "600 repeated right-clicks over unchanged cells must not leak Tcl commands",
         )
 
+    # -- gadget skin menu vs. keep_gadget_on_top (SDD.md v2.13.0) -------------
+
+    def test_keep_gadget_on_top_is_noop_while_skin_menu_open(self):
+        """Regression test: `keep_gadget_on_top` is heartbeat-driven (every
+        1s) and used to unconditionally call `root.lift()` +
+        `root.attributes("-topmost", True)` even while the gadget skin
+        picker's native popup menu was on screen. On Windows, `tk_popup()`
+        posts a native popup menu that owns a nested Win32 message loop on
+        the same thread, but Tcl's `after()` timer still gets dispatched
+        through that nested loop -- so the heartbeat kept firing while the
+        menu was open, and every z-order/foreground reassertion is exactly
+        what makes Windows auto-dismiss a native popup menu. `_gadget_menu_open`
+        (set for the whole duration of `_show_gadget_skin_menu`'s
+        `_show_context_menu` call) must make this call a true no-op."""
+        self.view._gadget_active = True
+        self.view._gadget_menu_open = True
+        try:
+            with patch.object(self.view.root, "lift") as mock_lift, \
+                    patch.object(self.view.root, "attributes") as mock_attributes:
+                self.view.keep_gadget_on_top(is_alarm_active=False)
+            mock_lift.assert_not_called()
+            mock_attributes.assert_not_called()
+        finally:
+            self.view._gadget_active = False
+            self.view._gadget_menu_open = False
+
+    def test_keep_gadget_on_top_still_reasserts_topmost_when_menu_closed(self):
+        """Companion to the test above: confirms the guard is specific to
+        `_gadget_menu_open`, not an accidental blanket no-op -- gadget mode
+        active with the menu closed must still lift/re-pin as before."""
+        self.view._gadget_active = True
+        self.view._gadget_menu_open = False
+        try:
+            with patch.object(self.view.root, "lift") as mock_lift, \
+                    patch.object(self.view.root, "attributes") as mock_attributes:
+                self.view.keep_gadget_on_top(is_alarm_active=False)
+            mock_lift.assert_called_once()
+            mock_attributes.assert_called_once_with("-topmost", True)
+        finally:
+            self.view._gadget_active = False
+
 
 if __name__ == "__main__":
     unittest.main()

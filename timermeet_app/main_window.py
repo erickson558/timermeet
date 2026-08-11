@@ -157,6 +157,27 @@ GADGET_SKINS: Dict[str, dict] = {
         "bg": PANEL_BG, "border": ACCENT, "title_fg": MUTED, "clock_fg": "#38bdf8",
         "alert_fg": MUTED, "close_hover_bg": DANGER, "alpha": 1.0, "label_key": "gadgetSkinNeon",
     },
+    "aero": {
+        # Frutiger-Aero-style aqua/teal glass. An initial navy candidate
+        # here (bg #2f5c8f) was rejected on review: at this skin's own
+        # alpha=0.85 translucency it read as another dark-blue skin
+        # indistinguishable from `glass`, not the "aqua/teal glass" the
+        # name promises. A brighter teal candidate (#1f9aa8) was tried
+        # next but fails the 4.5:1 WCAG AA-normal-text floor outright even
+        # before translucency: flat-color contrast against white/#eafcff/
+        # #e3fbff comes out to only ~3.1-3.4:1. `bg` here is that teal
+        # uniformly darkened ~50% (same hue/saturation ratio, so it reads
+        # as a deeper shade of the same teal, not a shift toward navy) to
+        # #104d54. Flat-color contrast: ~9.5:1 (white clock_fg), ~9.0:1
+        # (#eafcff title_fg/border), ~8.8:1 (#e3fbff alert_fg). Worst-case
+        # translucency-blended contrast (85% bg / 15% bright-white desktop
+        # bleeding through the window -- same simulation `glass`'s own
+        # review comment already runs) drops those to ~6.3:1 / ~5.9:1 /
+        # ~5.8:1: still comfortably clear of the 4.5:1 floor with real
+        # margin even in the worst realistic case.
+        "bg": "#104d54", "border": "#eafcff", "title_fg": "#eafcff", "clock_fg": "#ffffff",
+        "alert_fg": "#e3fbff", "close_hover_bg": DANGER, "alpha": 0.85, "label_key": "gadgetSkinAero",
+    },
 }
 
 _CARD_PALETTE = {
@@ -961,6 +982,12 @@ class MainWindow:
         self._pre_gadget_geometry: Optional[str] = None
         self._gadget_drag_offset_x = 0
         self._gadget_drag_offset_y = 0
+        # Guards `keep_gadget_on_top` (see below) while the skin picker's
+        # native popup menu is on screen -- Windows auto-dismisses a native
+        # popup menu the instant its owner window's z-order/foreground state
+        # changes, which is exactly what `root.lift()` + re-asserting
+        # `-topmost` does on every heartbeat tick.
+        self._gadget_menu_open = False
         self._card_widgets: Dict[str, _CardWidgets] = {}
         self._card_language: Optional[str] = None
         self._empty_state_frame: Optional[tk.Frame] = None
@@ -2949,7 +2976,17 @@ class MainWindow:
                 value=key,
                 command=lambda k=key: self.callbacks.on_set_gadget_skin(k),
             )
-        self._show_context_menu(event)
+        # `_gadget_menu_open` brackets the entire time this native popup menu
+        # is on screen so `keep_gadget_on_top` (heartbeat-driven, every 1s)
+        # can skip its `root.lift()` / `-topmost` reassertion while the menu
+        # is posted -- Windows auto-dismisses a native popup the instant its
+        # owner window's z-order/foreground state changes, which is exactly
+        # what that reassertion does.
+        self._gadget_menu_open = True
+        try:
+            self._show_context_menu(event)
+        finally:
+            self._gadget_menu_open = False
 
     def keep_gadget_on_top(self, is_alarm_active: bool) -> None:
         """Called every heartbeat tick from app.py; a near-zero-cost no-op
@@ -2957,8 +2994,13 @@ class MainWindow:
         instead of a separate self-rescheduling job -- one less job to track
         starting/cancelling correctly. Skips re-asserting topmost while an
         alarm is showing so AlarmController's own independent relift loop
-        always wins the top z-order contest (see alarm_ui.py's `_relift`)."""
-        if not self._gadget_active or is_alarm_active:
+        always wins the top z-order contest (see alarm_ui.py's `_relift`).
+        Also skips while the skin picker's native popup menu is posted
+        (`_gadget_menu_open`): the heartbeat's `after()` timer still fires
+        while that menu owns a nested Win32 message loop, and re-asserting
+        z-order/foreground state on the menu's owner window is exactly what
+        makes Windows auto-dismiss the menu -- see `_show_gadget_skin_menu`."""
+        if not self._gadget_active or is_alarm_active or self._gadget_menu_open:
             return
         try:
             self.root.lift()

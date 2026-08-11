@@ -222,6 +222,20 @@ _WEEK_ENTRY_MAX_CHARS = 16
 # DANGER (already means "destructive"), so the live time-line reads as its
 # own, unambiguous "this is where 'now' is" signal.
 NOW_LINE_COLOR = "#22c55e"
+# A user confirmed (screenshot + follow-up, v2.11.2) that the line alone --
+# at its original 2px height -- read as a stray/misaligned grid line rather
+# than a deliberate "current time" marker, even though a pixel-measurement
+# investigation proved the grid itself has zero misalignment. Two purely
+# visual (no geometry/logic) fixes, matching how Outlook/Teams/Google
+# Calendar all mark "now": a thicker line, and a small filled dot at the
+# line's left end (see `_week_now_dot` below) so the combination reads
+# unambiguously as a marker, not a grid artifact.
+NOW_LINE_HEIGHT_PX = 3
+# Diameter of the small circular "now" marker placed at the live line's left
+# edge (`_week_now_dot`, built once in `_build_week_view`, alongside the line
+# it accompanies). Deliberately small -- just enough to read as a dot next to
+# the hour axis without crowding it or overlapping into the next row.
+NOW_LINE_DOT_DIAMETER_PX = 10
 # See `MainWindow._apply_week_now_line`'s docstring: a real day column can
 # never legitimately be narrower than ~120px at this app's 960px minsize
 # floor, but a just-`.grid()`ed cell's pre-layout width measured as low as
@@ -831,6 +845,12 @@ class MainWindow:
         self._week_day_header_labels: List[tk.Label] = []
         self._week_cells: List[_WeekCellWidgets] = []
         self._week_now_line: Optional[tk.Frame] = None
+        # Small filled-circle "now" marker shown at the live line's left end
+        # (see `NOW_LINE_DOT_DIAMETER_PX`) -- built once in `_build_week_view`
+        # right alongside `_week_now_line`, and, like that line, only ever
+        # `.place()`d/`.place_forget()`'d together with it from
+        # `_apply_week_now_line`, never destroyed/recreated.
+        self._week_now_dot: Optional[tk.Canvas] = None
         self._week_live_state: Tuple[Optional[int], int, int] = (None, 0, 0)
         self._week_live_retry_job: Optional[str] = None
         self._week_live_retry_count = 0
@@ -1715,7 +1735,24 @@ class MainWindow:
         # `.place_forget()`s it (see SDD.md decision #3) -- it's a real
         # pixel coordinate, not a grid cell, so `.grid()` is never used on
         # it at all, and it's never destroyed/recreated.
-        self._week_now_line = tk.Frame(grid_frame, bg=NOW_LINE_COLOR, height=2)
+        self._week_now_line = tk.Frame(grid_frame, bg=NOW_LINE_COLOR, height=NOW_LINE_HEIGHT_PX)
+
+        # The "now" dot: same lifecycle as the line above (built once here,
+        # only ever `.place()`d/`.place_forget()`'d afterwards -- see that
+        # attribute's docstring). A `tk.Canvas` with a single `create_oval`
+        # item is the smallest way to get a filled circle in plain tkinter
+        # (no themed-widget shortcut exists for this); the oval is drawn
+        # exactly once here since it never needs to change color, size, or
+        # be redrawn -- only the canvas's on-screen position toggles.
+        # `highlightthickness=0` avoids an unwanted default 1px border/focus
+        # ring around the tiny canvas that would otherwise read as its own
+        # stray square. `bg` matches `grid_frame`'s own background so only
+        # the circle itself (not the canvas's bounding box) is visible.
+        dot_d = NOW_LINE_DOT_DIAMETER_PX
+        self._week_now_dot = tk.Canvas(
+            grid_frame, width=dot_d, height=dot_d, bg=WINDOW_BG, highlightthickness=0,
+        )
+        self._week_now_dot.create_oval(0, 0, dot_d, dot_d, fill=NOW_LINE_COLOR, outline=NOW_LINE_COLOR)
 
         # `_apply_week_now_line` only ever measures ROW 0's cell for a given
         # day column (every row in that column shares its width, see that
@@ -2258,12 +2295,18 @@ class MainWindow:
             return
         today_index, hour, minute = self._week_live_state
         if today_index is None:
+            # `_week_now_dot` always follows `_week_now_line`'s own
+            # show/hide state -- they're one visual unit (see both widgets'
+            # docstrings) -- so every `place_forget()`/`place()` call on the
+            # line below has a matching one on the dot right next to it.
             self._week_now_line.place_forget()
+            self._week_now_dot.place_forget()
             return
         reference_cell = self._week_cells[today_index].frame
         width = reference_cell.winfo_width()
         if width < _WEEK_LINE_MIN_PLAUSIBLE_WIDTH_PX:
             self._week_now_line.place_forget()
+            self._week_now_dot.place_forget()
             self._week_live_retry_count += 1
             if self._week_live_retry_count > _WEEK_LINE_MAX_RETRIES:
                 # Give up -- see the cap's own comment for why this margin
@@ -2277,7 +2320,16 @@ class MainWindow:
             return
         x = reference_cell.winfo_x()
         y = WEEK_ROW_HEIGHT_PX * (hour + minute / 60)
-        self._week_now_line.place(x=x, y=y, width=width, height=2)
+        self._week_now_line.place(x=x, y=y, width=width, height=NOW_LINE_HEIGHT_PX)
+        # The dot sits centered on the line's own left end -- half hanging
+        # over the hour-axis gutter, half over the line's start -- exactly
+        # the "dot + line" combination Outlook/Teams/Google Calendar all use
+        # for a "this is now" marker. Vertically centered on the line's own
+        # thickness so it reads as one shape, not two misaligned ones.
+        dot_radius = NOW_LINE_DOT_DIAMETER_PX / 2
+        self._week_now_dot.place(
+            x=x - dot_radius, y=y + (NOW_LINE_HEIGHT_PX / 2) - dot_radius,
+        )
 
     def _handle_week_entry_click(self, meeting_id: str) -> None:
         self.callbacks.on_edit(meeting_id)

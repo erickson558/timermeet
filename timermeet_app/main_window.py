@@ -217,6 +217,40 @@ _WEEK_SCROLLBAR_SPACER_PX = 17
 # measured limit -- smaller than the month view's own margin (24 clipped,
 # 20 fits), on purpose, given the column-wide-distortion risk above.
 _WEEK_ENTRY_MAX_CHARS = 16
+# `day_header_row` (the fixed day-name row) and `grid_frame` (the scrollable
+# hour grid below it) are two SEPARATE frames, each with its own
+# `grid_columnconfigure` for the same 7 day columns -- `weight=1` alone only
+# distributes LEFTOVER space after each column's own content-driven minimum
+# is met, and an empty day column (its `entry_label`s all `.grid_remove()`'d)
+# has a near-zero content minimum while a populated one doesn't, so the two
+# frames' column boundaries silently drifted apart the moment some days had
+# entries and others didn't (confirmed with real synthetic meetings: one
+# populated Thursday column measured 143px wider than its own header
+# column). Giving BOTH frames' day columns the exact same `minsize` (see
+# every `grid_columnconfigure(col, minsize=WEEK_DAY_COLUMN_MINSIZE_PX)` call
+# below) forces every column's content-driven minimum to bottom out at this
+# same floor regardless of what's actually rendered in it that tick, so
+# `weight=1`'s leftover-space split is the only thing left to differ a
+# column's final width from its neighbor's -- and that split is identical in
+# both frames since they share the same available width (confirmed
+# empirically: at this app's 960px minsize floor, both frames' 7 day columns
+# independently compute to 122px x6 + 123px x1 with zero content, matching
+# each other exactly). 122, not a round number picked by eye: measured
+# against the SAME 960px floor as the constants above --
+# `day_header_row`'s available width for its 7 day columns (window width
+# minus its own padx, the hour axis, and the scrollbar-width spacer) is
+# 855px, i.e. ~122.1px/column, and a real widget tree of the single widest
+# populated hour-cell this view can render (2 max-length `_WEEK_ENTRY_MAX_CHARS`
+# entries, one of them selection-highlighted, plus a double-digit "+N más"
+# overflow row) measured at 123px -- 1px over. Rounding UP to fit that
+# worst case would need 7 x 123 = 861px, 6px more than the 855px actually
+# available at the floor, which would force the row wider than the app's
+# declared 960px minimum width (see the constants above for why that floor
+# is never supposed to move). 122 is the largest value that still fits
+# inside the 855px budget (7 x 122 = 854px) -- the same 1px, in the rarest
+# combination of edge cases, that already existed before this fix, not a
+# regression it introduces.
+WEEK_DAY_COLUMN_MINSIZE_PX = 122
 # Distinct from every other color in the palette on purpose (see SDD.md
 # decision #3): not ACCENT (already means "today"/primary action) and not
 # DANGER (already means "destructive"), so the live time-line reads as its
@@ -1678,7 +1712,12 @@ class MainWindow:
         day_header_row.grid(row=2, column=0, sticky="ew", padx=16)
         day_header_row.grid_columnconfigure(0, minsize=HOUR_AXIS_WIDTH_PX)
         for col in range(WEEK_COLS):
-            day_header_row.grid_columnconfigure(col + 1, weight=1)
+            # `minsize=WEEK_DAY_COLUMN_MINSIZE_PX` here AND on `grid_frame`'s
+            # matching day columns below is the actual header/grid alignment
+            # fix -- see that constant's own comment for why `weight=1`
+            # alone (the only thing either frame set before) let the two
+            # frames' column boundaries drift apart based on content.
+            day_header_row.grid_columnconfigure(col + 1, weight=1, minsize=WEEK_DAY_COLUMN_MINSIZE_PX)
             # Same visible-chip convention as the month view's day-number
             # badges (`_update_calendar_cell`): every header gets a real,
             # non-window-color background so "today" (ACCENT fill, applied
@@ -1715,7 +1754,9 @@ class MainWindow:
         self._week_grid_frame = grid_frame
         grid_frame.grid_columnconfigure(0, minsize=HOUR_AXIS_WIDTH_PX)
         for col in range(1, WEEK_COLS + 1):
-            grid_frame.grid_columnconfigure(col, weight=1)
+            # Same `minsize` as `day_header_row`'s day columns above -- see
+            # `WEEK_DAY_COLUMN_MINSIZE_PX`'s own comment.
+            grid_frame.grid_columnconfigure(col, weight=1, minsize=WEEK_DAY_COLUMN_MINSIZE_PX)
 
         for row in range(WEEK_ROWS):
             grid_frame.grid_rowconfigure(row, minsize=WEEK_ROW_HEIGHT_PX)
@@ -1820,6 +1861,17 @@ class MainWindow:
         arguments -- Tk remembers each widget's last row/column/sticky) on
         the exact same widgets; nothing is ever destroyed or rebuilt here.
 
+        Since `WEEK_DAY_COLUMN_MINSIZE_PX` (see its own comment), `minsize`
+        needs the exact same zero/restore treatment as `weight` above, for
+        the same reason and confirmed the same way: `grid_remove()`'d
+        widgets do NOT make Tk ignore their column's `minsize` -- a
+        `grid_remove()`'d weekend column with a nonzero `minsize` still
+        reserves that many real pixels, which would silently break "work
+        week" mode's whole point (collapsing Sat/Sun to genuine 0px) the
+        instant this fix's `minsize` was added. Leaving `minsize=0` (Tk's
+        own default) unset entirely for a hidden column, not merely "small",
+        is what actually collapses it.
+
         The trailing `_apply_week_now_line()` call below is a real bug fix
         (SDD.md v2.10.0), not a no-op: the live "now" line is a separately
         `.place()`d widget with absolute pixel geometry (see that method's
@@ -1846,9 +1898,13 @@ class MainWindow:
         show_weekend = mode != "work"
         for offset in _WEEKEND_COLUMN_INDICES:
             # Day-header row: columns are offset by 1 there (column 0 is the
-            # hour-axis spacer -- see `_build_week_view`).
-            self._week_day_header_row.grid_columnconfigure(offset + 1, weight=1 if show_weekend else 0)
-            self._week_grid_frame.grid_columnconfigure(offset + 1, weight=1 if show_weekend else 0)
+            # hour-axis spacer -- see `_build_week_view`). `minsize` gets the
+            # same show/hide treatment as `weight` -- see this method's
+            # docstring for why a hidden column's `minsize` must actually be
+            # zeroed, not left at `WEEK_DAY_COLUMN_MINSIZE_PX`.
+            minsize = WEEK_DAY_COLUMN_MINSIZE_PX if show_weekend else 0
+            self._week_day_header_row.grid_columnconfigure(offset + 1, weight=1 if show_weekend else 0, minsize=minsize)
+            self._week_grid_frame.grid_columnconfigure(offset + 1, weight=1 if show_weekend else 0, minsize=minsize)
             if show_weekend:
                 self._week_day_header_labels[offset].grid()
             else:

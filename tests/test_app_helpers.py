@@ -7,8 +7,14 @@ and month-navigation helpers added in v2.7.0."""
 import unittest
 from datetime import date
 
-from timermeet_app import models
-from timermeet_app.app import _coerce_gadget_coordinate, _group_meetings_by_date, _shift_month
+from timermeet_app import main_window, models
+from timermeet_app.app import (
+    _coerce_gadget_coordinate,
+    _coerce_gadget_size,
+    _coerce_gadget_skin,
+    _group_meetings_by_date,
+    _shift_month,
+)
 
 
 class CoerceGadgetCoordinateTests(unittest.TestCase):
@@ -32,6 +38,63 @@ class CoerceGadgetCoordinateTests(unittest.TestCase):
 
     def test_rejects_list(self):
         self.assertIsNone(_coerce_gadget_coordinate([1, 2]))
+
+    def test_rejects_nan_and_infinity(self):
+        # Python's `json` module accepts the non-standard NaN/Infinity
+        # literals on load, so a hand-edited settings.json with
+        # `"gadgetX": NaN` parses cleanly into `float("nan")` -- which then
+        # passed the old `isinstance(value, (int, float))` check and
+        # crashed on `int(value)` (ValueError for NaN, OverflowError for
+        # +/-Infinity) instead of falling back to the default position.
+        self.assertIsNone(_coerce_gadget_coordinate(float("nan")))
+        self.assertIsNone(_coerce_gadget_coordinate(float("inf")))
+        self.assertIsNone(_coerce_gadget_coordinate(float("-inf")))
+
+
+class CoerceGadgetSizeTests(unittest.TestCase):
+    def test_accepts_int(self):
+        self.assertEqual(_coerce_gadget_size(300, default=280), 300)
+
+    def test_accepts_float_and_truncates(self):
+        self.assertEqual(_coerce_gadget_size(300.7, default=280), 300)
+
+    def test_rejects_non_numeric_string_and_falls_back_to_default(self):
+        self.assertEqual(_coerce_gadget_size("wide", default=280), 280)
+
+    def test_rejects_list_and_falls_back_to_default(self):
+        self.assertEqual(_coerce_gadget_size([300], default=280), 280)
+
+    def test_rejects_bool_and_falls_back_to_default(self):
+        # Same bool-is-a-subclass-of-int trap as `_coerce_gadget_coordinate`.
+        self.assertEqual(_coerce_gadget_size(True, default=280), 280)
+
+    def test_rejects_none_and_falls_back_to_default(self):
+        self.assertEqual(_coerce_gadget_size(None, default=280), 280)
+
+    def test_rejects_nan_and_infinity_and_falls_back_to_default(self):
+        # Same crash-on-corrupted-settings.json risk as
+        # `_coerce_gadget_coordinate`'s NaN/Infinity case above: a hand-edited
+        # `"gadgetWidth": Infinity` parses cleanly via `json.loads` but used
+        # to raise OverflowError/ValueError out of `int(value)` before this
+        # helper's downstream caller (`MainWindow._resolve_gadget_size`'s
+        # min/max clamp) ever got a chance to run.
+        self.assertEqual(_coerce_gadget_size(float("nan"), default=280), 280)
+        self.assertEqual(_coerce_gadget_size(float("inf"), default=280), 280)
+        self.assertEqual(_coerce_gadget_size(float("-inf"), default=280), 280)
+
+
+class CoerceGadgetSkinTests(unittest.TestCase):
+    def test_accepts_known_skin_key(self):
+        self.assertEqual(_coerce_gadget_skin("glass"), "glass")
+
+    def test_rejects_unknown_skin_key(self):
+        self.assertEqual(_coerce_gadget_skin("does-not-exist"), main_window.GADGET_DEFAULT_SKIN)
+
+    def test_rejects_non_string(self):
+        self.assertEqual(_coerce_gadget_skin(123), main_window.GADGET_DEFAULT_SKIN)
+
+    def test_rejects_none(self):
+        self.assertEqual(_coerce_gadget_skin(None), main_window.GADGET_DEFAULT_SKIN)
 
 
 def _meeting(when: str, title: str = "Standup"):

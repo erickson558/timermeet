@@ -67,6 +67,7 @@ def _make_callbacks(**overrides):
         "on_week_slot_click": _no_op,
         "on_toggle_week_column_mode": _no_op,
         "on_delete_series": _no_op,
+        "on_set_gadget_skin": _no_op, "on_gadget_resize": _no_op,
     }
     fields.update(overrides)
     return main_window.Callbacks(**fields)

@@ -62,6 +62,103 @@ GADGET_HEIGHT = 130
 GADGET_MARGIN_X = 24
 GADGET_MARGIN_BOTTOM = 60
 
+# Free-resize bounds for gadget mode (see `_resolve_gadget_size`): the floor
+# keeps the strip's buttons and the resize grip from overlapping each other,
+# the ceiling keeps the gadget from growing into "might as well be the full
+# window" territory, which would defeat the point of a mini panel.
+GADGET_MIN_WIDTH, GADGET_MIN_HEIGHT = 220, 100
+GADGET_MAX_WIDTH, GADGET_MAX_HEIGHT = 640, 360
+
+# `gadget_next_alert_label`'s wraplength is `<frame width> - GADGET_ALERT_WRAP_MARGIN`
+# in three places that must all stay in sync (same as the clock font size
+# formula that sits next to each of them): the initial `_build_gadget_view`
+# pack call, `set_gadget_mode`'s immediate repaint when reopening at a saved
+# non-default size, and `_do_gadget_resize`'s live update while the grip is
+# being dragged. Widened from an original 20 to 36 on design
+# review: with the resize grip's own real footprint (~16px wide, inset 2px
+# from the corner -> its left edge sits at `width - 18`) and the label's own
+# 10px left padx, a margin of only 20 let a wrapped line's last word run up
+# to `width - 10` -- 8px into the grip's column. Measured with real font
+# metrics against a realistic "next alert" string at both the 220px floor
+# and the 280px default width: margin=20 put text right up against (220px)
+# or past (280px) the grip's left edge; margin=36 clears it by ~4-8px at
+# both sizes while barely denting usable wrap width at the 640px ceiling
+# (630px vs 620px is not a difference that ever changes the actual line
+# count for this label's short truncated text -- see `_GADGET_ALERT_MAX_CHARS`).
+GADGET_ALERT_WRAP_MARGIN = 36
+
+# Skin registry for gadget mode (see `apply_gadget_skin`). Each entry's keys
+# map 1:1 to a `.configure()` call on the widgets built in
+# `_build_gadget_view`; "alpha" feeds `root.attributes("-alpha", ...)` for a
+# translucent look on "glass" -- always reset back to 1.0 on the way out of
+# gadget mode in `set_gadget_mode`, or the restored full window would stay
+# part-transparent.
+#
+# `close_hover_bg` is DANGER (the same red hover used everywhere else in the
+# app) on all four skins by design, not an oversight: reviewed against each
+# skin's own `bg` and it reads as a clearly distinct hover state everywhere
+# (contrast against classic/neon's shared dark bg ~2.55:1, glass's darker bg
+# ~2.74:1, light's bright bg ~5.98:1 -- all comfortably different colors, not
+# a near-match that would make the hover invisible), and the fixed white
+# "x" glyph drawn on top of it (`activeforeground="#ffffff"`, set once in
+# `_build_gadget_view`, never reconfigured per skin) holds a stable 6.47:1
+# against that red regardless of which skin is active.
+GADGET_DEFAULT_SKIN = "classic"
+
+GADGET_SKINS: Dict[str, dict] = {
+    "classic": {
+        "bg": PANEL_BG, "border": BORDER, "title_fg": MUTED, "clock_fg": TEXT,
+        "alert_fg": MUTED, "close_hover_bg": DANGER, "alpha": 1.0, "label_key": "gadgetSkinClassic",
+    },
+    "glass": {
+        # Reviewed and left unchanged: `alpha=0.90` makes the whole root
+        # window (not just this frame) 10% see-through over the desktop
+        # behind it, so the worst case for these text/bg pairs isn't the
+        # flat-color math above -- it's what happens once every pixel here
+        # (bg *and* text alike) gets blended 90/10 with whatever's behind
+        # the window. Simulated the worst realistic case (a bright/white
+        # desktop behind, which lifts this dark bg's luminance the most):
+        # bg/title_fg drops from 9.99:1 to ~8.05:1, bg/clock_fg from 16.65:1
+        # to ~12.69:1, bg/alert_fg from 8.68:1 to ~7.10:1 -- all still clear
+        # of the 4.5:1 WCAG AA-normal-text floor with real margin, so no
+        # value change needed. Not lowering alpha further to buy back more
+        # margin: 0.90 was a deliberate choice for a "subtle but real" glass
+        # look, and this skin already has the most headroom of the four.
+        "bg": "#10182a", "border": "#4d6fa8", "title_fg": "#b7c3dc", "clock_fg": "#f5f8ff",
+        "alert_fg": "#a9b6d1", "close_hover_bg": DANGER, "alpha": 0.90, "label_key": "gadgetSkinGlass",
+    },
+    "light": {
+        # title_fg/alert_fg darkened from an initial #5b6270 (5.67:1 on this
+        # bg -- WCAG AA-normal-text pass but short of the 7:1 AAA-normal-text
+        # bar) to #4c525e (7.26:1) after review: dark-on-light text needs
+        # more headroom than this app's existing all-dark palette because a
+        # bright bg leaves far less room for a wallpaper/monitor-glare margin
+        # of error than a dark bg does. Still visibly lighter than clock_fg
+        # (#1b1e24, 15.44:1) so the size hierarchy (big clock vs. small
+        # title/status text) doesn't collapse into "everything reads as the
+        # same weight."
+        "bg": "#f5f6f8", "border": "#c3c7ce", "title_fg": "#4c525e", "clock_fg": "#1b1e24",
+        "alert_fg": "#4c525e", "close_hover_bg": DANGER, "alpha": 1.0, "label_key": "gadgetSkinLight",
+    },
+    "neon": {
+        # clock_fg was originally the plain app-wide ACCENT (#3b82f6, the
+        # same blue as every button/link elsewhere) -- on review that read as
+        # "the normal blue," not "neon," which undercuts the whole point of
+        # this skin (the feature request was explicitly about the gadget not
+        # feeling boring). Swapped in a brighter, more saturated blue
+        # (#38bdf8) that stays in the same hue family as ACCENT (so it still
+        # reads as "this app's blue," not an unrelated color) while being
+        # visibly more vivid/glowing against PANEL_BG -- contrast also rises
+        # from 4.48:1 (borderline, just under the WCAG AA-normal-text 4.5:1
+        # floor, though the large bold clock font puts it over the lower
+        # 3:1 large-text bar regardless) to 7.70:1. `border` intentionally
+        # stays on plain ACCENT, not this brighter shade -- only the clock
+        # digits need the extra "glow," not the window's whole outline.
+        "bg": PANEL_BG, "border": ACCENT, "title_fg": MUTED, "clock_fg": "#38bdf8",
+        "alert_fg": MUTED, "close_hover_bg": DANGER, "alpha": 1.0, "label_key": "gadgetSkinNeon",
+    },
+}
+
 _CARD_PALETTE = {
     "card_bg": "#20242c",
     "chip_bg": CHIP_BG,
@@ -601,6 +698,8 @@ class Callbacks:
     on_week_slot_click: Callable[[date, int], None]
     on_toggle_week_column_mode: Callable[[], None]
     on_delete_series: Callable[[str], None]
+    on_set_gadget_skin: Callable[[str], None]
+    on_gadget_resize: Callable[[int, int], None]
 
 
 def _button(
@@ -1481,7 +1580,19 @@ class MainWindow:
         `set_gadget_mode`'s docstring for why that matters for the alarm)."""
         self.gadget_view = tk.Frame(self.root, bg=PANEL_BG, highlightthickness=1, highlightbackground=BORDER)
 
-        strip = tk.Frame(self.gadget_view, bg=PANEL_BG)
+        # Tracks the active skin key for the menu's `add_radiobutton`s (see
+        # `_show_gadget_skin_menu`) and for `apply_gadget_skin`'s bookkeeping.
+        # `self._gadget_skin` (a plain attribute, not a Tk var) is what
+        # `set_gadget_mode` reads back on next entry so a skin choice survives
+        # a full-window round trip within the same session.
+        self._gadget_skin_var = tk.StringVar(value=GADGET_DEFAULT_SKIN)
+        self._gadget_skin = GADGET_DEFAULT_SKIN
+
+        # Stored as an attribute (not a local `strip` variable) so
+        # `apply_gadget_skin` can recolor it later without needing a second
+        # widget-discovery mechanism.
+        self._gadget_strip = tk.Frame(self.gadget_view, bg=PANEL_BG)
+        strip = self._gadget_strip
         strip.pack(fill="x", padx=8, pady=(8, 0))
         self.gadget_title_label = tk.Label(strip, text="", font=(FONT_FAMILY, 9, "bold"), bg=PANEL_BG, fg=MUTED)
         self.gadget_title_label.pack(side="left")
@@ -1496,7 +1607,30 @@ class MainWindow:
             activebackground=PANEL_BG, activeforeground=ACCENT, relief="flat", borderwidth=0,
             cursor="hand2", font=(FONT_FAMILY, 9, "underline"), padx=0, pady=0,
         )
-        self.gadget_restore_button.pack(side="right", padx=(0, 10))
+        # padx trimmed from the original (0, 10) -- at the strip's narrowest
+        # real width (`GADGET_MIN_WIDTH=220`) with the Spanish "Completo"
+        # label (longer than English "Full"), the strip's total required
+        # width came out 2px over what's actually available, which left the
+        # title label touching the skin-picker button with a literal 0px
+        # gap between them. Trimming this and the skin button's own trailing
+        # padx below (6 -> 4) claws back 6px total -- comfortably under the
+        # available width again, with a real ~4px gap restored between the
+        # title and the button group. Verified against both language
+        # strings, not just this one.
+        self.gadget_restore_button.pack(side="right", padx=(0, 6))
+        # Icon-only skin picker. No `command=` here on purpose: it's bound
+        # directly to `_show_gadget_skin_menu` (below) so the same handler
+        # that serves the right-click gesture also serves this button --
+        # both arrive as a `<Button-1>`-style event with `.x_root`/`.y_root`
+        # already populated at the click position, which is exactly what
+        # `_show_context_menu` needs to anchor the popup.
+        self.gadget_skin_button = tk.Button(
+            strip, text=i18n.t("gadgetSkinButtonGlyph", self.language), bg=PANEL_BG, fg=MUTED,
+            activebackground=PANEL_BG, activeforeground=ACCENT, relief="flat", borderwidth=0,
+            cursor="hand2", font=(FONT_FAMILY, 10), padx=4, pady=0,
+        )
+        self.gadget_skin_button.pack(side="right", padx=(0, 4))
+        self.gadget_skin_button.bind("<Button-1>", self._show_gadget_skin_menu)
 
         self.gadget_clock_label = tk.Label(
             self.gadget_view, text="--:--:--", font=(FONT_FAMILY, 22, "bold"), bg=PANEL_BG, fg=TEXT
@@ -1505,18 +1639,37 @@ class MainWindow:
 
         self.gadget_next_alert_label = tk.Label(
             self.gadget_view, text="", font=(FONT_FAMILY, 9), bg=PANEL_BG, fg=MUTED,
-            wraplength=GADGET_WIDTH - 20, justify="left",
+            wraplength=GADGET_WIDTH - GADGET_ALERT_WRAP_MARGIN, justify="left",
         )
         self.gadget_next_alert_label.pack(anchor="w", padx=10, pady=(2, 8), fill="x")
+
+        # Free-resize grip, bottom-right corner. `place()`d (not `pack()`d)
+        # so it floats independently of the strip/clock/alert stack above and
+        # always tracks the frame's actual bottom-right corner as it grows or
+        # shrinks. Its own dedicated press/motion/release trio (bound once,
+        # here) is deliberately separate from the drag trio below -- a drag
+        # started on the grip must resize, never move, the window.
+        self.gadget_resize_grip = tk.Label(
+            self.gadget_view, text="⇲", bg=PANEL_BG, fg=MUTED, font=(FONT_FAMILY, 10), cursor="size_nw_se",
+        )
+        self.gadget_resize_grip.place(relx=1.0, rely=1.0, anchor="se", x=-2, y=-2)
+        self.gadget_resize_grip.bind("<ButtonPress-1>", self._start_gadget_resize)
+        self.gadget_resize_grip.bind("<B1-Motion>", self._do_gadget_resize)
+        self.gadget_resize_grip.bind("<ButtonRelease-1>", self._end_gadget_resize)
 
         # Drag-from-anywhere: bound on every widget except the two buttons,
         # so a click on Restore/close still fires its own command instead of
         # being swallowed by a drag-start. Tk bindings don't propagate from a
         # parent to its children, hence binding the same handlers repeatedly.
+        # The right-click skin-menu trigger rides along on this same loop --
+        # every one of these widgets is a legitimate place to right-click for
+        # the skin picker, same reasoning as left-click-drag being legitimate
+        # from anywhere on the gadget.
         for widget in (self.gadget_view, strip, self.gadget_title_label, self.gadget_clock_label, self.gadget_next_alert_label):
             widget.bind("<ButtonPress-1>", self._start_gadget_drag)
             widget.bind("<B1-Motion>", self._do_gadget_drag)
             widget.bind("<Double-Button-1>", lambda _e: self.callbacks.on_toggle_gadget_mode())
+            widget.bind("<Button-3>", self._show_gadget_skin_menu)
 
     # -- monthly calendar view ----------------------------------------------------
 
@@ -2579,6 +2732,37 @@ class MainWindow:
         new_x, new_y = self._resolve_gadget_position(new_x, new_y)
         self.root.geometry(f"+{new_x}+{new_y}")
 
+    def _start_gadget_resize(self, event) -> None:
+        # Same mid-mode-switch guard as `_start_gadget_drag`: the grip is
+        # only meaningful while gadget mode is actually showing.
+        if not self._gadget_active:
+            return
+        self._gadget_resize_start_x = event.x_root
+        self._gadget_resize_start_y = event.y_root
+        self._gadget_resize_start_width = self.root.winfo_width()
+        self._gadget_resize_start_height = self.root.winfo_height()
+
+    def _do_gadget_resize(self, event) -> None:
+        if not self._gadget_active:
+            return
+        candidate_width = self._gadget_resize_start_width + (event.x_root - self._gadget_resize_start_x)
+        candidate_height = self._gadget_resize_start_height + (event.y_root - self._gadget_resize_start_y)
+        width, height = self._resolve_gadget_size(candidate_width, candidate_height)
+        self.root.geometry(f"{width}x{height}")
+        # Live-update the two size-dependent bits of content so the resize
+        # reads as smooth rather than "wrong until you let go": the alert
+        # line's wrap point, and the clock's font size (scaled with width,
+        # clamped the same way `_resolve_gadget_size` clamps the window
+        # itself so it can't shrink to unreadable or blow up absurdly large).
+        self.gadget_next_alert_label.configure(wraplength=width - GADGET_ALERT_WRAP_MARGIN)
+        clock_font_size = max(16, min(40, width // 12))
+        self.gadget_clock_label.configure(font=(FONT_FAMILY, clock_font_size, "bold"))
+
+    def _end_gadget_resize(self, event) -> None:
+        if not self._gadget_active:
+            return
+        self.callbacks.on_gadget_resize(self.root.winfo_width(), self.root.winfo_height())
+
     def _virtual_screen_bounds(self) -> Tuple[int, int, int, int]:
         """(left, top, width, height) of the full virtual desktop spanning
         every connected monitor. `winfo_screenwidth()`/`winfo_screenheight()`
@@ -2605,22 +2789,52 @@ class MainWindow:
             pass
         return 0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight()
 
-    def _resolve_gadget_position(self, x: Optional[int], y: Optional[int]) -> Tuple[int, int]:
-        left, top, width, height = self._virtual_screen_bounds()
+    def _resolve_gadget_position(
+        self, x: Optional[int], y: Optional[int],
+        width: int = GADGET_WIDTH, height: int = GADGET_HEIGHT,
+    ) -> Tuple[int, int]:
+        # `width`/`height` default to the original fixed gadget size so
+        # every pre-existing caller (drag, mode-entry with no saved size)
+        # keeps clamping against the same box it always has; the resize
+        # grip is the only caller that ever passes the current live size.
+        left, top, virtual_width, virtual_height = self._virtual_screen_bounds()
         if x is None or y is None:
             # The default position is always the primary monitor's own
             # bottom-right corner (not the whole virtual desktop's) --
             # where a new gadget is expected to first appear.
-            x = self.root.winfo_screenwidth() - GADGET_WIDTH - GADGET_MARGIN_X
-            y = self.root.winfo_screenheight() - GADGET_HEIGHT - GADGET_MARGIN_BOTTOM
-        x = max(left, min(int(x), max(left, left + width - GADGET_WIDTH)))
-        y = max(top, min(int(y), max(top, top + height - GADGET_HEIGHT)))
+            x = self.root.winfo_screenwidth() - width - GADGET_MARGIN_X
+            y = self.root.winfo_screenheight() - height - GADGET_MARGIN_BOTTOM
+        x = max(left, min(int(x), max(left, left + virtual_width - width)))
+        y = max(top, min(int(y), max(top, top + virtual_height - height)))
         return x, y
 
     def current_gadget_position(self) -> Tuple[int, int]:
         return self.root.winfo_x(), self.root.winfo_y()
 
-    def set_gadget_mode(self, is_gadget: bool, x: Optional[int] = None, y: Optional[int] = None) -> None:
+    def current_gadget_size(self) -> Tuple[int, int]:
+        return self.root.winfo_width(), self.root.winfo_height()
+
+    def _resolve_gadget_size(self, width: int, height: int) -> Tuple[int, int]:
+        """Clamps a candidate gadget size two ways: first to the fixed
+        min/max bounds (readability floor, "not the full window" ceiling),
+        then so the window's bottom-right corner never lands past the
+        virtual desktop's edge given its CURRENT top-left corner -- without
+        this second pass, dragging the grip while the gadget sits near a
+        screen edge could grow the window off-screen on the far side, same
+        failure mode `_resolve_gadget_position` already guards against for
+        moves."""
+        width = max(GADGET_MIN_WIDTH, min(int(width), GADGET_MAX_WIDTH))
+        height = max(GADGET_MIN_HEIGHT, min(int(height), GADGET_MAX_HEIGHT))
+        left, top, virtual_width, virtual_height = self._virtual_screen_bounds()
+        current_x, current_y = self.root.winfo_x(), self.root.winfo_y()
+        width = max(GADGET_MIN_WIDTH, min(width, left + virtual_width - current_x))
+        height = max(GADGET_MIN_HEIGHT, min(height, top + virtual_height - current_y))
+        return width, height
+
+    def set_gadget_mode(
+        self, is_gadget: bool, x: Optional[int] = None, y: Optional[int] = None,
+        width: Optional[int] = None, height: Optional[int] = None, skin: Optional[str] = None,
+    ) -> None:
         """Reskin the SAME root window instead of swapping in a second
         Toplevel -- this is the one existing Tk() instance and heartbeat for
         the app's whole life either way. Every `overrideredirect()` toggle is
@@ -2645,10 +2859,22 @@ class MainWindow:
         `set_active_view` ever changes `_primary_view`, so whichever primary
         view was showing before this call is exactly what reappears after
         it, regardless of how many times gadget mode is toggled in between.
+
+        `width`/`height`/`skin` (added for the free-resize/skin feature) are
+        only meaningful on the `is_gadget=True` branch and are all optional:
+        an absent `width`/`height` falls back to the original fixed
+        `GADGET_WIDTH`/`GADGET_HEIGHT`, and an absent `skin` falls back to
+        whatever `self._gadget_skin` was last set to (or the default skin on
+        the very first call, before `_build_gadget_view` has ever run
+        `apply_gadget_skin`) -- so a caller that only cares about position
+        (the original two-argument call, still used in a couple of places)
+        keeps working unchanged.
         """
         if is_gadget:
+            gadget_width = width or GADGET_WIDTH
+            gadget_height = height or GADGET_HEIGHT
             self._pre_gadget_geometry = self.root.geometry()
-            target_x, target_y = self._resolve_gadget_position(x, y)
+            target_x, target_y = self._resolve_gadget_position(x, y, gadget_width, gadget_height)
             self.root.withdraw()
             self.root.overrideredirect(True)
             self.root.resizable(False, False)
@@ -2658,15 +2884,29 @@ class MainWindow:
             self.root.minsize(1, 1)
             self._primary_view_frame().grid_remove()
             self.gadget_view.grid(row=0, column=0, sticky="nsew")
-            self.root.geometry(f"{GADGET_WIDTH}x{GADGET_HEIGHT}+{target_x}+{target_y}")
+            self.root.geometry(f"{gadget_width}x{gadget_height}+{target_x}+{target_y}")
             self.root.deiconify()
             self.root.lift()
             self.root.attributes("-topmost", True)
             self._gadget_active = True
+            # A saved non-default size must repaint with the matching
+            # wraplength/font immediately, not just on the next live resize
+            # tick -- otherwise a gadget reopened at, say, 400px wide would
+            # show text wrapped/sized for the original 280px box until the
+            # user next dragged the grip.
+            self.gadget_next_alert_label.configure(wraplength=gadget_width - GADGET_ALERT_WRAP_MARGIN)
+            clock_font_size = max(16, min(40, gadget_width // 12))
+            self.gadget_clock_label.configure(font=(FONT_FAMILY, clock_font_size, "bold"))
+            self.apply_gadget_skin(skin or getattr(self, "_gadget_skin", GADGET_DEFAULT_SKIN))
         else:
             self.root.withdraw()
             self.root.overrideredirect(False)
             self.root.attributes("-topmost", False)
+            # Reset unconditionally: a translucent skin (e.g. "glass") sets
+            # this to < 1.0 on the whole root window (there's no per-frame
+            # alpha in Tk), and it would otherwise stay applied to the
+            # restored full window after leaving gadget mode.
+            self.root.attributes("-alpha", 1.0)
             self.root.resizable(True, True)
             self.gadget_view.grid_remove()
             self._primary_view_frame().grid(row=0, column=0, sticky="nsew")
@@ -2676,6 +2916,40 @@ class MainWindow:
             self.root.lift()
             self.root.focus_force()
             self._gadget_active = False
+
+    def apply_gadget_skin(self, skin_key: str) -> None:
+        """Recolors every widget built once in `_build_gadget_view` to match
+        `skin_key` (falling back to the default skin for an unknown/corrupted
+        key, same defensive style as `_coerce_gadget_skin` in app.py) --
+        never rebuilds them. `-alpha` is a root-window-wide Tk attribute
+        (there's no per-frame transparency), so it's set here on `self.root`
+        directly rather than on any individual widget; `set_gadget_mode`'s
+        `False` branch is responsible for resetting it back to 1.0 on the
+        way out, since this method is never called there."""
+        skin = GADGET_SKINS.get(skin_key, GADGET_SKINS[GADGET_DEFAULT_SKIN])
+        self.gadget_view.configure(bg=skin["bg"], highlightbackground=skin["border"])
+        self._gadget_strip.configure(bg=skin["bg"])
+        self.gadget_title_label.configure(bg=skin["bg"], fg=skin["title_fg"])
+        self.gadget_close_button.configure(bg=skin["bg"], fg=skin["title_fg"], activebackground=skin["close_hover_bg"])
+        self.gadget_restore_button.configure(bg=skin["bg"], fg=skin["title_fg"])
+        self.gadget_skin_button.configure(bg=skin["bg"], fg=skin["title_fg"])
+        self.gadget_clock_label.configure(bg=skin["bg"], fg=skin["clock_fg"])
+        self.gadget_next_alert_label.configure(bg=skin["bg"], fg=skin["alert_fg"])
+        self.gadget_resize_grip.configure(bg=skin["bg"], fg=skin["title_fg"])
+        self.root.attributes("-alpha", skin["alpha"])
+        self._gadget_skin_var.set(skin_key)
+        self._gadget_skin = skin_key
+
+    def _show_gadget_skin_menu(self, event) -> None:
+        self._context_menu.delete(0, "end")
+        for key, skin in GADGET_SKINS.items():
+            self._context_menu.add_radiobutton(
+                label=i18n.t(skin["label_key"], self.language),
+                variable=self._gadget_skin_var,
+                value=key,
+                command=lambda k=key: self.callbacks.on_set_gadget_skin(k),
+            )
+        self._show_context_menu(event)
 
     def keep_gadget_on_top(self, is_alarm_active: bool) -> None:
         """Called every heartbeat tick from app.py; a near-zero-cost no-op
@@ -3150,6 +3424,7 @@ class MainWindow:
         self.gadget_title_label.configure(text=tr("appTitle"))
         self.gadget_restore_button.configure(text=tr("gadgetRestoreButton"))
         self.gadget_close_button.configure(text=tr("gadgetCloseButton"))
+        self.gadget_skin_button.configure(text=tr("gadgetSkinButtonGlyph"))
 
         self.calendar_prev_button.configure(text=tr("calendarPrevMonthButton"))
         self.calendar_next_button.configure(text=tr("calendarNextMonthButton"))

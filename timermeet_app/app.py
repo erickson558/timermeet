@@ -12,13 +12,14 @@ from __future__ import annotations
 
 import colorsys
 import logging
+import math
 import threading
 import tkinter as tk
 import webbrowser
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
-from . import i18n, models, notifications, recurrence, retention, security, storage
+from . import i18n, main_window, models, notifications, recurrence, retention, security, storage
 from .alarm_ui import AlarmController
 from .main_window import (
     CALENDAR_MAX_ENTRIES_PER_CELL,
@@ -79,12 +80,54 @@ def _coerce_gadget_coordinate(value) -> Optional[int]:
     gadgetX/gadgetY (a string, a list, ...); only trust it if it's actually
     numeric, otherwise fall back to the same "use the default position" path
     an absent value already takes, the same way saved_language is validated
-    against i18n.translations before being trusted below."""
+    against i18n.translations before being trusted below.
+
+    ``isinstance(value, (int, float))`` alone isn't enough: Python's
+    ``json`` module accepts the non-standard ``NaN``/``Infinity``/
+    ``-Infinity`` literals on load (so a hand-edited settings.json with
+    ``"gadgetX": NaN`` parses without error into ``float("nan")``), and
+    ``int()`` on either raises (``ValueError`` for NaN, ``OverflowError``
+    for +/-Infinity) rather than returning a value -- which would crash
+    the app on startup before a single window is ever shown. Reject those
+    the same way a non-numeric value already is."""
     if isinstance(value, bool):
         return None
-    if isinstance(value, (int, float)):
+    if isinstance(value, (int, float)) and math.isfinite(value):
         return int(value)
     return None
+
+
+def _coerce_gadget_size(value, default: int) -> int:
+    """Same defensive style as `_coerce_gadget_coordinate`, for
+    gadgetWidth/gadgetHeight: only trust a plain numeric value. Unlike the
+    coordinate coercion, there's no "use None and let the caller pick a
+    default" path here -- `MainWindow._resolve_gadget_size` already clamps
+    whatever int it's handed to the min/max bounds, so this only needs to
+    guard against a non-numeric settings.json value crashing that clamp
+    (e.g. `int("banana")`), not against an out-of-range one.
+
+    ``math.isfinite()`` guard mirrors `_coerce_gadget_coordinate`'s: a
+    hand-edited ``"gadgetWidth": NaN``/``Infinity`` parses cleanly via
+    ``json.loads`` (it's a Python-accepted, if non-standard, JSON
+    extension) but ``int(float("nan"))``/``int(float("inf"))`` raise
+    rather than clamp, which `_resolve_gadget_size`'s own min/max clamp
+    downstream never gets a chance to catch."""
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)) and math.isfinite(value):
+        return int(value)
+    return default
+
+
+def _coerce_gadget_skin(value) -> str:
+    """A hand-edited or stale settings.json could name a skin that no longer
+    exists (or never did); only trust `value` if it's a real key in the
+    current `GADGET_SKINS` registry, otherwise fall back to the default
+    skin -- the same "absent/corrupted value takes the default path" style
+    `saved_language`/`_coerce_gadget_coordinate` already use above."""
+    if isinstance(value, str) and value in main_window.GADGET_SKINS:
+        return value
+    return main_window.GADGET_DEFAULT_SKIN
 
 
 def _meeting_status(meeting: models.Meeting, now: datetime) -> str:
@@ -193,6 +236,9 @@ class TimerMeetApp:
         self.gadget_mode = bool(settings.get("gadgetMode", False))
         self._gadget_x = _coerce_gadget_coordinate(settings.get("gadgetX"))
         self._gadget_y = _coerce_gadget_coordinate(settings.get("gadgetY"))
+        self._gadget_skin = _coerce_gadget_skin(settings.get("gadgetSkin"))
+        self._gadget_width = _coerce_gadget_size(settings.get("gadgetWidth"), main_window.GADGET_WIDTH)
+        self._gadget_height = _coerce_gadget_size(settings.get("gadgetHeight"), main_window.GADGET_HEIGHT)
         # Persisted the same way `gadgetMode` is (a stable per-machine UI
         # preference, unlike `active_view`/`_week_anchor`, which are
         # deliberately reset every launch -- see SDD.md v2.10.0). Only
@@ -311,13 +357,17 @@ class TimerMeetApp:
             on_week_slot_click=self.handle_week_slot_click,
             on_toggle_week_column_mode=self.handle_toggle_week_column_mode,
             on_delete_series=self.handle_delete_series,
+            on_set_gadget_skin=self.handle_set_gadget_skin,
+            on_gadget_resize=self.handle_gadget_resize,
         )
         self.view = MainWindow(self.root, callbacks)
         self.view.apply_translations(self.language)
         self.view.update_company_options(self.companies)
         self.view.set_week_column_mode(self.week_column_mode)
         if self.gadget_mode:
-            self.view.set_gadget_mode(True, self._gadget_x, self._gadget_y)
+            self.view.set_gadget_mode(
+                True, self._gadget_x, self._gadget_y, self._gadget_width, self._gadget_height, self._gadget_skin,
+            )
         self._maybe_show_startup_load_toast(startup_load)
 
         self.alarms = AlarmController(self.root, get_language=lambda: self.language)
@@ -1111,12 +1161,43 @@ class TimerMeetApp:
             return
         self.gadget_mode = not self.gadget_mode
         if self.gadget_mode:
-            self.view.set_gadget_mode(True, self._gadget_x, self._gadget_y)
+            # Pass the last known width/height/skin too, not just position --
+            # otherwise toggling out of gadget mode (e.g. to edit a meeting)
+            # and back in within the same session would silently reset a
+            # resize/skin choice back to the hardcoded default, even though
+            # `self._gadget_width`/`_height`/`_skin` already remember it.
+            self.view.set_gadget_mode(
+                True, self._gadget_x, self._gadget_y, self._gadget_width, self._gadget_height, self._gadget_skin,
+            )
         else:
             self._gadget_x, self._gadget_y = self.view.current_gadget_position()
             self.view.set_gadget_mode(False)
         self._save_gadget_settings()
         self._refresh_all()
+
+    def handle_set_gadget_skin(self, skin: str) -> None:
+        # Same guard/reasoning as `handle_toggle_gadget_mode`: the skin
+        # button/menu stay visible on the gadget while an alarm overlay is
+        # up (same as Restore/Close), but must not repaint the one shared
+        # root window out from under that overlay mid-alert.
+        if self.alarms.is_active():
+            self.view.show_toast(i18n.t("gadgetModeBlockedToast", self.language))
+            return
+        self._gadget_skin = skin
+        self.view.apply_gadget_skin(skin)
+        self._save_gadget_settings()
+
+    def handle_gadget_resize(self, width: int, height: int) -> None:
+        # No toast here, unlike the skin/mode-toggle guards above: a resize
+        # is driven by the user's mouse on the grip, and an alarm overlay
+        # taking over the root window mid-drag would already steal focus/
+        # grab -- there's nothing useful to interrupt, so this just skips
+        # persisting the in-progress size rather than nagging on every
+        # release event.
+        if self.alarms.is_active():
+            return
+        self._gadget_width, self._gadget_height = width, height
+        self._save_gadget_settings()
 
     def _save_gadget_settings(self) -> None:
         settings = storage.load_settings()
@@ -1124,6 +1205,9 @@ class TimerMeetApp:
         if self._gadget_x is not None and self._gadget_y is not None:
             settings["gadgetX"] = self._gadget_x
             settings["gadgetY"] = self._gadget_y
+        settings["gadgetSkin"] = self._gadget_skin
+        settings["gadgetWidth"] = self._gadget_width
+        settings["gadgetHeight"] = self._gadget_height
         storage.save_settings(settings)
 
     # -- tray mode --------------------------------------------------------------

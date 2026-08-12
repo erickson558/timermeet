@@ -119,15 +119,20 @@ def _coerce_gadget_size(value, default: int) -> int:
     return default
 
 
-def _coerce_gadget_skin(value) -> str:
-    """A hand-edited or stale settings.json could name a skin that no longer
-    exists (or never did); only trust `value` if it's a real key in the
-    current `GADGET_SKINS` registry, otherwise fall back to the default
-    skin -- the same "absent/corrupted value takes the default path" style
-    `saved_language`/`_coerce_gadget_coordinate` already use above."""
-    if isinstance(value, str) and value in main_window.GADGET_SKINS:
+def _coerce_app_theme(value) -> str:
+    """A hand-edited or stale settings.json could name a theme that no
+    longer exists (or never did); only trust `value` if it's a real key in
+    the current `APP_THEMES` registry, otherwise fall back to the default
+    theme -- the same "absent/corrupted value takes the default path" style
+    `saved_language`/`_coerce_gadget_coordinate` already use above.
+
+    Renamed from `_coerce_gadget_skin` in v2.14.0 when the gadget-only skin
+    picker grew into a whole-app theme picker (SDD.md v2.14.0) -- a clean
+    rename, not a second helper, since there's exactly one setting
+    (`appTheme`) now, not two that could drift."""
+    if isinstance(value, str) and value in main_window.APP_THEMES:
         return value
-    return main_window.GADGET_DEFAULT_SKIN
+    return main_window.APP_DEFAULT_THEME
 
 
 def _meeting_status(meeting: models.Meeting, now: datetime) -> str:
@@ -236,7 +241,18 @@ class TimerMeetApp:
         self.gadget_mode = bool(settings.get("gadgetMode", False))
         self._gadget_x = _coerce_gadget_coordinate(settings.get("gadgetX"))
         self._gadget_y = _coerce_gadget_coordinate(settings.get("gadgetY"))
-        self._gadget_skin = _coerce_gadget_skin(settings.get("gadgetSkin"))
+        # `settings.get("appTheme", settings.get("gadgetSkin"))` (v2.14.0):
+        # a one-time migration read, not a second persisted setting -- a
+        # user who already picked a gadget skin under v2.13.0 (before the
+        # whole-app theme picker existed) had that choice saved under the
+        # old `gadgetSkin` key; without this fallback, upgrading to v2.14.0
+        # would silently reset their preference back to "classic" the
+        # moment `appTheme` is absent, which is exactly the kind of silent
+        # preference loss this project's own settings-merge discipline
+        # exists to avoid (see `_save_theme_and_gadget_settings` below,
+        # which only ever writes `appTheme` going forward -- the old key is
+        # simply never read again once this session's first save happens).
+        self._app_theme = _coerce_app_theme(settings.get("appTheme", settings.get("gadgetSkin")))
         self._gadget_width = _coerce_gadget_size(settings.get("gadgetWidth"), main_window.GADGET_WIDTH)
         self._gadget_height = _coerce_gadget_size(settings.get("gadgetHeight"), main_window.GADGET_HEIGHT)
         # Persisted the same way `gadgetMode` is (a stable per-machine UI
@@ -357,16 +373,21 @@ class TimerMeetApp:
             on_week_slot_click=self.handle_week_slot_click,
             on_toggle_week_column_mode=self.handle_toggle_week_column_mode,
             on_delete_series=self.handle_delete_series,
-            on_set_gadget_skin=self.handle_set_gadget_skin,
+            on_set_app_theme=self.handle_set_app_theme,
             on_gadget_resize=self.handle_gadget_resize,
         )
         self.view = MainWindow(self.root, callbacks)
         self.view.apply_translations(self.language)
         self.view.update_company_options(self.companies)
         self.view.set_week_column_mode(self.week_column_mode)
+        # Applied BEFORE `set_gadget_mode` below (v2.14.0) so gadget mode's
+        # own initial entry -- which internally calls `apply_gadget_skin`
+        # again with whatever `self._app_theme` already is -- is consistent
+        # with whatever this call just set, not fighting it.
+        self.view.apply_theme(self._app_theme)
         if self.gadget_mode:
             self.view.set_gadget_mode(
-                True, self._gadget_x, self._gadget_y, self._gadget_width, self._gadget_height, self._gadget_skin,
+                True, self._gadget_x, self._gadget_y, self._gadget_width, self._gadget_height, self._app_theme,
             )
         self._maybe_show_startup_load_toast(startup_load)
 
@@ -506,7 +527,7 @@ class TimerMeetApp:
             # toggling back to the full window already flushes this, but a
             # direct quit from gadget mode skips that path entirely.
             self._gadget_x, self._gadget_y = self.view.current_gadget_position()
-            self._save_gadget_settings()
+            self._save_theme_and_gadget_settings()
         # Removes the tray icon immediately (NIM_DELETE) instead of leaving
         # it for the OS to eventually notice the owning process died.
         self.tray.stop()
@@ -1161,34 +1182,62 @@ class TimerMeetApp:
             return
         self.gadget_mode = not self.gadget_mode
         if self.gadget_mode:
-            # Pass the last known width/height/skin too, not just position --
-            # otherwise toggling out of gadget mode (e.g. to edit a meeting)
-            # and back in within the same session would silently reset a
-            # resize/skin choice back to the hardcoded default, even though
-            # `self._gadget_width`/`_height`/`_skin` already remember it.
+            # Pass the last known width/height/theme too, not just position
+            # -- otherwise toggling out of gadget mode (e.g. to edit a
+            # meeting) and back in within the same session would silently
+            # reset a resize/theme choice back to the hardcoded default,
+            # even though `self._gadget_width`/`_height`/`_app_theme`
+            # already remember it.
             self.view.set_gadget_mode(
-                True, self._gadget_x, self._gadget_y, self._gadget_width, self._gadget_height, self._gadget_skin,
+                True, self._gadget_x, self._gadget_y, self._gadget_width, self._gadget_height, self._app_theme,
             )
         else:
             self._gadget_x, self._gadget_y = self.view.current_gadget_position()
             self.view.set_gadget_mode(False)
-        self._save_gadget_settings()
+        self._save_theme_and_gadget_settings()
         self._refresh_all()
 
-    def handle_set_gadget_skin(self, skin: str) -> None:
-        # Same guard/reasoning as `handle_toggle_gadget_mode`: the skin
-        # button/menu stay visible on the gadget while an alarm overlay is
-        # up (same as Restore/Close), but must not repaint the one shared
-        # root window out from under that overlay mid-alert.
+    def handle_set_app_theme(self, theme_key: str) -> None:
+        """Renamed from `handle_set_gadget_skin` in v2.14.0 -- ONE handler
+        now backs both theme-picker entry points (the gadget's own picker
+        and the full window's header button, see `main_window.Callbacks`'s
+        own `on_set_app_theme` comment), since choosing either sets the
+        same underlying `appTheme` setting and re-themes the same one root
+        window either way."""
+        # Same guard/reasoning as `handle_toggle_gadget_mode`: the theme
+        # button/menu stay visible (on the gadget, and now on the full
+        # window's header too) while an alarm overlay is up, but must not
+        # repaint the one shared root window out from under that overlay
+        # mid-alert.
         if self.alarms.is_active():
             self.view.show_toast(i18n.t("gadgetModeBlockedToast", self.language))
             return
-        self._gadget_skin = skin
-        self.view.apply_gadget_skin(skin)
-        self._save_gadget_settings()
+        self._app_theme = theme_key
+        self.view.apply_theme(theme_key)
+        # Forces the calendar/week views' own "skip re-render if nothing
+        # changed" signatures (see `_refresh_calendar`/`_refresh_week`) --
+        # and the meeting-list's equivalent, `_last_rendered_signature` --
+        # to miss on the very next heartbeat tick, since none of those
+        # signatures include the active theme. Without this, a theme
+        # switch would recolor everything `MainWindow.apply_theme` reaches
+        # directly, but the calendar/week grids' own per-cell colors
+        # (`_update_calendar_cell`/`_update_week_cell`, which read the
+        # module constants `apply_theme` just reassigned) and the meeting
+        # cards (gated behind this same list signature) would keep
+        # rendering with the OLD colors until something else unrelated
+        # happened to change first. Resetting to `None` (not recomputing a
+        # real one) is deliberate: it's a guaranteed one-time miss against
+        # whatever the signature comparison is, cheaper than duplicating
+        # each signature's own real construction here just to invalidate it.
+        self._last_rendered_signature = None
+        self._last_rendered_calendar_signature = None
+        self._last_rendered_week_signature = None
+        self._last_rendered_week_live_state = None
+        self._refresh_all()
+        self._save_theme_and_gadget_settings()
 
     def handle_gadget_resize(self, width: int, height: int) -> None:
-        # No toast here, unlike the skin/mode-toggle guards above: a resize
+        # No toast here, unlike the theme/mode-toggle guards above: a resize
         # is driven by the user's mouse on the grip, and an alarm overlay
         # taking over the root window mid-drag would already steal focus/
         # grab -- there's nothing useful to interrupt, so this just skips
@@ -1197,15 +1246,21 @@ class TimerMeetApp:
         if self.alarms.is_active():
             return
         self._gadget_width, self._gadget_height = width, height
-        self._save_gadget_settings()
+        self._save_theme_and_gadget_settings()
 
-    def _save_gadget_settings(self) -> None:
+    def _save_theme_and_gadget_settings(self) -> None:
+        """Renamed from `_save_gadget_settings` in v2.14.0 -- covers the
+        broader `appTheme` concept now, not just gadget-specific settings;
+        same load-full-dict/mutate-known-keys/save-full-dict merge
+        discipline as before (see this project's own settings-merge
+        guidance -- `save_settings` overwrites the whole file, so this must
+        never be called with a partial dict)."""
         settings = storage.load_settings()
         settings["gadgetMode"] = self.gadget_mode
         if self._gadget_x is not None and self._gadget_y is not None:
             settings["gadgetX"] = self._gadget_x
             settings["gadgetY"] = self._gadget_y
-        settings["gadgetSkin"] = self._gadget_skin
+        settings["appTheme"] = self._app_theme
         settings["gadgetWidth"] = self._gadget_width
         settings["gadgetHeight"] = self._gadget_height
         storage.save_settings(settings)

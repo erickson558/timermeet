@@ -47,6 +47,17 @@ GHOST_HOVER = "#343a45"
 GHOST_FG = "#f2f3f5"
 DANGER = "#b91c1c"
 DANGER_HOVER = "#991b1b"
+# Named separately from the bare literal it replaces (v2.14.0): before this,
+# 3 unrelated call sites (the header's `exit_button`, `_CARD_PALETTE`'s own
+# `danger_fg`, and the manage-companies dialog's remove button) each
+# hardcoded `"#ffffff"` directly instead of sharing one named role -- fine
+# while every danger-colored button used the exact same white regardless of
+# theme, but with `APP_THEMES` now able to vary `danger`/`danger_hover` per
+# theme, three independently-hardcoded literals could silently drift out of
+# sync with each other (e.g. a future theme darkening `danger_fg` in one
+# call site but not the other two). One named constant, reassigned by
+# `apply_theme` alongside its siblings, keeps all three in lockstep.
+DANGER_FG = "#ffffff"
 CHIP_BG = "#2a2e37"
 GOLD_BG = "#f2c14e"
 GOLD_HOVER = "#e0ad33"
@@ -87,15 +98,22 @@ GADGET_MAX_WIDTH, GADGET_MAX_HEIGHT = 640, 360
 # count for this label's short truncated text -- see `_GADGET_ALERT_MAX_CHARS`).
 GADGET_ALERT_WRAP_MARGIN = 36
 
-# Skin registry for gadget mode (see `apply_gadget_skin`). Each entry's keys
-# map 1:1 to a `.configure()` call on the widgets built in
-# `_build_gadget_view`; "alpha" feeds `root.attributes("-alpha", ...)` for a
-# translucent look on "glass" -- always reset back to 1.0 on the way out of
-# gadget mode in `set_gadget_mode`, or the restored full window would stay
-# part-transparent.
+# Theme registry (v2.14.0): originally just a gadget-mode skin registry
+# (`GADGET_SKINS`, still kept below as an alias -- see its own comment), now
+# doubling as the whole app's theme registry (header/form/list/calendar/week,
+# via `MainWindow.apply_theme`). Each entry's first block of keys (`bg`
+# through `label_key`) is the ORIGINAL gadget-only set, untouched in meaning
+# or value by this expansion -- they map 1:1 to a `.configure()` call on the
+# widgets built in `_build_gadget_view`; "alpha" feeds
+# `root.attributes("-alpha", ...)` for a translucent look on "glass"/"aero"
+# -- always reset back to 1.0 on the way out of gadget mode in
+# `set_gadget_mode`, or the restored full window would stay part-transparent.
+# The gadget's own border key is `gadget_border`, not `border` -- see that
+# key's own comment for why this rename was needed once a second, GENERAL
+# `border` role joined the registry.
 #
 # `close_hover_bg` is DANGER (the same red hover used everywhere else in the
-# app) on all four skins by design, not an oversight: reviewed against each
+# app) on all five skins by design, not an oversight: reviewed against each
 # skin's own `bg` and it reads as a clearly distinct hover state everywhere
 # (contrast against classic/neon's shared dark bg ~2.55:1, glass's darker bg
 # ~2.74:1, light's bright bg ~5.98:1 -- all comfortably different colors, not
@@ -103,12 +121,37 @@ GADGET_ALERT_WRAP_MARGIN = 36
 # "x" glyph drawn on top of it (`activeforeground="#ffffff"`, set once in
 # `_build_gadget_view`, never reconfigured per skin) holds a stable 6.47:1
 # against that red regardless of which skin is active.
-GADGET_DEFAULT_SKIN = "classic"
+#
+# The SECOND block of keys on each entry (`window_bg` through
+# `card_status_bg`) is new in v2.14.0 -- the general app-wide palette applied
+# by `apply_theme` to the header/form/meeting list/monthly calendar/weekly
+# calendar. `classic`'s app-wide values are the exact pre-v2.14.0 constants
+# verbatim (`WINDOW_BG`/`PANEL_BG`/etc. as they were hardcoded before this
+# feature), so picking "classic" must look pixel-identical to the app before
+# this feature existed -- that's the whole point of the name. Every contrast
+# ratio quoted below is flat-color WCAG (`(L1+0.05)/(L2+0.05)` on relative
+# luminance), computed against each theme's own values, not assumed; the
+# 4.5:1 AA-normal-text floor is the target for every text/background pairing
+# except where noted. `border`/`gadget_border` are decorative 1px hairlines,
+# not text, and are judged against the WCAG 1.4.11 non-text 3:1 guidance
+# (informally) rather than 4.5:1 -- `classic` itself already ships well under
+# that (1.41:1) today, so no new theme introduces a regression there.
+APP_DEFAULT_THEME = "classic"
+GADGET_DEFAULT_SKIN = APP_DEFAULT_THEME  # alias, see `GADGET_SKINS` below
 
-GADGET_SKINS: Dict[str, dict] = {
+APP_THEMES: Dict[str, dict] = {
     "classic": {
-        "bg": PANEL_BG, "border": BORDER, "title_fg": MUTED, "clock_fg": TEXT,
+        "bg": PANEL_BG, "gadget_border": BORDER, "title_fg": MUTED, "clock_fg": TEXT,
         "alert_fg": MUTED, "close_hover_bg": DANGER, "alpha": 1.0, "label_key": "gadgetSkinClassic",
+        # Verbatim copies of the pre-v2.14.0 hardcoded constants -- see the
+        # module docstring above this dict for why that's a hard requirement
+        # for this one entry specifically.
+        "window_bg": WINDOW_BG, "panel_bg": PANEL_BG, "field_bg": FIELD_BG, "border": BORDER,
+        "text": TEXT, "muted": MUTED, "subtle": SUBTLE,
+        "accent": ACCENT, "accent_hover": ACCENT_HOVER, "accent_fg": ACCENT_FG,
+        "ghost_bg": GHOST_BG, "ghost_hover": GHOST_HOVER, "ghost_fg": GHOST_FG,
+        "danger": DANGER, "danger_hover": DANGER_HOVER, "danger_fg": DANGER_FG,
+        "chip_bg": CHIP_BG, "card_bg": "#20242c", "card_chip_bg": CHIP_BG, "card_status_bg": "#2f3440",
     },
     "glass": {
         # Reviewed and left unchanged: `alpha=0.90` makes the whole root
@@ -124,8 +167,32 @@ GADGET_SKINS: Dict[str, dict] = {
         # value change needed. Not lowering alpha further to buy back more
         # margin: 0.90 was a deliberate choice for a "subtle but real" glass
         # look, and this skin already has the most headroom of the four.
-        "bg": "#10182a", "border": "#4d6fa8", "title_fg": "#b7c3dc", "clock_fg": "#f5f8ff",
+        "bg": "#10182a", "gadget_border": "#4d6fa8", "title_fg": "#b7c3dc", "clock_fg": "#f5f8ff",
         "alert_fg": "#a9b6d1", "close_hover_bg": DANGER, "alpha": 0.90, "label_key": "gadgetSkinGlass",
+        # App-wide dark-navy family, same hue as the gadget skin above so
+        # the two never clash when both are visible-ish concepts of "glass".
+        # Flat-color contrast (this theme's `-alpha` never applies to the
+        # full window's OWN pixels against each other, only against the
+        # desktop behind it, so the gadget's translucency simulation above
+        # doesn't apply here): text/window_bg 17.29:1, text/panel_bg
+        # 16.65:1, muted/panel_bg 9.99:1, subtle/panel_bg 6.07:1 -- all
+        # comfortably clear. `accent`/`danger` were both tuned darker than
+        # an initial lighter-sky-blue/red candidate specifically so their
+        # own UN-hovered button text (`accent_fg`/`danger_fg`, both white)
+        # clears 4.5:1 too, not just their hover states: accent_fg/accent
+        # 5.07:1 (hover 6.96:1), danger_fg/danger 5.30:1 (hover 7.04:1).
+        # `border` (the general hairline role, distinct from
+        # `gadget_border` above -- see that key's own comment) reuses the
+        # gadget's own border color; ghost/chip/card roles stay in the same
+        # muted-navy family as `field_bg` so ghost buttons and chips read
+        # as "a slightly lighter navy panel," consistent with every other
+        # theme's own ghost/field relationship.
+        "window_bg": "#0d1424", "panel_bg": "#10182a", "field_bg": "#182238", "border": "#4d6fa8",
+        "text": "#f5f8ff", "muted": "#b7c3dc", "subtle": "#8a97b8",
+        "accent": "#3a6bcb", "accent_hover": "#2c56aa", "accent_fg": "#ffffff",
+        "ghost_bg": "#182238", "ghost_hover": "#22304c", "ghost_fg": "#f5f8ff",
+        "danger": "#c23a3a", "danger_hover": "#a13030", "danger_fg": "#ffffff",
+        "chip_bg": "#182238", "card_bg": "#141d33", "card_chip_bg": "#1c2740", "card_status_bg": "#202b47",
     },
     "light": {
         # title_fg/alert_fg darkened from an initial #5b6270 (5.67:1 on this
@@ -137,8 +204,32 @@ GADGET_SKINS: Dict[str, dict] = {
         # (#1b1e24, 15.44:1) so the size hierarchy (big clock vs. small
         # title/status text) doesn't collapse into "everything reads as the
         # same weight."
-        "bg": "#f5f6f8", "border": "#c3c7ce", "title_fg": "#4c525e", "clock_fg": "#1b1e24",
+        "bg": "#f5f6f8", "gadget_border": "#c3c7ce", "title_fg": "#4c525e", "clock_fg": "#1b1e24",
         "alert_fg": "#4c525e", "close_hover_bg": DANGER, "alpha": 1.0, "label_key": "gadgetSkinLight",
+        # App-wide light family: `window_bg` a touch darker than `panel_bg`
+        # (light-theme mirror of the dark themes' own "panel sits slightly
+        # ELEVATED/lighter than window" relationship), `field_bg` pure white
+        # so input fields read as the brightest, most "editable" surface.
+        # text/muted/subtle reuse the gadget's own `clock_fg`/`title_fg`
+        # values verbatim (already reviewed above at 7.26:1/15.44:1);
+        # `subtle` is a new, slightly lighter gray tuned to still clear
+        # 4.5:1 on `panel_bg` (4.55:1 -- the tightest margin in this whole
+        # theme, reviewed and accepted: `subtle` is only ever used for a
+        # de-emphasized "not this month" calendar day number, never body
+        # text). text/window_bg 13.99:1, text/field_bg 16.70:1,
+        # muted/panel_bg 7.39:1. accent_fg/accent (white on this theme's
+        # blue) 5.17:1, danger_fg/danger 4.83:1 -- both clear un-hovered,
+        # unlike `classic`'s own accent (3.68:1, large-text-only), because
+        # a light background gives blue/red far less natural luminance
+        # headroom to work with than this app's dark themes have, so this
+        # theme's accent/danger were picked a shade darker than classic's
+        # from the start rather than inheriting them.
+        "window_bg": "#e9ebef", "panel_bg": "#f7f8fa", "field_bg": "#ffffff", "border": "#c3c7ce",
+        "text": "#1b1e24", "muted": "#4c525e", "subtle": "#6b7280",
+        "accent": "#2563eb", "accent_hover": "#1d4ed8", "accent_fg": "#ffffff",
+        "ghost_bg": "#e4e7ec", "ghost_hover": "#d7dbe2", "ghost_fg": "#1b1e24",
+        "danger": "#dc2626", "danger_hover": "#b91c1c", "danger_fg": "#ffffff",
+        "chip_bg": "#e4e7ec", "card_bg": "#ffffff", "card_chip_bg": "#eef0f3", "card_status_bg": "#e4e7ec",
     },
     "neon": {
         # clock_fg was originally the plain app-wide ACCENT (#3b82f6, the
@@ -151,11 +242,30 @@ GADGET_SKINS: Dict[str, dict] = {
         # visibly more vivid/glowing against PANEL_BG -- contrast also rises
         # from 4.48:1 (borderline, just under the WCAG AA-normal-text 4.5:1
         # floor, though the large bold clock font puts it over the lower
-        # 3:1 large-text bar regardless) to 7.70:1. `border` intentionally
-        # stays on plain ACCENT, not this brighter shade -- only the clock
-        # digits need the extra "glow," not the window's whole outline.
-        "bg": PANEL_BG, "border": ACCENT, "title_fg": MUTED, "clock_fg": "#38bdf8",
+        # 3:1 large-text bar regardless) to 7.70:1. `gadget_border`
+        # intentionally stays on plain ACCENT, not this brighter shade --
+        # only the clock digits need the extra "glow," not the gadget's
+        # whole outline.
+        "bg": PANEL_BG, "gadget_border": ACCENT, "title_fg": MUTED, "clock_fg": "#38bdf8",
         "alert_fg": MUTED, "close_hover_bg": DANGER, "alpha": 1.0, "label_key": "gadgetSkinNeon",
+        # App-wide: same philosophy as the gadget skin above, scaled up --
+        # only the ONE role that's this app's own "flagship" accent
+        # (buttons, links, the save action, "today"/selection highlights)
+        # gets the vivid glow; window/panel/field/border/text/muted/subtle
+        # and every ghost/danger/chip/card role stay byte-identical to
+        # `classic` (so every one of `classic`'s own already-reviewed
+        # contrast numbers carries over unchanged) -- exactly how the
+        # gadget's own review reasoned only the clock digits, not the whole
+        # window outline, should glow. `accent_fg` is dark
+        # (`#04222c`), not white, because `#38bdf8` is a light sky-blue --
+        # white text on it would be a WCAG fail (measured ~2.2:1); this dark
+        # navy-black clears 7.72:1 un-hovered and 5.96:1 on `accent_hover`.
+        "window_bg": WINDOW_BG, "panel_bg": PANEL_BG, "field_bg": FIELD_BG, "border": BORDER,
+        "text": TEXT, "muted": MUTED, "subtle": SUBTLE,
+        "accent": "#38bdf8", "accent_hover": "#0ea5e9", "accent_fg": "#04222c",
+        "ghost_bg": GHOST_BG, "ghost_hover": GHOST_HOVER, "ghost_fg": GHOST_FG,
+        "danger": DANGER, "danger_hover": DANGER_HOVER, "danger_fg": DANGER_FG,
+        "chip_bg": CHIP_BG, "card_bg": "#20242c", "card_chip_bg": CHIP_BG, "card_status_bg": "#2f3440",
     },
     "aero": {
         # Frutiger-Aero-style aqua/teal glass. An initial navy candidate
@@ -169,16 +279,55 @@ GADGET_SKINS: Dict[str, dict] = {
         # uniformly darkened ~50% (same hue/saturation ratio, so it reads
         # as a deeper shade of the same teal, not a shift toward navy) to
         # #104d54. Flat-color contrast: ~9.5:1 (white clock_fg), ~9.0:1
-        # (#eafcff title_fg/border), ~8.8:1 (#e3fbff alert_fg). Worst-case
-        # translucency-blended contrast (85% bg / 15% bright-white desktop
-        # bleeding through the window -- same simulation `glass`'s own
-        # review comment already runs) drops those to ~6.3:1 / ~5.9:1 /
-        # ~5.8:1: still comfortably clear of the 4.5:1 floor with real
-        # margin even in the worst realistic case.
-        "bg": "#104d54", "border": "#eafcff", "title_fg": "#eafcff", "clock_fg": "#ffffff",
+        # (#eafcff title_fg/gadget_border), ~8.8:1 (#e3fbff alert_fg).
+        # Worst-case translucency-blended contrast (85% bg / 15%
+        # bright-white desktop bleeding through the window -- same
+        # simulation `glass`'s own review comment already runs) drops those
+        # to ~6.3:1 / ~5.9:1 / ~5.8:1: still comfortably clear of the 4.5:1
+        # floor with real margin even in the worst realistic case.
+        "bg": "#104d54", "gadget_border": "#eafcff", "title_fg": "#eafcff", "clock_fg": "#ffffff",
         "alert_fg": "#e3fbff", "close_hover_bg": DANGER, "alpha": 0.85, "label_key": "gadgetSkinAero",
+        # App-wide teal family, same hue as the gadget skin above.
+        # `window_bg` a darker teal than `panel_bg` (same "window sits
+        # behind, panel is the elevated surface" relationship every dark
+        # theme here uses), `field_bg` a lighter teal so input fields read
+        # as distinct, editable surfaces. text/window_bg 12.41:1,
+        # text/panel_bg 9.50:1, muted/panel_bg 8.04:1, subtle/panel_bg
+        # 6.09:1. `accent` is a bright aqua pop-color distinct from the
+        # teal bg family -- `accent_fg` is dark teal-black (`#00303a`), not
+        # white, for the same reason `neon`'s is dark: a bright accent needs
+        # dark text to clear 4.5:1 (7.83:1 un-hovered, 5.83:1 hovered).
+        # `danger` is a rose-red picked to read clearly as "destructive"
+        # against a teal bg without clashing hue-wise the way a
+        # green-tinted red might have.
+        "window_bg": "#0c3a3f", "panel_bg": "#104d54", "field_bg": "#14606a", "border": "#eafcff",
+        "text": "#ffffff", "muted": "#cdf3f8", "subtle": "#9fd9df",
+        "accent": "#22d3ee", "accent_hover": "#06b6d4", "accent_fg": "#00303a",
+        "ghost_bg": "#14606a", "ghost_hover": "#1b7680", "ghost_fg": "#eafcff",
+        "danger": "#e11d48", "danger_hover": "#be123c", "danger_fg": "#ffffff",
+        # `card_bg` was originally `#0e444a` (luminance 0.0472) -- DARKER than
+        # `panel_bg` (0.0606), the only one of the 3 dark themes where the
+        # "card is an elevated surface, lighter than the panel it sits on"
+        # staircase (window_bg < panel_bg < card_bg < card_chip_bg <
+        # card_status_bg -- true for classic/glass/neon) broke: a card would
+        # have read as sinking toward `window_bg`, not floating above
+        # `panel_bg`. Design review: `#14545c` (luminance 0.0726) sits
+        # between `panel_bg` and `card_chip_bg` as intended, restoring that
+        # same staircase (contrast card_bg/panel_bg 1.11:1, card_chip_bg/
+        # card_bg 1.09:1 -- comparable step sizes to the other themes'
+        # 1.06-1.14:1). Card text stays comfortably legible against it:
+        # text(#ffffff)/card_bg 8.56:1, muted(#cdf3f8)/card_bg 7.25:1.
+        "chip_bg": "#14606a", "card_bg": "#14545c", "card_chip_bg": "#175a63", "card_status_bg": "#1c6870",
     },
 }
+
+# Kept as a plain alias, not a second registry (v2.14.0): before this
+# feature, `GADGET_SKINS` was gadget mode's own private registry;
+# `apply_gadget_skin`/`_coerce_gadget_skin` (app.py) both still refer to it
+# by this name, and this alias means neither had to change at all when the
+# registry grew to cover the whole app -- there is exactly one dict here,
+# never two that could drift apart.
+GADGET_SKINS = APP_THEMES
 
 _CARD_PALETTE = {
     "card_bg": "#20242c",
@@ -195,7 +344,7 @@ _CARD_PALETTE = {
     "ghost_fg": GHOST_FG,
     "danger_bg": DANGER,
     "danger_hover": DANGER_HOVER,
-    "danger_fg": "#ffffff",
+    "danger_fg": DANGER_FG,
 }
 
 # A meeting card's actual content (color chip + title + one countdown/
@@ -683,10 +832,26 @@ class _HeaderWidgets:
     view_switch_buttons: List[Tuple[tk.Button, str]]
     gadget_button: tk.Button
     tray_button: tk.Button
+    theme_button: tk.Button
     donate_button: tk.Button
     exit_button: tk.Button
     header_frame: tk.Frame
     actions_frame: tk.Frame
+    # `title_box`/`chips_frame`/`exit_spacer` (v2.14.0): purely cosmetic
+    # background-only frames with no other role, so they were never worth a
+    # named field before `apply_theme` needed to reach them directly --
+    # everything else color-wise in this header is either a labeled
+    # widget/button already listed above, or one of the generic
+    # `MainWindow._panel_bg_frames`/`_window_bg_frames` tracking lists. These
+    # three specifically sit BETWEEN two already-tracked widgets in the
+    # tree (`title_box` wraps `title_label`/`subtitle_label`/`chips_frame`;
+    # `chips_frame` wraps `version_chip`/`storage_chip`; `exit_spacer` is
+    # the thin gap before `exit_button`), so leaving them untracked would
+    # show a stale-colored sliver behind/around widgets that DID get
+    # recolored.
+    title_box: tk.Frame
+    chips_frame: tk.Frame
+    exit_spacer: tk.Frame
     subtitle_truncate_job: Optional[str] = None
 
 
@@ -719,7 +884,13 @@ class Callbacks:
     on_week_slot_click: Callable[[date, int], None]
     on_toggle_week_column_mode: Callable[[], None]
     on_delete_series: Callable[[str], None]
-    on_set_gadget_skin: Callable[[str], None]
+    # Renamed from `on_set_gadget_skin` in v2.14.0 when the gadget-only skin
+    # picker grew into a whole-app theme picker (SDD.md v2.14.0) -- ONE
+    # callback now backs both entry points (the gadget's own picker button/
+    # right-click menu, and the new header theme button in the full
+    # window), per that version's "one setting, one switch, everywhere"
+    # decision, rather than two callbacks that could independently drift.
+    on_set_app_theme: Callable[[str], None]
     on_gadget_resize: Callable[[int, int], None]
 
 
@@ -732,6 +903,25 @@ def _button(
         parent, text=text, command=command, bg=bg, fg=fg, activebackground=hover, activeforeground=fg,
         relief="flat", borderwidth=0, padx=padx, pady=pady, cursor="hand2", font=(FONT_FAMILY, font_size), **extra,
     )
+    # Stored ON THE WIDGET (v2.14.0), not just closed over as `bg`/`hover`
+    # locals, so `MainWindow.apply_theme`'s later recolor sweep can update
+    # what a mouse-over flips this button's color TO without ever touching
+    # its `<Enter>`/`<Leave>` bindings. Before this, `bg`/`hover` were frozen
+    # at whatever this specific call's arguments were -- reassigning e.g.
+    # `main_window.GHOST_HOVER` after the fact would recolor the button's
+    # resting state (via a separate `.configure()` sweep) but the hover
+    # handlers below would keep swapping back to the OLD, now-stale hover
+    # color, since a plain closure has no way to see a later reassignment.
+    # The fix reads `btn._theme_base_bg`/`btn._theme_hover_bg` instead of
+    # `bg`/`hover` -- `apply_theme`'s sweep only ever needs to update these
+    # two attributes plus call `.configure()` once, and the handlers below
+    # (still bound exactly once, here, never rebound) automatically pick up
+    # the new values on the next real mouse-over. Rebinding all ~45+ buttons
+    # instead would hit this codebase's own documented recurring
+    # Tcl-command-leak bug class (see `_rebind`'s docstring) -- this
+    # attribute-based approach registers zero new Tcl commands, ever.
+    btn._theme_base_bg = bg
+    btn._theme_hover_bg = hover
     # `str(btn["state"])` check (SDD.md v2.11.0): the week-view toolbar's
     # "Editar"/"Eliminar" buttons are this file's first use of
     # `state="disabled"` on a `tk.Button` (see
@@ -740,8 +930,8 @@ def _button(
     # can't fire, a visual inconsistency nobody had reason to hit before
     # now. `<Leave>` needs no matching check: always restoring the base
     # color is correct regardless of state.
-    btn.bind("<Enter>", lambda _e: btn.configure(bg=hover) if str(btn["state"]) != "disabled" else None)
-    btn.bind("<Leave>", lambda _e: btn.configure(bg=bg))
+    btn.bind("<Enter>", lambda _e: btn.configure(bg=btn._theme_hover_bg) if str(btn["state"]) != "disabled" else None)
+    btn.bind("<Leave>", lambda _e: btn.configure(bg=btn._theme_base_bg))
     return btn
 
 
@@ -959,6 +1149,19 @@ class _ScrollablePanel(tk.Frame):
             self.canvas._root().deletecommand(self._wheel_funcid)
             self._wheel_funcid = None
 
+    def apply_bg(self, bg: str) -> None:
+        """Re-themes this panel's own background (v2.14.0) -- the frame
+        itself, its canvas, and `.body` all share one `bg` at construction
+        (see `__init__` above) and are never individually reconfigured
+        afterwards, so a theme switch needs exactly these three calls.
+        `self.scrollbar` is deliberately left alone: `tk.Scrollbar` doesn't
+        take these theme colors without a deeper native-vs-ttk rewrite this
+        feature doesn't need (same accepted gap as the manage-companies
+        dialog's own `tk.Scrollbar`, see SDD.md)."""
+        self.configure(bg=bg)
+        self.canvas.configure(bg=bg)
+        self.body.configure(bg=bg)
+
 
 class MainWindow:
     def __init__(self, root: tk.Tk, callbacks: Callbacks):
@@ -1053,6 +1256,39 @@ class MainWindow:
         # point every meeting card built afterwards picks it up immediately
         # (see `_create_card`) instead of waiting for its own resize event.
         self._card_title_wraplength_px: Optional[int] = None
+        # Last theme the meeting-list cards were actually built with (v2.14.0)
+        # -- `None` until the first `render_meeting_list` call, same
+        # bootstrapping as `_card_language`. `render_meeting_list` compares
+        # this against `self._app_theme` (set below by `_build_gadget_view`,
+        # then kept current by `apply_theme`) alongside its existing
+        # language check, and destroys+rebuilds every card on either
+        # mismatch -- see that method for why a full rebuild, not a
+        # per-field `.configure()`, is the right tool here (same reasoning
+        # as the existing language check: rare enough, and touches enough
+        # of each card, that a rebuild is simpler than chasing every field).
+        self._card_theme: Optional[str] = None
+        # `apply_theme` (v2.14.0) reassigns the module-level color constants
+        # (`WINDOW_BG`/`PANEL_BG`/etc.) directly -- most of this file's color
+        # logic reads those bare names fresh at call time and picks up a
+        # reassignment for free (calendar/week cell rendering, card
+        # creation, ...). What does NOT auto-pick-up a reassignment is any
+        # widget colored ONCE at construction and never revisited -- these
+        # two lists collect exactly those (appended by `_track_panel_frame`/
+        # `_track_window_frame` at construction time; NOT `_stat_card`'s
+        # CHIP_BG frames, which get their own `_chip_bg_frames` list right
+        # below), so `apply_theme`'s sweep can `.configure()` every one of
+        # them in two flat loops instead of hand-listing dozens of call
+        # sites individually.
+        self._panel_bg_frames: List[tk.Frame] = []
+        self._window_bg_frames: List[tk.Frame] = []
+        self._chip_bg_frames: List[tk.Frame] = []
+        # The week view's 24 static hour-axis labels ("00:00".."23:00", see
+        # `_build_week_view`) are never touched again after construction --
+        # unlike every other label in that view, there's no per-render text
+        # update to piggyback a color update onto either, so this needs its
+        # own small tracking list, same reasoning as the two frame lists
+        # above.
+        self._week_hour_axis_labels: List[tk.Label] = []
 
         self.root.configure(bg=WINDOW_BG)
         # A single, long-lived context menu (SDD.md v2.10.0), reused for
@@ -1064,11 +1300,42 @@ class MainWindow:
         # contents on every right-click does not accumulate orphaned Tcl
         # commands the way a repeated plain `.bind()` would (see `_rebind`'s
         # docstring) -- this widget is deliberately never destroyed/recreated.
-        self._context_menu = tk.Menu(self.root, tearoff=0)
+        # `background=`/`foreground=`/`activebackground=`/`activeforeground=`
+        # added in v2.14.0: before that, this menu rendered in native/OS
+        # colors (never themed at all), the one visible surface `apply_theme`
+        # couldn't already reach via a bare `.configure()` call because it
+        # didn't have one. Re-applied again in `apply_theme` itself so a
+        # later theme switch doesn't leave it stuck on whichever theme was
+        # active at construction.
+        self._context_menu = tk.Menu(
+            self.root, tearoff=0, background=FIELD_BG, foreground=TEXT,
+            activebackground=ACCENT, activeforeground=ACCENT_FG,
+        )
         self._configure_ttk_style()
         self._build_layout()
         self.apply_translations(i18n.DEFAULT_LANGUAGE)
         self.clear_form()
+
+    def _track_panel_frame(self, parent, **extra) -> tk.Frame:
+        """Builds a plain PANEL_BG-background `tk.Frame` (a container with no
+        other role -- see `_panel_bg_frames`'s own comment) and remembers it
+        so `apply_theme` can recolor it later without this file needing a
+        named `self.` attribute for every such frame individually."""
+        frame = tk.Frame(parent, bg=PANEL_BG, **extra)
+        self._panel_bg_frames.append(frame)
+        return frame
+
+    def _track_window_frame(self, parent, **extra) -> tk.Frame:
+        """Same as `_track_panel_frame`, for the WINDOW_BG family instead."""
+        frame = tk.Frame(parent, bg=WINDOW_BG, **extra)
+        self._window_bg_frames.append(frame)
+        return frame
+
+    def _track_chip_frame(self, parent, **extra) -> tk.Frame:
+        """Same idea, for `_stat_card`'s outer CHIP_BG frame."""
+        frame = tk.Frame(parent, bg=CHIP_BG, **extra)
+        self._chip_bg_frames.append(frame)
+        return frame
 
     def _configure_ttk_style(self) -> None:
         """The work-field combobox (see `_build_form`) is the only ttk widget
@@ -1114,7 +1381,7 @@ class MainWindow:
         self.root.grid_columnconfigure(0, weight=1)
         self.root.grid_rowconfigure(0, weight=1)
 
-        self.full_view = tk.Frame(self.root, bg=WINDOW_BG)
+        self.full_view = self._track_window_frame(self.root)
         self.full_view.grid(row=0, column=0, sticky="nsew")
         self.full_view.grid_columnconfigure(0, weight=1)
         self.full_view.grid_rowconfigure(1, weight=1)
@@ -1131,7 +1398,7 @@ class MainWindow:
         )
         self._headers.append(self.full_header)
 
-        body = tk.Frame(self.full_view, bg=WINDOW_BG)
+        body = self._track_window_frame(self.full_view)
         body.grid(row=1, column=0, sticky="nsew", padx=16, pady=(0, 16))
         body.grid_columnconfigure(0, weight=1, minsize=340)
         body.grid_columnconfigure(1, weight=2)
@@ -1174,7 +1441,7 @@ class MainWindow:
         # row's `weight=0` actions column needed the deficit absorbed.
         header.grid_columnconfigure(0, weight=1, minsize=self._header_title_column_minsize())
 
-        title_box = tk.Frame(header, bg=PANEL_BG)
+        title_box = self._track_panel_frame(header)
         title_box.grid(row=0, column=0, sticky="w", padx=_HEADER_TITLE_BOX_PADX, pady=14)
         title_label = tk.Label(
             title_box, text="TimerMeet", font=(FONT_FAMILY, 24, "bold"), bg=PANEL_BG, fg=TEXT,
@@ -1185,7 +1452,7 @@ class MainWindow:
         )
         subtitle_label.pack(anchor="w", pady=(2, 0))
 
-        chips = tk.Frame(title_box, bg=PANEL_BG)
+        chips = self._track_panel_frame(title_box)
         chips.pack(anchor="w", pady=(10, 0))
         version_chip = tk.Label(
             chips, text="", bg=CHIP_BG, fg=MUTED, padx=10, pady=4, font=(FONT_FAMILY, 10),
@@ -1238,6 +1505,25 @@ class MainWindow:
             padx=_HEADER_BUTTON_PADX, font_size=_HEADER_BUTTON_FONT_SIZE,
         )
         tray_button.pack(side="left", padx=_HEADER_BUTTON_GAP_PX)
+        # Whole-app theme picker (v2.14.0/SDD.md v2.14.0): icon-only, reusing
+        # the same glyph the gadget's own picker button already uses
+        # (`gadgetSkinButtonGlyph`) rather than a full text label -- this
+        # header row's width budget is already at its documented limit at
+        # the app's 960px floor (see `_HEADER_BUTTON_PADX`'s comment block
+        # above: ~27-39px of slack in the worst-case Spanish text), so a
+        # full-word button here risked reintroducing the exact
+        # Donar/Salir-pushed-off-screen bug that whole comment block exists
+        # to prevent. `_show_app_theme_menu` populates the SAME long-lived
+        # `self._context_menu` the gadget's own picker uses, via the shared
+        # `_populate_app_theme_menu` helper -- one registry, one menu, one
+        # callback (`on_set_app_theme`) no matter which of the two buttons
+        # opened it.
+        theme_button = _button(
+            actions, i18n.t("gadgetSkinButtonGlyph", self.language), None, GHOST_BG, GHOST_FG, GHOST_HOVER,
+            padx=_HEADER_BUTTON_PADX, font_size=_HEADER_BUTTON_FONT_SIZE,
+        )
+        theme_button.pack(side="left", padx=_HEADER_BUTTON_GAP_PX)
+        theme_button.bind("<Button-1>", self._show_app_theme_menu)
         donate_button = _button(
             actions, "", self._open_donate, GOLD_BG, GOLD_FG, GOLD_HOVER,
             padx=_HEADER_BUTTON_PADX, font_size=_HEADER_BUTTON_FONT_SIZE,
@@ -1246,9 +1532,10 @@ class MainWindow:
         # A thin visual gap sets "Salir" apart from the utility buttons --
         # it's the one action in this row that ends the whole app, not just
         # toggles a setting or opens a link, so it shouldn't blend in.
-        tk.Frame(actions, bg=PANEL_BG, width=_HEADER_EXIT_SPACER_PX).pack(side="left")
+        exit_spacer = self._track_panel_frame(actions, width=_HEADER_EXIT_SPACER_PX)
+        exit_spacer.pack(side="left")
         exit_button = _button(
-            actions, "", self.callbacks.on_exit, DANGER, "#ffffff", DANGER_HOVER,
+            actions, "", self.callbacks.on_exit, DANGER, DANGER_FG, DANGER_HOVER,
             padx=_HEADER_BUTTON_PADX, font_size=_HEADER_BUTTON_FONT_SIZE,
         )
         exit_button.pack(side="left", padx=_HEADER_BUTTON_GAP_PX)
@@ -1257,8 +1544,9 @@ class MainWindow:
             title_label=title_label, subtitle_label=subtitle_label, version_chip=version_chip,
             storage_chip=storage_chip, notify_button=notify_button, language_button=language_button,
             view_switch_buttons=view_switch_buttons,
-            gadget_button=gadget_button, tray_button=tray_button, donate_button=donate_button,
-            exit_button=exit_button, header_frame=header, actions_frame=actions,
+            gadget_button=gadget_button, tray_button=tray_button, theme_button=theme_button,
+            donate_button=donate_button, exit_button=exit_button, header_frame=header, actions_frame=actions,
+            title_box=title_box, chips_frame=chips, exit_spacer=exit_spacer,
         )
         # Recomputes the subtitle's ellipsis truncation whenever this specific
         # header actually resizes (see `_schedule_subtitle_update`/
@@ -1366,6 +1654,11 @@ class MainWindow:
         outer = _ScrollablePanel(parent, bg=PANEL_BG)
         outer.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
         panel = outer.body
+        # Kept on `self` (v2.14.0) so `apply_theme` can re-theme this
+        # `_ScrollablePanel`'s own frame/canvas/body backgrounds -- `outer`
+        # was previously a local variable with nothing else ever reaching
+        # back into it after construction.
+        self._form_scroll = outer
 
         self.form_eyebrow = tk.Label(panel, text="", font=(FONT_FAMILY, 10), bg=PANEL_BG, fg=MUTED)
         self.form_eyebrow.pack(anchor="w", pady=(10, 0), padx=10)
@@ -1378,7 +1671,7 @@ class MainWindow:
 
         self.meeting_id_var = tk.StringVar(value="")
 
-        work_header = tk.Frame(panel, bg=PANEL_BG)
+        work_header = self._track_panel_frame(panel)
         work_header.pack(fill="x", padx=10)
         self.work_label = tk.Label(
             work_header, text="", font=(FONT_FAMILY, 11, "bold"), anchor="w", bg=PANEL_BG, fg=TEXT
@@ -1398,15 +1691,15 @@ class MainWindow:
         self.title_entry = _entry(panel)
         self.title_entry.pack(fill="x", padx=10, pady=(0, 10))
 
-        date_row = tk.Frame(panel, bg=PANEL_BG)
+        date_row = self._track_panel_frame(panel)
         date_row.pack(fill="x", padx=10, pady=(0, 4))
         date_row.grid_columnconfigure((0, 1), weight=1)
-        date_col = tk.Frame(date_row, bg=PANEL_BG)
+        date_col = self._track_panel_frame(date_row)
         date_col.grid(row=0, column=0, sticky="ew", padx=(0, 4))
         self.date_label = self._add_label(date_col)
         self.date_entry = _entry(date_col)
         self.date_entry.pack(fill="x")
-        time_col = tk.Frame(date_row, bg=PANEL_BG)
+        time_col = self._track_panel_frame(date_row)
         time_col.grid(row=0, column=1, sticky="ew", padx=(4, 0))
         self.time_label = self._add_label(time_col)
         self.time_entry = _entry(time_col)
@@ -1415,16 +1708,16 @@ class MainWindow:
         self.set_now_button = _button(panel, "", self.callbacks.on_set_now, GHOST_BG, GHOST_FG, GHOST_HOVER)
         self.set_now_button.pack(anchor="w", padx=10, pady=(8, 10))
 
-        reminder_row = tk.Frame(panel, bg=PANEL_BG)
+        reminder_row = self._track_panel_frame(panel)
         reminder_row.pack(fill="x", padx=10, pady=(0, 4))
         reminder_row.grid_columnconfigure((0, 1), weight=1)
-        reminder_col = tk.Frame(reminder_row, bg=PANEL_BG)
+        reminder_col = self._track_panel_frame(reminder_row)
         reminder_col.grid(row=0, column=0, sticky="ew", padx=(0, 4))
         self.reminder_label = self._add_label(reminder_col)
         self.reminder_entry = _entry(reminder_col)
         self.reminder_entry.insert(0, "15")
         self.reminder_entry.pack(fill="x")
-        sound_col = tk.Frame(reminder_row, bg=PANEL_BG)
+        sound_col = self._track_panel_frame(reminder_row)
         sound_col.grid(row=0, column=1, sticky="ew", padx=(4, 0))
         self.sound_label = self._add_label(sound_col)
         self.sound_menu, self._sound_menu_widget = self._make_option_menu(sound_col, self._sound_profile_var)
@@ -1433,17 +1726,17 @@ class MainWindow:
         self.test_sound_button = _button(panel, "", self._handle_test_sound, GHOST_BG, GHOST_FG, GHOST_HOVER)
         self.test_sound_button.pack(anchor="w", padx=10, pady=(8, 10))
 
-        recur_row = tk.Frame(panel, bg=PANEL_BG)
+        recur_row = self._track_panel_frame(panel)
         recur_row.pack(fill="x", padx=10, pady=(0, 4))
         recur_row.grid_columnconfigure((0, 1), weight=1)
-        recur_col = tk.Frame(recur_row, bg=PANEL_BG)
+        recur_col = self._track_panel_frame(recur_row)
         recur_col.grid(row=0, column=0, sticky="ew", padx=(0, 4))
         self.recurrence_label = self._add_label(recur_col)
         self.recurrence_menu, self._recurrence_menu_widget = self._make_option_menu(
             recur_col, self._recurrence_var, command=self._handle_recurrence_change
         )
         self.recurrence_menu.pack(fill="x")
-        occ_col = tk.Frame(recur_row, bg=PANEL_BG)
+        occ_col = self._track_panel_frame(recur_row)
         occ_col.grid(row=0, column=1, sticky="ew", padx=(4, 0))
         self.occurrence_label = self._add_label(occ_col)
         self.occurrence_entry = _entry(occ_col)
@@ -1468,7 +1761,7 @@ class MainWindow:
         )
         self.notes_text.pack(fill="x", padx=10, pady=(0, 10))
 
-        actions_row = tk.Frame(panel, bg=PANEL_BG)
+        actions_row = self._track_panel_frame(panel)
         actions_row.pack(fill="x", padx=10, pady=(4, 4))
         self.save_button = _button(actions_row, "", self._handle_save, ACCENT, ACCENT_FG, ACCENT_HOVER)
         self.save_button.pack(side="left", padx=(0, 8))
@@ -1505,12 +1798,12 @@ class MainWindow:
             menu.add_command(label=value, command=lambda v=value: _select(v))
 
     def _build_summary(self, parent) -> None:
-        panel = tk.Frame(parent, bg=PANEL_BG)
+        panel = self._track_panel_frame(parent)
         panel.grid(row=0, column=1, sticky="nsew")
         panel.grid_rowconfigure(5, weight=1)
         panel.grid_columnconfigure(0, weight=1)
 
-        header = tk.Frame(panel, bg=PANEL_BG)
+        header = self._track_panel_frame(panel)
         header.grid(row=0, column=0, sticky="ew", padx=14, pady=(14, 4))
         self.stats_eyebrow = tk.Label(header, text="", font=(FONT_FAMILY, 10), bg=PANEL_BG, fg=MUTED)
         self.stats_eyebrow.pack(anchor="w")
@@ -1521,20 +1814,20 @@ class MainWindow:
         )
         self.notification_hint_label.pack(anchor="w", pady=(2, 0))
 
-        status_grid = tk.Frame(panel, bg=PANEL_BG)
+        status_grid = self._track_panel_frame(panel)
         status_grid.grid(row=1, column=0, sticky="ew", padx=14, pady=4)
         status_grid.grid_columnconfigure((0, 1), weight=1)
         self.current_time_card = self._stat_card(status_grid, 0)
         self.next_alert_card = self._stat_card(status_grid, 1)
 
-        stats_grid = tk.Frame(panel, bg=PANEL_BG)
+        stats_grid = self._track_panel_frame(panel)
         stats_grid.grid(row=2, column=0, sticky="ew", padx=14, pady=4)
         stats_grid.grid_columnconfigure((0, 1, 2), weight=1)
         self.total_card = self._stat_card(stats_grid, 0)
         self.today_card = self._stat_card(stats_grid, 1)
         self.next_meeting_card = self._stat_card(stats_grid, 2)
 
-        toolbar = tk.Frame(panel, bg=PANEL_BG)
+        toolbar = self._track_panel_frame(panel)
         toolbar.grid(row=3, column=0, sticky="ew", padx=14, pady=(8, 4))
         self.filter_label = tk.Label(toolbar, text="", font=(FONT_FAMILY, 10, "bold"), bg=PANEL_BG, fg=TEXT)
         self.filter_label.pack(anchor="w")
@@ -1548,7 +1841,7 @@ class MainWindow:
         )
         self.clear_past_button.pack(anchor="w", pady=(8, 0))
 
-        list_header = tk.Frame(panel, bg=PANEL_BG)
+        list_header = self._track_panel_frame(panel)
         list_header.grid(row=4, column=0, sticky="ew", padx=14, pady=(8, 4))
         self.list_title_label = tk.Label(list_header, text="", font=(FONT_FAMILY, 13, "bold"), bg=PANEL_BG, fg=TEXT)
         self.list_title_label.pack(side="left")
@@ -1564,6 +1857,8 @@ class MainWindow:
         list_container.grid(row=5, column=0, sticky="nsew", padx=14, pady=(0, 14))
         self.meeting_list_frame = list_container.body
         self.meeting_list_frame.grid_columnconfigure(0, weight=1)
+        # Same reasoning as `self._form_scroll` above.
+        self._list_scroll = list_container
 
     def _on_meeting_list_width_change(self, width: int) -> None:
         """Keeps every meeting card's title label wrapping at the card's
@@ -1588,7 +1883,7 @@ class MainWindow:
             widgets.title_label.configure(wraplength=wraplength)
 
     def _stat_card(self, parent, column: int) -> Dict[str, tk.Label]:
-        card = tk.Frame(parent, bg=CHIP_BG)
+        card = self._track_chip_frame(parent)
         card.grid(row=0, column=column, sticky="ew", padx=4, pady=4)
         label = tk.Label(card, text="", font=(FONT_FAMILY, 9), bg=CHIP_BG, fg=MUTED)
         label.pack(anchor="w", padx=10, pady=(8, 0))
@@ -1607,13 +1902,16 @@ class MainWindow:
         `set_gadget_mode`'s docstring for why that matters for the alarm)."""
         self.gadget_view = tk.Frame(self.root, bg=PANEL_BG, highlightthickness=1, highlightbackground=BORDER)
 
-        # Tracks the active skin key for the menu's `add_radiobutton`s (see
-        # `_show_gadget_skin_menu`) and for `apply_gadget_skin`'s bookkeeping.
-        # `self._gadget_skin` (a plain attribute, not a Tk var) is what
-        # `set_gadget_mode` reads back on next entry so a skin choice survives
-        # a full-window round trip within the same session.
-        self._gadget_skin_var = tk.StringVar(value=GADGET_DEFAULT_SKIN)
-        self._gadget_skin = GADGET_DEFAULT_SKIN
+        # Tracks the active theme key for the menu's `add_radiobutton`s (see
+        # `_populate_app_theme_menu`) and for `apply_gadget_skin`'s/
+        # `apply_theme`'s bookkeeping -- ONE variable/attribute pair for both
+        # the gadget's own picker and the full window's header picker
+        # (v2.14.0), since choosing either now sets the same underlying
+        # theme. `self._app_theme` (a plain attribute, not a Tk var) is what
+        # `set_gadget_mode` reads back on next entry so a theme choice
+        # survives a full-window round trip within the same session.
+        self._app_theme_var = tk.StringVar(value=APP_DEFAULT_THEME)
+        self._app_theme = APP_DEFAULT_THEME
 
         # Stored as an attribute (not a local `strip` variable) so
         # `apply_gadget_skin` can recolor it later without needing a second
@@ -1710,7 +2008,7 @@ class MainWindow:
         (build on first toggle instead of here), not the default.
         `set_active_view` grids it in/out; it starts ungridded because the
         default primary view is the list."""
-        self.calendar_view = tk.Frame(self.root, bg=WINDOW_BG)
+        self.calendar_view = self._track_window_frame(self.root)
         self.calendar_view.grid_columnconfigure(0, weight=1)
         self.calendar_view.grid_rowconfigure(3, weight=1)
 
@@ -1719,7 +2017,7 @@ class MainWindow:
         )
         self._headers.append(self.calendar_header)
 
-        nav = tk.Frame(self.calendar_view, bg=PANEL_BG)
+        nav = self._track_panel_frame(self.calendar_view)
         nav.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 8))
         self.calendar_prev_button = _button(
             nav, "", self.callbacks.on_calendar_prev_month, GHOST_BG, GHOST_FG, GHOST_HOVER
@@ -1736,7 +2034,7 @@ class MainWindow:
         self.calendar_today_button = _button(nav, "", self.callbacks.on_calendar_today, GHOST_BG, GHOST_FG, GHOST_HOVER)
         self.calendar_today_button.pack(side="left")
 
-        weekday_row = tk.Frame(self.calendar_view, bg=WINDOW_BG)
+        weekday_row = self._track_window_frame(self.calendar_view)
         weekday_row.grid(row=2, column=0, sticky="ew", padx=16)
         for col in range(CALENDAR_COLS):
             weekday_row.grid_columnconfigure(col, weight=1)
@@ -1744,7 +2042,7 @@ class MainWindow:
             label.grid(row=0, column=col, sticky="ew", pady=(0, 4))
             self._calendar_weekday_labels.append(label)
 
-        grid_frame = tk.Frame(self.calendar_view, bg=WINDOW_BG)
+        grid_frame = self._track_window_frame(self.calendar_view)
         grid_frame.grid(row=3, column=0, sticky="nsew", padx=16, pady=(0, 16))
         for row in range(CALENDAR_ROWS):
             grid_frame.grid_rowconfigure(row, weight=1)
@@ -1816,7 +2114,7 @@ class MainWindow:
         was deliberately rejected as a new surface for the exact class of
         Tcl-command-leak bug this codebase has already hit twice.
         """
-        self.week_view = tk.Frame(self.root, bg=WINDOW_BG)
+        self.week_view = self._track_window_frame(self.root)
         self.week_view.grid_columnconfigure(0, weight=1)
         self.week_view.grid_rowconfigure(3, weight=1)
 
@@ -1825,7 +2123,7 @@ class MainWindow:
         )
         self._headers.append(self.week_header)
 
-        nav = tk.Frame(self.week_view, bg=PANEL_BG)
+        nav = self._track_panel_frame(self.week_view)
         nav.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 8))
         # Prev/Next/Today route through small wrapper methods rather than
         # straight to the callbacks (SDD.md v2.11.0): each wrapper clears
@@ -1884,7 +2182,7 @@ class MainWindow:
         self.week_edit_button.configure(state="disabled")
         self.week_delete_button.configure(state="disabled")
 
-        day_header_row = tk.Frame(self.week_view, bg=WINDOW_BG)
+        day_header_row = self._track_window_frame(self.week_view)
         # Stashed on `self` (used to be a bare local) so `set_week_column_mode`
         # can reach this frame's `grid_columnconfigure` later, for the
         # work-week toggle (SDD.md v2.10.0) -- see that method.
@@ -1917,10 +2215,12 @@ class MainWindow:
         # (see `_WEEK_SCROLLBAR_SPACER_PX`) so this fixed header row's 7 day
         # columns keep lining up with the day columns of the scrollable grid
         # below it, which give up that same width to their scrollbar.
-        tk.Frame(day_header_row, bg=WINDOW_BG, width=_WEEK_SCROLLBAR_SPACER_PX).grid(row=0, column=WEEK_COLS + 1)
+        self._track_window_frame(day_header_row, width=_WEEK_SCROLLBAR_SPACER_PX).grid(row=0, column=WEEK_COLS + 1)
 
         scroll_panel = _ScrollablePanel(self.week_view, bg=WINDOW_BG)
         scroll_panel.grid(row=3, column=0, sticky="nsew", padx=16, pady=(0, 16))
+        # Same reasoning as `self._form_scroll`/`self._list_scroll` above.
+        self._week_scroll = scroll_panel
         # `scroll_panel.body` doubles as the "grid_frame" SDD.md describes --
         # column 0 is the hour axis, columns 1-7 are the 7 day columns, and
         # it scrolls as one unit (the hour axis is NOT pinned, see decision
@@ -1948,6 +2248,7 @@ class MainWindow:
                 grid_frame, text=f"{row:02d}:00", font=(FONT_FAMILY, 9), bg=WINDOW_BG, fg=MUTED, anchor="ne",
             )
             hour_label.grid(row=row, column=0, sticky="nsew", padx=(0, 4))
+            self._week_hour_axis_labels.append(hour_label)
             for col in range(WEEK_COLS):
                 self._week_cells.append(self._build_week_cell(grid_frame, row, col))
 
@@ -2891,7 +3192,7 @@ class MainWindow:
         only meaningful on the `is_gadget=True` branch and are all optional:
         an absent `width`/`height` falls back to the original fixed
         `GADGET_WIDTH`/`GADGET_HEIGHT`, and an absent `skin` falls back to
-        whatever `self._gadget_skin` was last set to (or the default skin on
+        whatever `self._app_theme` was last set to (or the default theme on
         the very first call, before `_build_gadget_view` has ever run
         `apply_gadget_skin`) -- so a caller that only cares about position
         (the original two-argument call, still used in a couple of places)
@@ -2924,7 +3225,7 @@ class MainWindow:
             self.gadget_next_alert_label.configure(wraplength=gadget_width - GADGET_ALERT_WRAP_MARGIN)
             clock_font_size = max(16, min(40, gadget_width // 12))
             self.gadget_clock_label.configure(font=(FONT_FAMILY, clock_font_size, "bold"))
-            self.apply_gadget_skin(skin or getattr(self, "_gadget_skin", GADGET_DEFAULT_SKIN))
+            self.apply_gadget_skin(skin or getattr(self, "_app_theme", APP_DEFAULT_THEME))
         else:
             self.root.withdraw()
             self.root.overrideredirect(False)
@@ -2946,15 +3247,18 @@ class MainWindow:
 
     def apply_gadget_skin(self, skin_key: str) -> None:
         """Recolors every widget built once in `_build_gadget_view` to match
-        `skin_key` (falling back to the default skin for an unknown/corrupted
-        key, same defensive style as `_coerce_gadget_skin` in app.py) --
-        never rebuilds them. `-alpha` is a root-window-wide Tk attribute
-        (there's no per-frame transparency), so it's set here on `self.root`
-        directly rather than on any individual widget; `set_gadget_mode`'s
-        `False` branch is responsible for resetting it back to 1.0 on the
-        way out, since this method is never called there."""
+        `skin_key` (falling back to the default theme for an unknown/
+        corrupted key, same defensive style as `_coerce_app_theme` in
+        app.py) -- never rebuilds them. `-alpha` is a root-window-wide Tk
+        attribute (there's no per-frame transparency), so it's set here on
+        `self.root` directly rather than on any individual widget;
+        `set_gadget_mode`'s `False` branch is responsible for resetting it
+        back to 1.0 on the way out, since this method is never called
+        there. Also called from `apply_theme` (v2.14.0) so gadget mode
+        (whether active right now or not) always matches whatever theme was
+        just picked for the full window, through this same unchanged logic."""
         skin = GADGET_SKINS.get(skin_key, GADGET_SKINS[GADGET_DEFAULT_SKIN])
-        self.gadget_view.configure(bg=skin["bg"], highlightbackground=skin["border"])
+        self.gadget_view.configure(bg=skin["bg"], highlightbackground=skin["gadget_border"])
         self._gadget_strip.configure(bg=skin["bg"])
         self.gadget_title_label.configure(bg=skin["bg"], fg=skin["title_fg"])
         self.gadget_close_button.configure(bg=skin["bg"], fg=skin["title_fg"], activebackground=skin["close_hover_bg"])
@@ -2964,18 +3268,28 @@ class MainWindow:
         self.gadget_next_alert_label.configure(bg=skin["bg"], fg=skin["alert_fg"])
         self.gadget_resize_grip.configure(bg=skin["bg"], fg=skin["title_fg"])
         self.root.attributes("-alpha", skin["alpha"])
-        self._gadget_skin_var.set(skin_key)
-        self._gadget_skin = skin_key
+        self._app_theme_var.set(skin_key)
+        self._app_theme = skin_key
+
+    def _populate_app_theme_menu(self) -> None:
+        """Shared by both theme-picker entry points (v2.14.0): the gadget's
+        own picker (`_show_gadget_skin_menu`, right-click-anywhere-on-gadget
+        or its palette-icon button) and the full window's header picker
+        (`_show_app_theme_menu`). Both repopulate the SAME long-lived
+        `self._context_menu` with one radiobutton per `APP_THEMES` entry and
+        dispatch the same `on_set_app_theme` callback -- one registry, one
+        menu, one callback, regardless of which button opened it."""
+        self._context_menu.delete(0, "end")
+        for key, theme in APP_THEMES.items():
+            self._context_menu.add_radiobutton(
+                label=i18n.t(theme["label_key"], self.language),
+                variable=self._app_theme_var,
+                value=key,
+                command=lambda k=key: self.callbacks.on_set_app_theme(k),
+            )
 
     def _show_gadget_skin_menu(self, event) -> None:
-        self._context_menu.delete(0, "end")
-        for key, skin in GADGET_SKINS.items():
-            self._context_menu.add_radiobutton(
-                label=i18n.t(skin["label_key"], self.language),
-                variable=self._gadget_skin_var,
-                value=key,
-                command=lambda k=key: self.callbacks.on_set_gadget_skin(k),
-            )
+        self._populate_app_theme_menu()
         # `_gadget_menu_open` brackets the entire time this native popup menu
         # is on screen so `keep_gadget_on_top` (heartbeat-driven, every 1s)
         # can skip its `root.lift()` / `-topmost` reassertion while the menu
@@ -2987,6 +3301,15 @@ class MainWindow:
             self._show_context_menu(event)
         finally:
             self._gadget_menu_open = False
+
+    def _show_app_theme_menu(self, event) -> None:
+        """The header button's entry point (v2.14.0) -- reachable only from
+        `full_view`/`calendar_view`/`week_view`'s header, never while gadget
+        mode is active (that frame isn't gridded then), so this doesn't need
+        `_show_gadget_skin_menu`'s `_gadget_menu_open` guard: `keep_gadget_on_top`
+        is already a no-op whenever `_gadget_active` is `False`."""
+        self._populate_app_theme_menu()
+        self._show_context_menu(event)
 
     def keep_gadget_on_top(self, is_alarm_active: bool) -> None:
         """Called every heartbeat tick from app.py; a near-zero-cost no-op
@@ -3148,7 +3471,7 @@ class MainWindow:
         bottom_row = tk.Frame(dialog, bg=PANEL_BG)
         bottom_row.pack(fill="x", padx=14, pady=(0, 14))
         _button(
-            bottom_row, i18n.t("removeCompanyButton", self.language), _remove_selected, DANGER, "#ffffff", DANGER_HOVER
+            bottom_row, i18n.t("removeCompanyButton", self.language), _remove_selected, DANGER, DANGER_FG, DANGER_HOVER
         ).pack(side="left")
         _button(
             bottom_row, i18n.t("closeButton", self.language), self._close_manage_companies, GHOST_BG, GHOST_FG, GHOST_HOVER
@@ -3317,16 +3640,34 @@ class MainWindow:
         window and make an in-progress resize/move look like it "snapped"
         once Tk finally caught up. Only meetings that appear/disappear (a
         save, delete, or filter change) still pay for real widget churn."""
-        if self._card_language != self.language:
+        if self._card_language != self.language or self._card_theme != self._app_theme:
             # A language toggle is the one case a per-field .configure()
             # can't reach cleanly (every label and all 3 button texts would
             # need updating) -- rare enough (a deliberate user action, never
             # a per-tick event) that a one-time full rebuild is simpler and
-            # cheap relative to how infrequently it happens.
+            # cheap relative to how infrequently it happens. A theme switch
+            # (v2.14.0) joins this same check for the same reason: every
+            # card's colors come from `_CARD_PALETTE`, which `apply_theme`
+            # reassigns wholesale but never retroactively re-applies to
+            # already-built card widgets (same "colored once at
+            # construction" category as everything else `apply_theme`'s own
+            # sweep handles explicitly) -- reusing this existing rebuild
+            # path is simpler and no riskier than adding a second, parallel
+            # per-field recolor pass just for cards.
             for widgets in self._card_widgets.values():
                 widgets.frame.destroy()
             self._card_widgets.clear()
             self._card_language = self.language
+            self._card_theme = self._app_theme
+            # The empty-state placeholder (below) is a SEPARATE widget from
+            # `_card_widgets` -- not destroyed by the loop above, so without
+            # this it would keep showing this OLD theme's `PANEL_BG` for as
+            # long as the list stayed empty across a theme switch (a real,
+            # if narrow, gap: rebuilt fresh on its next natural transition
+            # out of the empty state, but not before).
+            if self._empty_state_frame is not None:
+                self._empty_state_frame.destroy()
+                self._empty_state_frame = None
 
         new_ids = {card_data.meeting.id for card_data in cards}
         for meeting_id in list(self._card_widgets.keys()):
@@ -3460,6 +3801,7 @@ class MainWindow:
                 button.configure(text=tr(key))
             header.gadget_button.configure(text=tr("gadgetModeButton"))
             header.tray_button.configure(text=tr("trayModeButton"))
+            header.theme_button.configure(text=tr("gadgetSkinButtonGlyph"))
             header.donate_button.configure(text=tr("buyBeer"))
             header.exit_button.configure(text=tr("exitButton"))
 
@@ -3553,3 +3895,299 @@ class MainWindow:
             self._handle_recurrence_change,
         )
         self._recurrence_var.set(self._recurrence_label_for(previous_id))
+
+    # -- theming (v2.14.0) --------------------------------------------------------
+
+    def _restyle_button(self, btn: tk.Button, bg: str, fg: str, hover: str) -> None:
+        """Re-themes an already-built `_button()` widget in place: updates
+        both the widget's own colors and the `_theme_base_bg`/
+        `_theme_hover_bg` attributes its never-rebound `<Enter>`/`<Leave>`
+        handlers read from (see `_button`'s own comment) -- no `.bind()`
+        call here, ever."""
+        btn.configure(bg=bg, fg=fg, activebackground=hover, activeforeground=fg)
+        btn._theme_base_bg = bg
+        btn._theme_hover_bg = hover
+
+    def _restyle_entry(self, entry) -> None:
+        """Re-themes an already-built `_entry()` widget (or the one
+        `tk.Text`, `notes_text`, built with the exact same colors) in
+        place -- mirrors that helper's own construction kwargs exactly."""
+        entry.configure(bg=FIELD_BG, fg=TEXT, insertbackground=TEXT, highlightbackground=BORDER, highlightcolor=ACCENT)
+
+    def _restyle_option_menu(self, menu_button: tk.OptionMenu) -> None:
+        """Re-themes an already-built `_make_option_menu()` widget (its
+        button face AND its cascade `["menu"]`) in place -- mirrors that
+        helper's own construction kwargs exactly."""
+        menu_button.configure(
+            bg=FIELD_BG, fg=TEXT, activebackground=ACCENT, activeforeground=ACCENT_FG,
+            highlightbackground=BORDER,
+        )
+        menu_button["menu"].configure(bg=FIELD_BG, fg=TEXT, activebackground=ACCENT, activeforeground=ACCENT_FG)
+
+    def apply_theme(self, theme_key: str) -> None:
+        """Applies one of `APP_THEMES` to the WHOLE app (SDD.md v2.14.0) --
+        header, form, meeting list, monthly calendar, weekly calendar, and
+        (via `apply_gadget_skin` at the end) gadget mode too. Structured
+        like `apply_translations` above: one long, flat, section-by-section
+        sweep, but for colors instead of text.
+
+        Falls back to the default theme for an unknown/corrupted key, same
+        defensive style `apply_gadget_skin`/`_coerce_app_theme` (app.py)
+        already use.
+
+        Three parts, in order:
+          1. Reassign the module-level color constants themselves -- most
+             of this file's color logic (calendar/week cell rendering,
+             meeting-card creation via `_CARD_PALETTE`, ...) reads those
+             bare names fresh at call time, so this one step is what makes
+             all of that pick up the new theme for free, with none of the
+             explicit `.configure()` calls in part 2 needing to duplicate
+             that logic.
+          2. Explicit `.configure()` calls for every widget colored ONCE at
+             construction and never revisited naturally -- the header(s),
+             form, summary chrome, calendar/week cell frames, nav bars, the
+             context menu, and the ttk style/Combobox. Deliberately does
+             NOT touch anything `_update_calendar_cell`/`_update_week_cell`
+             already re-colors on every real render (day numbers, meeting
+             entry chips) -- `handle_set_app_theme` (app.py) invalidates
+             those views' own render-skip signatures so the very next
+             heartbeat tick re-renders them with the just-reassigned
+             constants; duplicating that here would be redundant, not
+             wrong, but this file's own module docstring already warns
+             against speculative extra work.
+          3. Hand off to `apply_gadget_skin` (gadget mode) and set the root
+             window's own `-alpha`, so translucent themes (glass/aero) make
+             the FULL window translucent too, not just the gadget.
+        """
+        theme = APP_THEMES.get(theme_key, APP_THEMES[APP_DEFAULT_THEME])
+        self._app_theme = theme_key
+
+        # -- 1. reassign the module-level constants ---------------------------
+        global WINDOW_BG, PANEL_BG, FIELD_BG, BORDER, TEXT, MUTED, SUBTLE
+        global ACCENT, ACCENT_HOVER, ACCENT_FG, GHOST_BG, GHOST_HOVER, GHOST_FG
+        global DANGER, DANGER_HOVER, DANGER_FG, CHIP_BG, _CARD_PALETTE
+        WINDOW_BG = theme["window_bg"]
+        PANEL_BG = theme["panel_bg"]
+        FIELD_BG = theme["field_bg"]
+        BORDER = theme["border"]
+        TEXT = theme["text"]
+        MUTED = theme["muted"]
+        SUBTLE = theme["subtle"]
+        ACCENT = theme["accent"]
+        ACCENT_HOVER = theme["accent_hover"]
+        ACCENT_FG = theme["accent_fg"]
+        GHOST_BG = theme["ghost_bg"]
+        GHOST_HOVER = theme["ghost_hover"]
+        GHOST_FG = theme["ghost_fg"]
+        DANGER = theme["danger"]
+        DANGER_HOVER = theme["danger_hover"]
+        DANGER_FG = theme["danger_fg"]
+        CHIP_BG = theme["chip_bg"]
+        # Reassigned wholesale, not mutated in place, so a stale reference
+        # anywhere would fail loudly instead of silently reading half-
+        # updated values -- nothing in this file keeps a long-lived
+        # reference to the OLD dict object, only ever to the module NAME
+        # `_CARD_PALETTE`, read fresh on every `render_meeting_list` call
+        # (see `_create_card`/`_update_card`'s `palette` parameter).
+        _CARD_PALETTE = {
+            "card_bg": theme["card_bg"],
+            "chip_bg": theme["card_chip_bg"],
+            "status_bg": theme["card_status_bg"],
+            "title_fg": TEXT,
+            "muted_fg": MUTED,
+            "recurrence_fg": SUBTLE,
+            "button_bg": ACCENT,
+            "button_hover": ACCENT_HOVER,
+            "button_fg": ACCENT_FG,
+            "ghost_bg": GHOST_BG,
+            "ghost_hover": GHOST_HOVER,
+            "ghost_fg": GHOST_FG,
+            "danger_bg": DANGER,
+            "danger_hover": DANGER_HOVER,
+            "danger_fg": DANGER_FG,
+        }
+
+        # -- 2a. root + every generically-tracked background frame -----------
+        self.root.configure(bg=WINDOW_BG)
+        for frame in self._panel_bg_frames:
+            frame.configure(bg=PANEL_BG)
+        for frame in self._window_bg_frames:
+            frame.configure(bg=WINDOW_BG)
+        for frame in self._chip_bg_frames:
+            frame.configure(bg=CHIP_BG)
+
+        # -- 2b. header(s) -----------------------------------------------------
+        for header in self._headers:
+            header.header_frame.configure(bg=PANEL_BG)
+            header.title_box.configure(bg=PANEL_BG)
+            header.chips_frame.configure(bg=PANEL_BG)
+            header.actions_frame.configure(bg=PANEL_BG)
+            header.exit_spacer.configure(bg=PANEL_BG)
+            header.title_label.configure(bg=PANEL_BG, fg=TEXT)
+            header.subtitle_label.configure(bg=PANEL_BG, fg=MUTED)
+            header.version_chip.configure(bg=CHIP_BG, fg=MUTED)
+            header.storage_chip.configure(bg=CHIP_BG, fg=MUTED)
+            self._restyle_button(header.notify_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
+            self._restyle_button(header.language_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
+            for button, key in header.view_switch_buttons:
+                # Same "week" special-case `_build_header`'s own
+                # construction logic applies -- must stay in lockstep.
+                if key == "weekViewButton":
+                    self._restyle_button(button, ACCENT, ACCENT_FG, ACCENT_HOVER)
+                else:
+                    self._restyle_button(button, GHOST_BG, GHOST_FG, GHOST_HOVER)
+            self._restyle_button(header.gadget_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
+            self._restyle_button(header.tray_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
+            self._restyle_button(header.theme_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
+            self._restyle_button(header.exit_button, DANGER, DANGER_FG, DANGER_HOVER)
+            # `header.donate_button` is deliberately untouched: GOLD_BG/
+            # GOLD_HOVER/GOLD_FG stay fixed across every theme -- see that
+            # constant's own module-level comment / design-notes.md.
+
+        # -- 2c. form panel ------------------------------------------------------
+        self._form_scroll.apply_bg(PANEL_BG)
+        self.form_eyebrow.configure(bg=PANEL_BG, fg=MUTED)
+        self.form_title_label.configure(bg=PANEL_BG, fg=TEXT)
+        self.form_hint_label.configure(bg=PANEL_BG, fg=MUTED)
+        self.work_label.configure(bg=PANEL_BG, fg=TEXT)
+        self.manage_companies_button.configure(
+            bg=PANEL_BG, fg=MUTED, activebackground=PANEL_BG, activeforeground=ACCENT,
+        )
+        # `self.work_entry` (the one ttk widget in this app) is handled by
+        # `_configure_ttk_style()` further below, not here.
+        self.title_label_field.configure(bg=PANEL_BG, fg=TEXT)
+        self._restyle_entry(self.title_entry)
+        self.date_label.configure(bg=PANEL_BG, fg=TEXT)
+        self._restyle_entry(self.date_entry)
+        self.time_label.configure(bg=PANEL_BG, fg=TEXT)
+        self._restyle_entry(self.time_entry)
+        self._restyle_button(self.set_now_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
+        self.reminder_label.configure(bg=PANEL_BG, fg=TEXT)
+        self._restyle_entry(self.reminder_entry)
+        self.sound_label.configure(bg=PANEL_BG, fg=TEXT)
+        self._restyle_option_menu(self.sound_menu)
+        self._restyle_button(self.test_sound_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
+        self.recurrence_label.configure(bg=PANEL_BG, fg=TEXT)
+        self._restyle_option_menu(self.recurrence_menu)
+        self.occurrence_label.configure(bg=PANEL_BG, fg=TEXT)
+        self._restyle_entry(self.occurrence_entry)
+        self.recurrence_hint_label.configure(bg=PANEL_BG, fg=MUTED)
+        self.url_label.configure(bg=PANEL_BG, fg=TEXT)
+        self._restyle_entry(self.url_entry)
+        self.notes_label.configure(bg=PANEL_BG, fg=TEXT)
+        self._restyle_entry(self.notes_text)
+        self._restyle_button(self.save_button, ACCENT, ACCENT_FG, ACCENT_HOVER)
+        self._restyle_button(self.clear_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
+        # `fg` intentionally untouched: this label's text color is a
+        # dynamic error(red)/success(green) signal (see `_handle_save`),
+        # deliberately fixed across every theme, not a themed role -- only
+        # its background needs to stay in sync with `PANEL_BG`.
+        self.form_feedback_label.configure(bg=PANEL_BG)
+
+        # -- 2d. summary panel (stats + filter + meeting list) ------------------
+        self.stats_eyebrow.configure(bg=PANEL_BG, fg=MUTED)
+        self.stats_title_label.configure(bg=PANEL_BG, fg=TEXT)
+        self.notification_hint_label.configure(bg=PANEL_BG, fg=MUTED)
+        for card in (
+            self.current_time_card, self.next_alert_card,
+            self.total_card, self.today_card, self.next_meeting_card,
+        ):
+            card["label"].configure(bg=CHIP_BG, fg=MUTED)
+            card["value"].configure(bg=CHIP_BG, fg=TEXT)
+        self.filter_label.configure(bg=PANEL_BG, fg=TEXT)
+        self._restyle_option_menu(self.filter_menu)
+        self._restyle_button(self.clear_past_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
+        self.list_title_label.configure(bg=PANEL_BG, fg=TEXT)
+        self.meeting_count_label.configure(bg=PANEL_BG, fg=MUTED)
+        self._list_scroll.apply_bg(PANEL_BG)
+        # `render_meeting_list`'s own `_card_theme != self._app_theme` check
+        # (set at the top of this method) triggers a full rebuild of every
+        # meeting card -- and, if the list is currently empty, of the
+        # empty-state placeholder -- on its own next call; nothing further
+        # to do for cards here.
+
+        # -- 2e. monthly calendar ------------------------------------------------
+        self._restyle_button(self.calendar_prev_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
+        self.calendar_month_label.configure(bg=PANEL_BG, fg=TEXT)
+        self._restyle_button(self.calendar_next_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
+        self._restyle_button(self.calendar_today_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
+        for label in self._calendar_weekday_labels:
+            label.configure(bg=WINDOW_BG, fg=MUTED)
+        for widgets in self._calendar_cells:
+            # `day_label`/`entry_label`s are intentionally left alone here:
+            # both already get a fresh `bg`/`fg` on every REAL render (see
+            # `_update_calendar_cell`), which `handle_set_app_theme`
+            # (app.py) forces to happen on the very next heartbeat tick by
+            # invalidating `_last_rendered_calendar_signature` -- touching
+            # them here too would be redundant, not wrong. `frame`/
+            # `overflow_label` are the two things `_update_calendar_cell`
+            # never revisits after construction, so only those need it here.
+            widgets.frame.configure(bg=PANEL_BG, highlightbackground=BORDER)
+            widgets.overflow_label.configure(bg=PANEL_BG, fg=MUTED)
+
+        # -- 2f. weekly calendar --------------------------------------------------
+        self._restyle_button(self.week_prev_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
+        self.week_range_label.configure(bg=PANEL_BG, fg=TEXT)
+        self._restyle_button(self.week_next_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
+        self._restyle_button(self.week_today_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
+        self._restyle_button(self.week_column_toggle_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
+        self._restyle_button(self.week_add_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
+        self._restyle_button(self.week_edit_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
+        self._restyle_button(self.week_delete_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
+        for label in self._week_day_header_labels:
+            # Unconditionally PANEL_BG/TEXT here, same as this label's own
+            # construction default -- app.py's own `handle_set_app_theme`
+            # invalidates `_last_rendered_week_live_state`, so
+            # `update_week_live_indicators` re-applies the real "today"
+            # ACCENT/ACCENT_FG highlight, if any, within at most 1 real
+            # second while the week view is active. A non-today header
+            # very briefly reverting from a highlighted state right after a
+            # theme switch (never more than that one heartbeat tick) is an
+            # acceptable, purely cosmetic tradeoff against duplicating that
+            # method's own "which index is today" logic here.
+            label.configure(bg=PANEL_BG, fg=TEXT)
+        for label in self._week_hour_axis_labels:
+            label.configure(bg=WINDOW_BG, fg=MUTED)
+        for widgets in self._week_cells:
+            # Same reasoning as the monthly calendar cells above --
+            # `entry_label`s refresh naturally on the next real render.
+            widgets.frame.configure(bg=PANEL_BG, highlightbackground=BORDER)
+            widgets.overflow_label.configure(bg=PANEL_BG, fg=MUTED)
+        self._week_scroll.apply_bg(WINDOW_BG)
+        # `self._week_now_line`'s `bg` (`NOW_LINE_COLOR`) is deliberately
+        # theme-independent -- see that constant's own module-level comment
+        # ("distinct from every other color in the palette on purpose").
+        # Only the dot's own CANVAS background (not its oval, same fixed
+        # color) needs to track the new `WINDOW_BG` so it doesn't leave a
+        # stale-colored square around the dot.
+        self._week_now_dot.configure(bg=WINDOW_BG)
+
+        # -- 2g. context menu + ttk style -----------------------------------------
+        self._context_menu.configure(
+            background=FIELD_BG, foreground=TEXT, activebackground=ACCENT, activeforeground=ACCENT_FG,
+        )
+        # Re-running this is safe/idempotent (the exact same `ttk.Style`
+        # calls `__init__` already made once) -- `ttk.Style.configure`/
+        # `.map()` update the named style's live definition, which
+        # `self.work_entry` (the one already-built widget using it)
+        # re-reads dynamically on its own next redraw. Unlike `option_add`
+        # (the dropdown popup listbox's OWN colors, set inside this same
+        # method) there's no "already-built widgets don't see this" gap to
+        # work around for the style itself -- only a fresh dropdown popup,
+        # created after this call, needs the `option_add` values, and this
+        # re-run supplies fresh ones before the next time it's opened.
+        self._configure_ttk_style()
+
+        # -- 3. gadget mode + translucency -----------------------------------------
+        # Reuses this existing, unmodified method -- no duplicated alpha/
+        # font logic -- so gadget mode (whether active right now or not)
+        # always matches whatever theme was just picked here.
+        self.apply_gadget_skin(theme_key)
+        # `apply_gadget_skin` above already sets this same attribute to
+        # this same theme's `alpha` value -- setting it again here,
+        # unconditionally, is the one place this feature deliberately
+        # extends what USED to be gadget-only behavior to the whole app
+        # (glass/aero's translucency now applies to the full-size window
+        # too, not just the gadget). Both calls read `theme["alpha"]`, so
+        # there is nothing for the two to disagree about.
+        self.root.attributes("-alpha", theme["alpha"])

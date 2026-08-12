@@ -9,9 +9,9 @@ from datetime import date
 
 from timermeet_app import main_window, models
 from timermeet_app.app import (
+    _coerce_app_theme,
     _coerce_gadget_coordinate,
     _coerce_gadget_size,
-    _coerce_gadget_skin,
     _group_meetings_by_date,
     _shift_month,
 )
@@ -83,18 +83,23 @@ class CoerceGadgetSizeTests(unittest.TestCase):
         self.assertEqual(_coerce_gadget_size(float("-inf"), default=280), 280)
 
 
-class CoerceGadgetSkinTests(unittest.TestCase):
-    def test_accepts_known_skin_key(self):
-        self.assertEqual(_coerce_gadget_skin("glass"), "glass")
+class CoerceAppThemeTests(unittest.TestCase):
+    """Renamed from `CoerceGadgetSkinTests` in v2.14.0 alongside
+    `_coerce_gadget_skin` -> `_coerce_app_theme` (the gadget-only skin
+    picker grew into a whole-app theme picker, SDD.md v2.14.0) -- same
+    coercion behavior, just against the renamed `APP_THEMES` registry."""
 
-    def test_rejects_unknown_skin_key(self):
-        self.assertEqual(_coerce_gadget_skin("does-not-exist"), main_window.GADGET_DEFAULT_SKIN)
+    def test_accepts_known_theme_key(self):
+        self.assertEqual(_coerce_app_theme("glass"), "glass")
+
+    def test_rejects_unknown_theme_key(self):
+        self.assertEqual(_coerce_app_theme("does-not-exist"), main_window.APP_DEFAULT_THEME)
 
     def test_rejects_non_string(self):
-        self.assertEqual(_coerce_gadget_skin(123), main_window.GADGET_DEFAULT_SKIN)
+        self.assertEqual(_coerce_app_theme(123), main_window.APP_DEFAULT_THEME)
 
     def test_rejects_none(self):
-        self.assertEqual(_coerce_gadget_skin(None), main_window.GADGET_DEFAULT_SKIN)
+        self.assertEqual(_coerce_app_theme(None), main_window.APP_DEFAULT_THEME)
 
 
 def _meeting(when: str, title: str = "Standup"):

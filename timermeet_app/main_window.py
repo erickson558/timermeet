@@ -19,7 +19,6 @@ CustomTkinter design; see MEMORY/SDD for the tradeoff this was worth making.
 
 from __future__ import annotations
 
-import colorsys
 import tkinter as tk
 import tkinter.font as tkfont
 import tkinter.messagebox as messagebox
@@ -490,16 +489,18 @@ _WEEK_SCROLLBAR_SPACER_PX = 17
 # against) with every cell otherwise blank: each day column's "fair share"
 # width was ~120px, and font.measure() against that budget (minus the
 # label's own padx margins) found 19 characters as the true fit limit for a
-# representative long title.
+# representative long title. 16 keeps a margin of 3 below that measured
+# limit for cross-environment font-metric variance.
 #
-# Re-measured for v2.15.0's duration-bar gutter (`WEEK_ENTRY_TEXT_GUTTER_PX`
-# below): reserving that gutter shrinks the same 120px budget's true fit
-# limit from 19 to 17 characters (same font.measure() methodology, same
-# 960px floor, re-run against the smaller post-gutter available width). 16
-# kept a margin of 3 below the old 19; 14 keeps that same margin of 3 below
-# the new 17 -- deliberately not re-using the old 16 as-is, since that would
-# leave almost no safety margin against the new, smaller budget.
-_WEEK_ENTRY_MAX_CHARS = 14
+# v2.15.0 briefly shrank this to 14 to reserve a left "gutter" for its own
+# thin duration bar (`WEEK_ENTRY_TEXT_GUTTER_PX`), which shared this same
+# hour-cell text's parent frame and could otherwise paint over the leading
+# characters. v2.16.0 retired that whole bar layer -- a meeting with its
+# own full-color block (see `WEEK_MAX_CONCURRENT_SPLIT` above) has its
+# hour-cell text `.grid_remove()`'d entirely rather than sharing the cell
+# with a decorative overlay, so there is no longer anything for this text
+# to make room for; restored to the original, un-shrunk 16.
+_WEEK_ENTRY_MAX_CHARS = 16
 # `day_header_row` (the fixed day-name row) and `grid_frame` (the scrollable
 # hour grid below it) are two SEPARATE frames, each with its own
 # `grid_columnconfigure` for the same 7 day columns -- `weight=1` alone only
@@ -580,61 +581,119 @@ _WEEK_LINE_MAX_RETRIES = 20
 # already documents) just for a cosmetic margin -- not worth it here.
 WEEK_AUTOSCROLL_MARGIN_HOURS = 1.5
 
-# Duration bars (SDD.md v2.15.0): a thin colored strip along a day column's
-# left edge showing a meeting's start-to-end span, additive to (never a
-# replacement for) the plain "HH:MM Título" hour-cell text -- see
-# `app.py::_refresh_week`'s docstring and the module-level design notes in
-# SDD.md for why a thin bar (not a filled block with the title drawn
-# inside it, and not per-widget alpha blending for overlaps) was chosen.
-# More than this many meetings overlapping at the same moment, in the same
-# day, share only `WEEK_MAX_DURATION_LANES` lanes -- the (lanes+1)th
-# concurrent meeting gets no bar at all, though it's still listed in its
-# hour-cell's plain text (the bar layer is purely additive, never the only
-# way to see a meeting exists).
-WEEK_MAX_DURATION_LANES = 3
+# Full-color meeting blocks (SDD.md v2.16.0, replaces v2.15.0's thin
+# decorative bar -- see that version's own comment history in SDD.md for
+# why the bar was rejected: the user compared it directly against a real
+# Teams screenshot and asked for a filled, titled block instead). Each
+# block is a self-contained `Frame` (colored `bg`) with a child `Label`
+# drawing the meeting's own "HH:MM Título" INSIDE it -- see
+# `_WeekMeetingBlockWidgets`/`_apply_week_meeting_blocks` -- so, unlike the
+# old bar, this widget is now the meeting's PRIMARY clickable surface, not
+# a purely decorative additive layer.
+#
+# Structural cap on how many meetings overlapping at once, in the same day,
+# each get their own full/split-width block: more than this many and the
+# excess is folded into one shared, non-interactive "+N más" aggregate chip
+# occupying the last column slot (SDD.md decision #3) -- a stronger
+# visibility guarantee than v2.15.0's own cap gave (which simply dropped
+# the (lanes+1)th concurrent meeting's bar with no aggregate at all).
+# Chosen against this app's own `WEEK_DAY_COLUMN_MINSIZE_PX` (122px) floor:
+# a higher cap would buy nothing legible at this app's own minimum supported
+# width, so no live `winfo_width()` check is needed to decide when to
+# degrade to the aggregate chip; it's a pure, data-only decision made once
+# in `app.py::_assign_week_meeting_blocks`, same separation of concerns this
+# whole file already keeps between pure layout data (`app.py`) and live
+# geometry (this file).
+#
+# CORRECTION (post-implementation adversarial review, real `font.measure()`
+# against this exact 8pt/`FONT_FAMILY` font, not assumed): this cap was
+# originally 4, on the claimed assumption that "~28-29px per block [is] the
+# practical limit for even an ellipsis-truncated single character" --
+# measured false. A real "HH:MM" string alone (e.g. "23:00") already
+# measures 27px at this font/size, and a 4-way split's label text area at
+# THIS floor was only 23px even after shrinking `WEEK_BLOCK_LABEL_INSET_PX`
+# to its current 1px/side -- narrower than bare "HH:MM" itself, before any
+# title character, so `MainWindow._format_week_block_text` fell all the way
+# through its own degradation ladder to a fully blank label (no time, no
+# title) for the exact case this cap was designed around, not the rare,
+# near-zero-width edge case its own acceptance criteria intended that
+# fallback for. Lowered from 4 to 3: a 3-way split at this same 960px floor
+# clears bare "HH:MM" with several px of real margin, so the cap itself
+# (rather than only the inset) now guarantees every block that gets its own
+# titled rectangle can actually show its time, not just an indistinguishable
+# colored sliver. A cluster of 4+ concurrent meetings still gets full
+# visibility -- 3 titled blocks plus one shared "+N más" aggregate chip for
+# the rest -- it just needs one more concurrent meeting than before to reach
+# that fallback.
+WEEK_MAX_CONCURRENT_SPLIT = 3
 # Independent, second cap -- not on concurrency, but on a single day's
-# TOTAL bar count, since the week grid shows all 24 hours in one
-# continuously-scrollable panel (never 24 separate views), so every
-# meeting in a day is visible on screen at once even if none of them
-# overlap each other in time. 12 is generous for a real day while adding
-# only ~12% to the already-accepted ~718-widget week view budget (SDD.md
-# v2.9.0 decision #8): 12 bars/day * WEEK_COLS (7) = 84 new `Frame`s.
+# TOTAL block count (real blocks + aggregate chips combined), since the
+# week grid shows all 24 hours in one continuously-scrollable panel (never
+# 24 separate views), so every meeting in a day is visible on screen at
+# once even if none of them overlap each other in time. Reused verbatim
+# from v2.15.0 (SDD.md v2.16.0 decision #7: no new constant needed) -- 12
+# is generous for a real day while adding only ~12% to the already-accepted
+# ~718-widget week view budget (SDD.md v2.9.0 decision #8): now 12
+# blocks/day * WEEK_COLS (7) = 84 `Frame`+`Label` pairs (168 widgets, +84
+# vs. v2.15.0's 84 bare `Frame`s, since every block now needs its own child
+# `Label` for the title text drawn inside it).
 WEEK_MAX_DURATION_BLOCKS_PER_DAY = 12
-# A "few pixels" strip, per SDD.md's own description -- deliberately much
-# thinner than `WEEK_DAY_COLUMN_MINSIZE_PX` so up to `WEEK_MAX_DURATION_LANES`
-# of these can sit side-by-side inside even the narrowest real day column
-# (~120px at this app's 960px floor) without crowding the entry text this
-# layer is never allowed to cover (see the module docstring above).
-WEEK_DURATION_BAR_WIDTH_PX = 5
-WEEK_DURATION_BAR_GAP_PX = 2
-
-# Adversarial review, v2.15.0: the bars are children of the SAME parent as
-# the hour-cell frames (`grid_frame`, see `_build_week_view`), placed via
-# `.place()` at `x = column_x + lane * (WIDTH + GAP)` -- i.e. anchored to
-# the day column's OWN left edge, the exact same x-origin `entry_label`'s
-# text starts from. Before this constant existed, `entry_label`'s own inset
-# from that edge (highlightthickness + its grid `padx` + its own internal
-# `padx`) measured ~7px -- enough clearance for lane 0 alone (0-5px), but
-# lanes 1 and 2 (7-12px, 14-19px) landed exactly on top of where the entry
-# text starts, so 2-3 concurrent meetings (precisely the case
-# `WEEK_MAX_DURATION_LANES` exists to support) painted a color bar directly
-# over the leading 1-2 characters of whatever meeting text shared that hour
-# cell -- since the bars are raised above the hour cells in stacking order
-# (same technique `_week_now_line` already uses), this wasn't a faint
-# blend, it was an opaque overwrite, contradicting this feature's own
-# explicit design goal (SDD.md v2.15.0 decision #6: "sin tapar el texto").
-# Reserving a real gutter for lanes 0-1 (not all 3 -- see below) and
-# widening `entry_label`/`overflow_label`'s left grid `padx` to clear it
-# (`_build_week_cell`) fixes the common 1-2-concurrent-meeting case
-# completely; only the rare 3rd lane still grazes ~1px into the text
-# column, which is below the threshold of a real visible defect. Reserving
-# for all 3 lanes instead was measured and rejected: it would have pushed
-# `_WEEK_ENTRY_MAX_CHARS` down to ~12 (leaving only ~6 characters for the
-# actual title after the fixed "HH:MM " prefix) to fix a rarer 3-way-overlap
-# case -- a permanent, everyday readability cost bigger than the edge case
-# it would close. `+2` is a small breathing gap so lane 1's bar doesn't sit
-# flush against the first glyph either.
-WEEK_ENTRY_TEXT_GUTTER_PX = 2 * WEEK_DURATION_BAR_WIDTH_PX + WEEK_DURATION_BAR_GAP_PX + 2
+# Small breathing room between adjacent split blocks in the same overlap
+# cluster (SDD.md decision #4) -- large enough to read as a real seam
+# between two different meetings' colors, small enough that it doesn't
+# meaningfully eat into the already-tight per-block width at a 4-way split
+# (see `WEEK_MAX_CONCURRENT_SPLIT`'s own comment for that math).
+WEEK_BLOCK_GAP_PX = 2
+# Floor on a block's rendered height so a very short (5-15 minute) meeting
+# still shows a real, legible, clickable rectangle instead of a sliver too
+# thin for even its own text -- SDD.md decision #4's explicit "never leave
+# blank if avoidable" criterion, same spirit as the truncation degradation
+# in `_apply_week_meeting_blocks` below. Measured against this view's own
+# 8pt `FONT_FAMILY` label font: `tkfont.Font(size=8).metrics("linespace")`
+# reports 13px for one line of text at this size/family, so 20px leaves a
+# comfortable ~3-4px of vertical padding above and below that single line
+# (plus this block's own 1px selection-highlight border) without wasting
+# so much height that a 15-minute meeting (10.5px at this view's
+# `WEEK_ROW_HEIGHT_PX`) would visually read as "the same size as a
+# half-hour meeting" -- a real, if lesser, version of the same failure mode
+# and unavoidable at floor sizes.
+WEEK_BLOCK_MIN_HEIGHT_PX = 20
+# Horizontal inset (per side) between a block `Frame`'s own edge and its
+# child `Label`'s text area (`_build_week_view`'s `block_label.place(...)`
+# call, and the matching `- 2 * WEEK_BLOCK_LABEL_INSET_PX` subtracted from
+# `block_width` before it's handed to `_format_week_block_text`/
+# `_format_week_aggregate_text` in `_apply_week_meeting_blocks`). Shrunk
+# from an original 3px/side (adversarial review, see
+# `WEEK_MAX_CONCURRENT_SPLIT`'s own correction note above for the real
+# measured numbers this fixes) -- 1px/side is still enough to keep the
+# text clear of the frame's own selection-highlight border
+# (`highlightthickness=2` when selected) without meaningfully changing how
+# the label looks at any WIDER split (1-3 columns), where a couple of
+# pixels of inset is cosmetic, not load-bearing.
+WEEK_BLOCK_LABEL_INSET_PX = 1
+# Fixed, theme-INDEPENDENT selection-highlight border color for a real
+# meeting block (SDD.md decision #9's selected-border requirement) --
+# deliberately NOT the themed `ACCENT` color `entry_label`'s own identical
+# highlight uses elsewhere in this file. A block's fill is always
+# `_color_for_work_name`'s own fixed-lightness/-saturation pastel (HLS
+# L=0.74, S=0.70 for every hue), and every one of this app's 5 themes' own
+# `ACCENT` is itself a blue/cyan hue -- computed directly (WCAG flat-color
+# contrast, `colorsys.hls_to_rgb`, all 360 hues): a work name whose hash
+# happens to land in the blue/cyan hue band (roughly 210-250 degrees in
+# `classic`/`glass`/`light`, ~216 degrees in `neon`, ~26 degrees in `aero`'s
+# own cyan-adjacent `ACCENT`) produces a block fill close enough to that
+# theme's own `ACCENT` that the 2px selection ring measured as low as
+# ~1.0:1 contrast against its own block -- effectively invisible, not a
+# rare corner case (roughly one work name in ten, by hue alone, in any
+# given theme). A fixed near-black border sidesteps this entirely: measured
+# against every one of the 360 possible hues at this exact
+# lightness/saturation, pure black's WORST-case contrast against any block
+# fill is 7.22:1 -- comfortably legible everywhere, matching this same
+# block's own `text_fg = "black"` choice for its title text (already
+# reasoned the same way: the fill is always this fixed light pastel, so
+# black-on-it is always safe, unlike a themed color that varies with the
+# active theme and can coincidentally match the fill's own hue).
+WEEK_BLOCK_SELECTION_BORDER = "#000000"
 
 
 def _truncate_week_entry(text: str) -> str:
@@ -809,14 +868,18 @@ class CalendarEntry:
     doesn't. Never persisted -- presentation data only, recomputed every
     refresh.
 
-    `duration_minutes` (SDD.md v2.15.0): only meaningful for the WEEK view's
-    signature dirty-check (`app.py::_refresh_week`) -- the month view
-    doesn't need it there since its own `time_text` already encodes the end
-    time ("HH:MM-HH:MM"), so a duration-only edit already changes that
-    opaque string and gets detected for free. The week view's `time_text`
-    deliberately stays start-time-only (SDD.md decision #5), so without
-    this field a duration-only edit would leave the week's Nivel A
-    signature unchanged and the new duration bar would never render."""
+    `duration_minutes` (added in SDD.md v2.15.0): only meaningful for the
+    WEEK view's signature dirty-check (`app.py::_refresh_week`) -- the month
+    view doesn't need it there since its own `time_text` already encodes
+    the end time ("HH:MM-HH:MM"), so a duration-only edit already changes
+    that opaque string and gets detected for free. The week view's
+    `time_text` deliberately stays start-time-only (SDD.md v2.15.0 decision
+    #5), so without this field a duration-only edit would leave the week's
+    Nivel A signature unchanged. As of v2.16.0, a `CalendarEntry` only ever
+    represents a week-view meeting that did NOT get its own block (the
+    already-extreme 13th+ meeting of a day, see decision #7) -- this field
+    keeps that rare fallback text's own dirty-check honest too, even though
+    it no longer drives any bar/block of its own."""
 
     meeting_id: str
     time_text: str
@@ -867,23 +930,55 @@ class WeekCellData:
 
 
 @dataclass
-class WeekDurationBlock:
-    """One duration bar's worth of display data for the weekly calendar
-    view's additive duration-bar layer (SDD.md v2.15.0) -- computed once per
-    `app.py::_refresh_week` call (see `_assign_week_duration_blocks`), never
-    persisted. `day_index`/`lane` are pure layout inputs (0-based column and
-    side-by-side slot within that column, see
-    `MainWindow.render_week_duration_blocks`); `start_hour_float` and
-    `duration_minutes` drive the bar's Y/height the same pure-arithmetic way
-    `_apply_week_now_line` already derives the live time-line's Y, never
-    from `winfo_y()`."""
+class WeekMeetingBlock:
+    """One full-color meeting block's worth of display data for the weekly
+    calendar view (SDD.md v2.16.0, renamed from/replaces `WeekDurationBlock`,
+    v2.15.0's thin decorative bar) -- computed once per
+    `app.py::_refresh_week` call (see `app.py::_assign_week_meeting_blocks`),
+    never persisted.
+
+    `day_index`/`column_index`/`column_count` are pure layout inputs (0-based
+    day column, this block's 0-based slot within an overlap cluster, and how
+    many slots that whole cluster is split into -- see
+    `MainWindow.render_week_meeting_blocks`): FIXED for this block's entire
+    duration, never recomputed per-instant (SDD.md decision #1 -- a block's
+    width/x never changes partway through its own height, unlike a design
+    that would recompute concurrency at every point in time). A lone,
+    non-overlapping meeting gets `column_index=0, column_count=1`, i.e. the
+    day column's full width.
+
+    `start_hour_float`/`duration_minutes` drive the block's Y/height the same
+    pure-arithmetic way `_apply_week_now_line` already derives the live
+    time-line's Y, never from `winfo_y()`.
+
+    `title`/`time_text`/`series_occurrence_count` mirror `CalendarEntry`'s
+    own same-named fields (the block's `Label` shows `"HH:MM Título"`,
+    exactly like `entry_label` does) -- kept as separate fields here rather
+    than reusing `CalendarEntry` itself because a block ALSO needs the
+    layout-only fields above that a plain hour-cell entry never had.
+
+    `meeting_id` is `Optional[str]`, `None` only for the shared, non-
+    interactive "+N más" aggregate chip a cluster's excess (beyond
+    `WEEK_MAX_CONCURRENT_SPLIT`) concurrent meetings collapse into (SDD.md
+    decision #3) -- `is_overflow`/`overflow_count` are only meaningful when
+    `meeting_id is None`; `title`/`time_text`/`color` are left blank for
+    that case since the aggregate's own text
+    (`i18n.format_text("calendarMoreLabel", ...)`) and neutral color are
+    computed at paint time in `main_window.py`, not precomputed here (same
+    convention `overflow_label`'s own "+N más" text already uses)."""
 
     day_index: int
-    lane: int
+    column_index: int
+    column_count: int
     start_hour_float: float
     duration_minutes: int
     color: str
-    meeting_id: str
+    title: str
+    time_text: str
+    series_occurrence_count: int = 0
+    meeting_id: Optional[str] = None
+    is_overflow: bool = False
+    overflow_count: int = 0
 
 
 @dataclass
@@ -906,6 +1001,38 @@ class _WeekCellWidgets:
     # `_apply_week_selection_highlight`) that must agree on which widget
     # currently represents which meeting.
     entry_meeting_ids: List[Optional[str]] = field(default_factory=list)
+
+
+@dataclass
+class _WeekMeetingBlockWidgets:
+    """One slot of the fixed `MainWindow._week_meeting_blocks` pool (SDD.md
+    v2.16.0) -- built once, eagerly, in `_build_week_view`
+    (`WEEK_MAX_DURATION_BLOCKS_PER_DAY * WEEK_COLS` of these), never
+    destroyed/recreated. `frame` carries the meeting's own color and the
+    selection-highlight border; `label` is its child, showing the
+    "HH:MM Título" text (or the aggregate's "+N más" text) drawn INSIDE the
+    colored frame -- see `_apply_week_meeting_blocks`.
+
+    Both `frame` and `label` get `<Button-1>`/`<Button-3>` rebound on every
+    real render, exactly like `_CalendarCellWidgets`/`_WeekCellWidgets`
+    already do for their own long-lived, position-fixed widgets -- always
+    through `_rebind()`, never a plain `.bind()` (see that function's
+    docstring for the confirmed Tcl-command-leak class this guards
+    against). `bind_funcids` tracks both widgets' funcids the same way
+    `_WeekCellWidgets.bind_funcids` does, with keys `"frame_left"`/
+    `"frame_right"`/`"label_left"`/`"label_right"`.
+
+    `meeting_id` mirrors `_WeekCellWidgets.entry_meeting_ids`'s own purpose
+    for a single slot: which meeting (if any -- `None` both for an unused
+    slot and for a non-interactive aggregate chip) this slot currently
+    represents, so `_apply_week_selection_highlight`'s immediate-path
+    re-application (camino 1, see that method) can compare against it
+    without re-deriving it from `MainWindow._week_meeting_block_data`."""
+
+    frame: tk.Frame
+    label: tk.Label
+    bind_funcids: Dict[str, Optional[str]] = field(default_factory=dict)
+    meeting_id: Optional[str] = None
 
 
 @dataclass
@@ -1345,20 +1472,30 @@ class MainWindow:
         # `_ScrollablePanel._canvas_width_job` already uses for its own
         # `<Configure>` burst during a live window-resize drag.
         self._week_now_line_configure_job: Optional[str] = None
-        # Duration-bar layer (SDD.md v2.15.0): the pool of pre-built `Frame`s
-        # is created eagerly in `_build_week_view` (`_week_duration_blocks`,
-        # never destroyed/recreated afterwards -- same lifecycle discipline
-        # as `_week_now_line` above); `_week_duration_block_data` is the
-        # latest data `render_week_duration_blocks` was given, replayed by
-        # `_apply_week_duration_blocks` on every geometry retry/`<Configure>`
+        # Full-color meeting-block layer (SDD.md v2.16.0, renamed from
+        # v2.15.0's `_week_duration_blocks`/`_week_meeting_block_data`/
+        # `_week_meeting_block_retry_job`/`_week_meeting_block_retry_count`): the pool
+        # of pre-built `_WeekMeetingBlockWidgets` is created eagerly in
+        # `_build_week_view` (`_week_meeting_blocks`, never destroyed/
+        # recreated afterwards -- same lifecycle discipline as
+        # `_week_now_line` above); `_week_meeting_block_data` is the latest
+        # data `render_week_meeting_blocks` was given, replayed by
+        # `_apply_week_meeting_blocks` on every geometry retry/`<Configure>`
         # pass so a cold-start width delay doesn't lose the pending render.
         # Retry job/counter mirror `_week_live_retry_job`/`_week_live_retry_count`
         # above -- see `_schedule_week_geometry_retry`, the helper both share
         # instead of each keeping a fully separate copy of that guard.
-        self._week_duration_blocks: List[tk.Frame] = []
-        self._week_duration_block_data: List[WeekDurationBlock] = []
-        self._week_duration_retry_job: Optional[str] = None
-        self._week_duration_retry_count = 0
+        self._week_meeting_blocks: List[_WeekMeetingBlockWidgets] = []
+        self._week_meeting_block_data: List[WeekMeetingBlock] = []
+        self._week_meeting_block_retry_job: Optional[str] = None
+        self._week_meeting_block_retry_count = 0
+        # Cached font for measuring a block's own "HH:MM Título" text
+        # against its live, per-render pixel width via
+        # `_truncate_text_to_pixel_width` (SDD.md decision #5) -- same
+        # lazy-cache pattern as `_get_subtitle_font`, needs a live `tk.Tk()`
+        # to query font metrics, which doesn't exist yet at this point in
+        # `__init__`.
+        self._week_block_font_cache: Optional["tkfont.Font"] = None
         # "last click selected" state for the week view only (SDD.md
         # v2.11.0) -- lives here, not in app.py, per that section's explicit
         # decision: it's purely presentational (which entry has an accent
@@ -2427,18 +2564,33 @@ class MainWindow:
         )
         self._week_now_dot.create_oval(0, 0, dot_d, dot_d, fill=NOW_LINE_COLOR, outline=NOW_LINE_COLOR)
 
-        # Duration-bar pool (SDD.md v2.15.0): `WEEK_MAX_DURATION_BLOCKS_PER_DAY`
-        # x `WEEK_COLS` thin `Frame`s, built once, eagerly, right here
+        # Meeting-block pool (SDD.md v2.16.0, replaces v2.15.0's bare-`Frame`
+        # duration-bar pool): `WEEK_MAX_DURATION_BLOCKS_PER_DAY` x
+        # `WEEK_COLS` `Frame`+`Label` pairs, built once, eagerly, right here
         # alongside the rest of this view -- never destroyed/recreated
-        # afterwards. `render_week_duration_blocks`/`_apply_week_duration_blocks`
-        # only ever `.place()`/`.place_forget()` these, exactly like
-        # `_week_now_line`/`_week_now_dot` just above, so this never competes
-        # in stacking order with the hour-cell text and needs no `.bind()` of
-        # its own. `bg=WINDOW_BG` at construction is a harmless placeholder --
-        # every real `.place()` call sets the true per-meeting color via
-        # `.configure()` first.
+        # afterwards. `render_week_meeting_blocks`/`_apply_week_meeting_blocks`
+        # `.place()`/`.place_forget()` these for position (exactly like
+        # `_week_now_line`/`_week_now_dot` just above), but -- unlike the old
+        # bar pool -- these ARE a real `.bind()` surface now (a block is the
+        # meeting's primary clickable area, SDD.md decision #9), always
+        # through `_rebind()`, never a plain `.bind()`, at real-render time
+        # in `_apply_week_meeting_blocks`, never here at construction (there
+        # is no meeting yet to bind to). `bg=WINDOW_BG` at construction is a
+        # harmless placeholder -- every real `.place()` call sets the true
+        # per-meeting (or aggregate-chip) color via `.configure()` first.
+        # `label.place(...)` (not `.pack()`/`.grid()`) insets it a few
+        # pixels inside its own parent `frame` so the frame's own colored
+        # edge/selection-highlight border stays visible all the way around
+        # the text.
         for _ in range(WEEK_MAX_DURATION_BLOCKS_PER_DAY * WEEK_COLS):
-            self._week_duration_blocks.append(tk.Frame(grid_frame, bg=WINDOW_BG, highlightthickness=0))
+            block_frame = tk.Frame(grid_frame, bg=WINDOW_BG, highlightthickness=0, cursor="hand2")
+            block_label = tk.Label(
+                block_frame, text="", font=(FONT_FAMILY, 8), anchor="nw", justify="left", cursor="hand2",
+            )
+            block_label.place(
+                x=WEEK_BLOCK_LABEL_INSET_PX, y=1, relwidth=1.0, width=-2 * WEEK_BLOCK_LABEL_INSET_PX
+            )
+            self._week_meeting_blocks.append(_WeekMeetingBlockWidgets(frame=block_frame, label=block_label))
 
         # `_apply_week_now_line` only ever measures ROW 0's cell for a given
         # day column (every row in that column shares its width, see that
@@ -2472,23 +2624,20 @@ class MainWindow:
             entry_label = tk.Label(
                 cell, text="", font=(FONT_FAMILY, 8), anchor="w", cursor="hand2", padx=3,
             )
-            # Left padx widened to `WEEK_ENTRY_TEXT_GUTTER_PX` (from a plain
-            # 3) so the text never starts underneath the duration-bar lanes
-            # `_apply_week_duration_blocks` places at this same cell's left
-            # edge -- see that constant's own comment for the measurement
-            # behind this exact number and why it reserves for 2 lanes, not
-            # all 3. Right padx (3) is untouched.
-            entry_label.grid(row=slot, column=0, sticky="ew", padx=(WEEK_ENTRY_TEXT_GUTTER_PX, 3), pady=1)
+            # v2.15.0 widened this left padx to `WEEK_ENTRY_TEXT_GUTTER_PX`
+            # to keep its own thin duration bar from painting over this
+            # text's leading characters. v2.16.0 retired that bar layer
+            # entirely (a meeting with its own full-color block now
+            # `.grid_remove()`s this text instead of sharing the cell with
+            # it, see `_refresh_week`/decision #7) -- restored to a plain,
+            # symmetric `padx=3`.
+            entry_label.grid(row=slot, column=0, sticky="ew", padx=3, pady=1)
             entry_labels.append(entry_label)
 
         overflow_label = tk.Label(cell, text="", font=(FONT_FAMILY, 8), bg=PANEL_BG, fg=MUTED, anchor="w")
-        # Same left-gutter reasoning as `entry_label` above, offset by 2px
-        # (this label has no internal `padx` of its own, unlike
-        # `entry_label`'s `padx=3`) so its "+N más" text lines up with the
-        # entry rows above it instead of sitting 2px further left.
-        overflow_label.grid(
-            row=WEEK_MAX_ENTRIES_PER_CELL, column=0, sticky="ew", padx=(WEEK_ENTRY_TEXT_GUTTER_PX + 2, 4), pady=1
-        )
+        # Same de-gutter reasoning as `entry_label` above -- restored to its
+        # original, pre-v2.15.0 plain `padx=4`.
+        overflow_label.grid(row=WEEK_MAX_ENTRIES_PER_CELL, column=0, sticky="ew", padx=4, pady=1)
 
         return _WeekCellWidgets(
             frame=cell, entry_labels=entry_labels, overflow_label=overflow_label,
@@ -2588,12 +2737,12 @@ class MainWindow:
         # the `<Configure>`-triggered `_schedule_week_now_line_update` is
         # what actually catches the real, post-recompute geometry.
         self._apply_week_now_line()
-        # SDD.md v2.15.0: the duration bars need the exact same immediate
-        # best-effort re-placement (and eventual real `<Configure>` catch-up
-        # via that same handler) as the live line above -- a work-week
-        # toggle can both reveal/hide weekend bars and shift every other
-        # day column's x.
-        self._apply_week_duration_blocks()
+        # SDD.md v2.15.0/v2.16.0: the meeting blocks need the exact same
+        # immediate best-effort re-placement (and eventual real
+        # `<Configure>` catch-up via that same handler) as the live line
+        # above -- a work-week toggle can both reveal/hide weekend blocks
+        # and shift every other day column's x/width.
+        self._apply_week_meeting_blocks()
 
     def _primary_view_frame(self) -> tk.Frame:
         if self._primary_view == "calendar":
@@ -2626,9 +2775,9 @@ class MainWindow:
             # this, the retry keeps firing every 300ms for the rest of the
             # session even though week view is no longer on screen.
             self._cancel_week_live_retry()
-            # Same reasoning, same fix, for the v2.15.0 duration-bar
-            # overlay's own independent retry job.
-            self._cancel_week_duration_retry()
+            # Same reasoning, same fix, for the meeting-block overlay's own
+            # independent retry job.
+            self._cancel_week_meeting_block_retry()
             # SDD.md v2.11.0: clear on LEAVING week view (not on entering
             # it) -- by the time the user comes back, it's already empty,
             # so no second clear-on-entry call site is needed. Deliberately
@@ -2790,9 +2939,22 @@ class MainWindow:
         # `cell.entries` (already capped at WEEK_MAX_ENTRIES_PER_CELL), so a
         # selected entry pushed into "+N más" by a new arrival reads as
         # "gone" here too, same as if it had actually been deleted.
+        #
+        # SDD.md v2.16.0: as of this version, most meetings are no longer
+        # listed in `cell.entries` at all -- a meeting with its own block
+        # (or folded into an aggregate chip) is deliberately dropped from
+        # the hour-cell text (see `app.py::_refresh_week` decision #7), so
+        # `cell.entries` alone would misread almost every real selection as
+        # "no longer visible" and silently clear it on every single render.
+        # `self._week_meeting_block_data` is folded in here too -- by the
+        # time this runs, `render_week_meeting_blocks` has ALREADY recorded
+        # this same render's block data (see that method's own docstring
+        # for the call-order guarantee this relies on), so this always sees
+        # the CURRENT render's blocks, never a stale previous one.
         visible_meeting_ids = {
             entry.meeting_id for cell_data in cells for entry in cell_data.entries
         }
+        visible_meeting_ids |= {b.meeting_id for b in self._week_meeting_block_data if b.meeting_id is not None}
         if self._week_selected_meeting_id is not None and self._week_selected_meeting_id not in visible_meeting_ids:
             self._week_selected_meeting_id = None
         self._update_week_toolbar_button_states()
@@ -2940,24 +3102,26 @@ class MainWindow:
                 pass
             self._week_live_retry_job = None
 
-    def _cancel_week_duration_retry(self) -> None:
+    def _cancel_week_meeting_block_retry(self) -> None:
         """Same cancellation discipline as `_cancel_week_live_retry` above,
-        for `_apply_week_duration_blocks`'s own retry job (SDD.md v2.15.0) --
-        a separate job/counter pair (`_week_duration_retry_job`/`_count`)
-        since the two overlays can be mid-retry independently, but the same
+        for `_apply_week_meeting_blocks`'s own retry job (introduced in
+        v2.15.0 for its thin bar, kept unchanged in v2.16.0 for the
+        full-color block that replaced it) -- a separate job/counter pair
+        (`_week_meeting_block_retry_job`/`_count`) since the two overlays
+        can be mid-retry independently, but the same
         `_schedule_week_geometry_retry` helper and the same call sites
         (`set_active_view` leaving week view) as the live-line's."""
-        if self._week_duration_retry_job is not None:
+        if self._week_meeting_block_retry_job is not None:
             try:
-                self.root.after_cancel(self._week_duration_retry_job)
+                self.root.after_cancel(self._week_meeting_block_retry_job)
             except Exception:  # nosec B110
                 pass
-            self._week_duration_retry_job = None
+            self._week_meeting_block_retry_job = None
 
     def _schedule_week_geometry_retry(self, retry_count_attr: str, job_attr: str, fn) -> None:
         """Shared cold-start "geometry not laid out yet" retry pump (SDD.md
         v2.15.0), factored out of `_apply_week_now_line`'s own inline retry
-        logic so the new duration-bar overlay (`_apply_week_duration_blocks`)
+        logic so the meeting-block overlay (`_apply_week_meeting_blocks`)
         reuses the exact same guard instead of a second parallel timer --
         see `_apply_week_now_line`'s docstring for the underlying
         empirically-confirmed cold-start delay this retries through, and
@@ -2970,7 +3134,7 @@ class MainWindow:
             # Give up -- see `_WEEK_LINE_MAX_RETRIES`'s own comment for why
             # this margin is generous. The caller already hid whatever it
             # was about to place; a later call that resets the counter
-            # (`update_week_live_indicators`/`render_week_duration_blocks`)
+            # (`update_week_live_indicators`/`render_week_meeting_blocks`)
             # gets a fresh set of attempts.
             setattr(self, job_attr, None)
             return
@@ -3022,7 +3186,7 @@ class MainWindow:
         # column widths/x-positions the live line does, so this one debounced
         # `<Configure>` pass drives both instead of adding a second listener
         # on the same 7 cells for the new overlay.
-        self._apply_week_duration_blocks()
+        self._apply_week_meeting_blocks()
 
     def _apply_week_now_line(self) -> None:
         """Places (or hides) the live time-line from `self._week_live_state`
@@ -3178,48 +3342,120 @@ class MainWindow:
         fraction = max(0.0, (y - margin_px) / total_height_px)
         canvas.yview_moveto(fraction)
 
-    def render_week_duration_blocks(self, blocks: List[WeekDurationBlock]) -> None:
-        """Nivel A (SDD.md v2.15.0), called from the exact same
-        `app.py::_refresh_week` call site that already calls
-        `render_week_grid`, gated behind that same dirty-check signature --
-        never on a bare per-second heartbeat tick with unchanged data.
-        Records the latest data and (re-)resolves geometry the same way a
-        fresh `update_week_live_indicators` call resets
-        `_week_live_retry_count`: a fresh render is a fresh attempt, not
-        penalized by retries an earlier, unrelated call already spent."""
-        self._week_duration_block_data = blocks
-        self._week_duration_retry_count = 0
-        self._cancel_week_duration_retry()
-        self._apply_week_duration_blocks()
+    def _get_week_block_font(self) -> "tkfont.Font":
+        if self._week_block_font_cache is None:
+            self._week_block_font_cache = tkfont.Font(root=self.root, family=FONT_FAMILY, size=8)
+        return self._week_block_font_cache
 
-    def _apply_week_duration_blocks(self) -> None:
-        """Places (or hides) every bar in `self._week_duration_blocks` (the
+    def _format_week_block_text(self, block: WeekMeetingBlock, available_px: int) -> str:
+        """SDD.md v2.16.0 decision #5's graceful degradation, reusing
+        `_truncate_text_to_pixel_width` (the same real-pixel-measurement
+        helper the header subtitle uses, built for exactly this "available
+        width changes live" scenario -- here `available_px` varies with
+        both `column_count` and the window's own resizable width) instead
+        of inventing a second truncation strategy for this block's text.
+
+        Three explicit steps, in order, never a silent raw clip and never a
+        blank AGGREGATE-shaped label ("HH:MM…" with zero title characters
+        surviving) -- see the acceptance criteria this exact ordering
+        satisfies:
+          1. The full `"HH:MM Título"` fits -> show it whole.
+          2. It doesn't, but the pixel-truncated candidate still keeps at
+             least one real character of the title before its ellipsis ->
+             show that. `len(truncated) > len(prefix) + 1` is exactly this
+             check without a second `font.measure()` round-trip: `prefix`
+             is `"HH:MM "`, `+1` accounts for the ellipsis character itself
+             -- anything longer than that has kept >= 1 title character.
+          3. Otherwise (not even one title character fits) -> fall back to
+             a bare, ellipsis-free `"HH:MM"` if THAT fits; if even that
+             doesn't, an empty string -- the block itself (a colored,
+             clickable rectangle) still renders regardless, per SDD.md's
+             explicit "never `.place_forget()` just for lack of text room"
+             criterion."""
+        if available_px <= 0:
+            return ""
+        font = self._get_week_block_font()
+        prefix = f"{block.time_text} "
+        full_text = f"{prefix}{block.title}"
+        if font.measure(full_text) <= available_px:
+            return full_text
+        truncated = _truncate_text_to_pixel_width(full_text, font, available_px)
+        if len(truncated) > len(prefix) + 1:
+            return truncated
+        if font.measure(block.time_text) <= available_px:
+            return block.time_text
+        return ""
+
+    def render_week_meeting_blocks(self, blocks: List[WeekMeetingBlock]) -> None:
+        """Nivel A (SDD.md v2.16.0, renamed from v2.15.0's
+        `render_week_duration_blocks`), called from the exact same
+        `app.py::_refresh_week` call site that already calls
+        `render_week_grid` -- BEFORE it, specifically (see that method's own
+        docstring for why the ordering matters: its own selection-backstop
+        check needs this call's data already recorded) -- gated behind that
+        same dirty-check signature, never on a bare per-second heartbeat
+        tick with unchanged data. Records the latest data and (re-)resolves
+        geometry the same way a fresh `update_week_live_indicators` call
+        resets `_week_live_retry_count`: a fresh render is a fresh attempt,
+        not penalized by retries an earlier, unrelated call already spent."""
+        self._week_meeting_block_data = blocks
+        self._week_meeting_block_retry_count = 0
+        self._cancel_week_meeting_block_retry()
+        self._apply_week_meeting_blocks()
+
+    def _apply_week_meeting_blocks(self) -> None:
+        """Places (or hides) every slot in `self._week_meeting_blocks` (the
         fixed pool built once in `_build_week_view`) from
-        `self._week_duration_block_data` (the latest data
-        `render_week_duration_blocks` recorded).
+        `self._week_meeting_block_data` (the latest data
+        `render_week_meeting_blocks` recorded) -- SDD.md v2.16.0, replaces
+        v2.15.0's thin-bar `_apply_week_duration_blocks`.
 
         Y/height are pure arithmetic against `WEEK_ROW_HEIGHT_PX`, exactly
         like `_apply_week_now_line`'s own Y -- never `winfo_y()`. X/width DO
         need a live query, same cold-start caveat as that method, but for
-        EVERY visible day column (not just "today"'s) since a duration bar
-        can belong to any of the 7 days on screen at once (the whole week's
-        24 hours share one continuously-scrollable panel, see
-        `WEEK_MAX_DURATION_BLOCKS_PER_DAY`'s own comment).
+        EVERY visible day column (not just "today"'s) since a block can
+        belong to any of the 7 days on screen at once (the whole week's 24
+        hours share one continuously-scrollable panel, see
+        `WEEK_MAX_DURATION_BLOCKS_PER_DAY`'s own comment). A block's own
+        width additionally splits its day column's live width by
+        `column_count` (SDD.md decision #4) -- `column_index`/`column_count`
+        themselves are pure data computed once in
+        `app.py::_assign_week_meeting_blocks`, never recomputed here.
 
         A collapsed weekend column in "work" week mode (see
         `set_week_column_mode`) legitimately measures 0px -- that is NOT the
         same "not laid out yet" condition `_WEEK_LINE_MIN_PLAUSIBLE_WIDTH_PX`
         exists to detect, so only the currently-visible columns' widths are
-        checked for plausibility; a bar that would belong to a collapsed
+        checked for plausibility; a block that would belong to a collapsed
         column is simply hidden, same as it would be if that day had no
-        bars at all.
+        blocks at all.
+
+        Click/right-click (SDD.md decision #9, the highest-risk part of this
+        whole feature): EVERY visible slot -- real block or aggregate chip
+        alike -- gets both `frame`/`label` rebound on every call, always
+        through `_rebind()`, never skipped. This is deliberately NOT
+        symmetric with `_update_week_cell`'s entry-label handling (which
+        only rebinds slots that ARE showing an entry, leaving unused ones
+        untouched): a pool slot here is reused across renders for
+        DIFFERENT roles (a real meeting's block one render, a wholly
+        different meeting's block or a non-interactive aggregate chip the
+        next), so a slot that goes from "real, clickable meeting" to
+        "aggregate chip" must have its OLD click handler actively replaced
+        -- not just left alone -- or a click on the now-visible aggregate
+        chip would silently re-fire a stale closure for a meeting that may
+        no longer even exist. Rebinding the aggregate case to an explicit
+        no-op (still via `_rebind`, so the previous handler's Tcl command is
+        still properly released) closes that gap while keeping the
+        "aggregate chips are never interactive" behavior identical to
+        `overflow_label`'s own long-standing precedent.
         """
+        pool = self._week_meeting_blocks
         if self._primary_view != "week" or self._gadget_active:
             # Same reasoning as `_apply_week_now_line`'s identical guard --
-            # no widget to place a bar onto, and no reschedule, the moment
+            # no widget to place a block onto, and no reschedule, the moment
             # week view is no longer the visible primary frame.
-            for frame in self._week_duration_blocks:
-                frame.place_forget()
+            for widgets in pool:
+                widgets.frame.place_forget()
             return
 
         show_weekend = self._week_column_mode != "work"
@@ -3232,67 +3468,118 @@ class MainWindow:
         column_widths = [self._week_cells[i].frame.winfo_width() for i in range(WEEK_COLS)]
         column_xs = [self._week_cells[i].frame.winfo_x() for i in range(WEEK_COLS)]
         if any(column_widths[i] < _WEEK_LINE_MIN_PLAUSIBLE_WIDTH_PX for i in visible_day_indices):
-            for frame in self._week_duration_blocks:
-                frame.place_forget()
+            for widgets in pool:
+                widgets.frame.place_forget()
             self._schedule_week_geometry_retry(
-                "_week_duration_retry_count", "_week_duration_retry_job", self._apply_week_duration_blocks
+                "_week_meeting_block_retry_count", "_week_meeting_block_retry_job", self._apply_week_meeting_blocks
             )
             return
 
         total_height_px = WEEK_ROWS * WEEK_ROW_HEIGHT_PX
-        visible_blocks = [b for b in self._week_duration_block_data if b.day_index in visible_day_indices]
-        pool = self._week_duration_blocks
-        for slot, frame in enumerate(pool):
+        visible_blocks = [b for b in self._week_meeting_block_data if b.day_index in visible_day_indices]
+        for slot, widgets in enumerate(pool):
             if slot >= len(visible_blocks):
-                frame.place_forget()
+                widgets.frame.place_forget()
+                widgets.meeting_id = None
                 continue
             block = visible_blocks[slot]
+            column_width = column_widths[block.day_index]
             column_x = column_xs[block.day_index]
+            block_width = max(
+                1.0, (column_width - (block.column_count - 1) * WEEK_BLOCK_GAP_PX) / block.column_count
+            )
+            x = column_x + block.column_index * (block_width + WEEK_BLOCK_GAP_PX)
             y = WEEK_ROW_HEIGHT_PX * block.start_hour_float
             height = WEEK_ROW_HEIGHT_PX * (block.duration_minutes / 60)
-            # Clamp so a meeting crossing midnight clips at the end of its
-            # OWN day's column instead of spilling into the next day's --
-            # SDD.md's explicit decision (a Canvas-based cross-day render is
-            # out of scope for this iteration).
-            height = max(1.0, min(height, total_height_px - y))
-            x = column_x + block.lane * (WEEK_DURATION_BAR_WIDTH_PX + WEEK_DURATION_BAR_GAP_PX)
-            frame.configure(bg=self._week_duration_bar_color(block.color))
-            frame.place(x=x, y=y, width=WEEK_DURATION_BAR_WIDTH_PX, height=height)
+            # Same cross-midnight clip SDD.md already decided for v2.15.0's
+            # bar, unchanged here: a meeting's block clips at the end of its
+            # OWN day's column instead of spilling into the next day's.
+            # `WEEK_BLOCK_MIN_HEIGHT_PX` is the new floor (SDD.md decision
+            # #4) so a very short meeting still renders a legible, clickable
+            # rectangle -- applied AFTER the midnight clip so a short block
+            # placed right at the end of the day still respects that clip
+            # rather than growing past midnight to satisfy the floor.
+            height = max(WEEK_BLOCK_MIN_HEIGHT_PX, min(height, total_height_px - y))
 
-    def _week_duration_bar_color(self, base_color: str) -> str:
-        """Adversarial review, v2.15.0: `block.color` (app.py's
-        `_color_for_work_name`) is a light HLS pastel (lightness 0.74) --
-        WCAG contrast-checked and fine as the bg of `entry_label`'s chip
-        (which always carries black text on top of it, so the chip/panel
-        boundary itself doesn't need to be legible), but the duration bar is
-        a bare rectangle with nothing drawn on it -- its OWN visibility
-        against `PANEL_BG` is all it has. Measured across all 5
-        `APP_THEMES`' `panel_bg` values, at every possible hue this
-        function can produce: worst-case contrast is 5.67:1 (`classic`),
-        6.09:1 (`glass`), 3.26:1 (`aero`) -- all clear the WCAG 3:1
-        non-text-UI-component floor -- except `light`, whose near-white
-        `panel_bg` (#f7f8fa) gives EVERY possible hue a contrast under
-        1.3:1 (100% of hues fail 3:1, worst case 1.18:1): the bar would be
-        essentially invisible for every meeting, in that one theme, always.
-        No single fixed lightness works for both a near-black and a
-        near-white panel at once (measured: darkening enough to fix `light`
-        pushes `aero`'s own worst case below 3:1 instead) -- theme-specific
-        HLS lightness is the sane fix, mirroring how `APP_THEMES` already
-        tunes other roles (e.g. `accent`) per theme rather than sharing one
-        value across all 5. Only reached from `_apply_week_duration_blocks`
-        at paint time, so `app.py`'s `WeekDurationBlock.color` stays the
-        same theme-agnostic per-work hue used for the entry chip -- this
-        method re-renders that hue at a darker, `light`-theme-safe lightness
-        (0.30, keeping the same hue and saturation so it's still
-        recognizably "that work's color," just measured at 3.07:1-4.4:1
-        instead of near-1:1) without app.py needing any theme awareness of
-        its own."""
-        if self._app_theme != "light":
-            return base_color
-        red, green, blue = (int(base_color[i : i + 2], 16) / 255 for i in (1, 3, 5))
-        hue, _lightness, saturation = colorsys.rgb_to_hls(red, green, blue)
-        red, green, blue = colorsys.hls_to_rgb(hue, 0.30, saturation)
-        return "#{:02x}{:02x}{:02x}".format(int(red * 255), int(green * 255), int(blue * 255))
+            is_selected = (not block.is_overflow) and block.meeting_id == self._week_selected_meeting_id
+            text_available_px = block_width - 2 * WEEK_BLOCK_LABEL_INSET_PX
+            if block.is_overflow:
+                bg = CHIP_BG
+                text_fg = MUTED
+                text = self._format_week_aggregate_text(block, text_available_px)
+                cursor = ""
+            else:
+                bg = block.color
+                text_fg = "black"
+                text = self._format_week_block_text(block, text_available_px)
+                cursor = "hand2"
+            # `highlightbackground` deliberately uses the fixed
+            # `WEEK_BLOCK_SELECTION_BORDER`, NOT the themed `ACCENT` --
+            # see that constant's own comment for the measured reason
+            # (a block's fill is always a fixed light pastel, and every
+            # theme's own `ACCENT` is a blue/cyan hue that can coincide
+            # with it closely enough to make the selection ring nearly
+            # invisible).
+            widgets.frame.configure(
+                bg=bg, cursor=cursor,
+                highlightthickness=2 if is_selected else 0,
+                highlightbackground=WEEK_BLOCK_SELECTION_BORDER,
+            )
+            widgets.label.configure(bg=bg, fg=text_fg, text=text, cursor=cursor)
+            widgets.frame.place(x=x, y=y, width=block_width, height=height)
+
+            widgets.meeting_id = block.meeting_id
+            if block.is_overflow:
+                # Non-interactive (SDD.md decision #3, same precedent as
+                # `overflow_label`) -- but this pool slot may have shown a
+                # REAL, clickable meeting on an earlier render, so its old
+                # handler must be actively replaced with a no-op, not just
+                # left alone (see this method's own docstring for why that
+                # distinction matters here specifically).
+                widgets.bind_funcids["frame_left"] = _rebind(
+                    widgets.frame, "<Button-1>", lambda _e: None, widgets.bind_funcids.get("frame_left")
+                )
+                widgets.bind_funcids["frame_right"] = _rebind(
+                    widgets.frame, "<Button-3>", lambda _e: None, widgets.bind_funcids.get("frame_right")
+                )
+                widgets.bind_funcids["label_left"] = _rebind(
+                    widgets.label, "<Button-1>", lambda _e: None, widgets.bind_funcids.get("label_left")
+                )
+                widgets.bind_funcids["label_right"] = _rebind(
+                    widgets.label, "<Button-3>", lambda _e: None, widgets.bind_funcids.get("label_right")
+                )
+            else:
+                left_click = lambda _e, mid=block.meeting_id: self._handle_week_entry_select(mid)
+                right_click = lambda e, mid=block.meeting_id, n=block.series_occurrence_count: (
+                    self._show_week_entry_context_menu(e, mid, n)
+                )
+                widgets.bind_funcids["frame_left"] = _rebind(
+                    widgets.frame, "<Button-1>", left_click, widgets.bind_funcids.get("frame_left")
+                )
+                widgets.bind_funcids["frame_right"] = _rebind(
+                    widgets.frame, "<Button-3>", right_click, widgets.bind_funcids.get("frame_right")
+                )
+                widgets.bind_funcids["label_left"] = _rebind(
+                    widgets.label, "<Button-1>", left_click, widgets.bind_funcids.get("label_left")
+                )
+                widgets.bind_funcids["label_right"] = _rebind(
+                    widgets.label, "<Button-3>", right_click, widgets.bind_funcids.get("label_right")
+                )
+
+    def _format_week_aggregate_text(self, block: WeekMeetingBlock, available_px: int) -> str:
+        """The shared "+N más" chip's text (SDD.md decision #3) -- computed
+        at paint time from `self.language`, mirroring how `overflow_label`'s
+        own identical text is computed in `_update_week_cell` rather than
+        precomputed in `app.py` (a block never needs to know the current
+        language; only this file does). Reuses the exact same i18n key,
+        `calendarMoreLabel` -- zero new i18n keys for this whole feature."""
+        text = i18n.format_text("calendarMoreLabel", self.language, count=block.overflow_count)
+        if available_px <= 0:
+            return ""
+        font = self._get_week_block_font()
+        if font.measure(text) <= available_px:
+            return text
+        return _truncate_text_to_pixel_width(text, font, available_px)
 
     def _handle_week_entry_click(self, meeting_id: str) -> None:
         self.callbacks.on_edit(meeting_id)
@@ -3340,7 +3627,15 @@ class MainWindow:
         re-derives the same styling independently on every real render, so
         this path being imperfect could never leave a stale border
         permanently -- but responding on the same click, without waiting for
-        the next heartbeat, is the whole point of having it."""
+        the next heartbeat, is the whole point of having it.
+
+        SDD.md v2.16.0: also walks the meeting-block pool now, comparing
+        against each slot's own `meeting_id` (mirroring `entry_meeting_ids`
+        above) -- a selection made by clicking a BLOCK (most meetings, as
+        of this version) would otherwise only ever get its border applied
+        by `_apply_week_meeting_blocks`'s own render-time fallback (camino
+        2 for blocks), never immediately on the same click, unlike every
+        other selectable surface in this view."""
         for widgets in self._week_cells:
             for index, label in enumerate(widgets.entry_labels):
                 is_selected = (
@@ -3348,6 +3643,19 @@ class MainWindow:
                     and widgets.entry_meeting_ids[index] == self._week_selected_meeting_id
                 )
                 label.configure(highlightthickness=2 if is_selected else 0, highlightbackground=ACCENT)
+        for block_widgets in self._week_meeting_blocks:
+            is_selected = (
+                block_widgets.meeting_id is not None and block_widgets.meeting_id == self._week_selected_meeting_id
+            )
+            # Fixed border color, not themed `ACCENT` -- see
+            # `WEEK_BLOCK_SELECTION_BORDER`'s own comment; must match
+            # `_apply_week_meeting_blocks`'s identical choice for its own
+            # "camino 2" render-time styling, or a selection made via this
+            # immediate path would flash the wrong color until the next
+            # real render corrected it.
+            block_widgets.frame.configure(
+                highlightthickness=2 if is_selected else 0, highlightbackground=WEEK_BLOCK_SELECTION_BORDER,
+            )
 
     def _update_week_toolbar_button_states(self) -> None:
         """Centralizes SDD.md v2.11.0's `state="disabled"`/`"normal"` toggle

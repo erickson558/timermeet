@@ -3,7 +3,7 @@ SDD.md's own explicitly-listed acceptance criteria: `app.py::_save_new`/
 `_save_edit` (the two real bugs the SDD.md design calls out by name --
 duration NOT traveling "for free" via a generic field copy), plus the month
 view's "HH:MM-HH:MM" range text (`_refresh_calendar`). The pure lane-
-assignment math (`_assign_week_duration_blocks`) and `models.py`'s own
+assignment math (`_assign_week_meeting_blocks`) and `models.py`'s own
 normalize/validate clamping are covered in
 `tests/test_app_helpers.py`/`tests/test_models.py` respectively; the weekly
 renewal engine's propagation is covered in `tests/test_recurrence.py`.

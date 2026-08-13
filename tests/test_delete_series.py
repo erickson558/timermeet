@@ -370,6 +370,12 @@ class SeriesOccurrenceCountRefreshTests(unittest.TestCase):
         self.assertEqual(counts, {"standalone": 0, "lagging": 0})
 
     def test_refresh_week_counts_live_siblings_ignoring_misleading_series_size(self):
+        """SDD.md v2.16.0: these three meetings each land on a different day
+        with nothing else that day, so each now gets its own full-color
+        block (SDD.md decision #7) and is DROPPED from `cell.entries`
+        entirely, unlike pre-v2.16.0 -- `series_occurrence_count` must still
+        be correct, just read from `render_week_meeting_blocks`'s own block
+        data instead of the (now empty, for these ids) hour-cell text."""
         self.app.meetings = [
             _meeting(
                 "week-a", seriesId="s3", recurrenceType="weekly", seriesSize=1,
@@ -388,14 +394,21 @@ class SeriesOccurrenceCountRefreshTests(unittest.TestCase):
         self.app._week_anchor = datetime(2026, 8, 12).date()
         self.app._last_rendered_week_signature = None
         render_mock = MagicMock()
+        blocks_mock = MagicMock()
         live_mock = MagicMock()
         with patch.object(self.app.view, "render_week_grid", render_mock), patch.object(
-            self.app.view, "update_week_live_indicators", live_mock
-        ):
+            self.app.view, "render_week_meeting_blocks", blocks_mock
+        ), patch.object(self.app.view, "update_week_live_indicators", live_mock):
             self.app._refresh_week(datetime(2026, 8, 12, 8, 0))
 
+        # Every meeting that day is non-overlapping and gets its own block
+        # -- `cell.entries` is empty for all three (their sole
+        # representation is now the block itself).
         cells = render_mock.call_args[0][2]
-        counts = {entry.meeting_id: entry.series_occurrence_count for entry in self._all_entries(cells)}
+        self.assertEqual(self._all_entries(cells), [])
+
+        blocks = blocks_mock.call_args[0][0]
+        counts = {block.meeting_id: block.series_occurrence_count for block in blocks}
         self.assertEqual(counts, {"week-a": 3, "week-b": 3, "week-c": 3})
 
 

@@ -296,107 +296,141 @@ class WeekViewWidgetTests(unittest.TestCase):
                 self.root.after_cancel(self.view._week_live_retry_job)
                 self.view._week_live_retry_job = None
 
-    def _settle_week_duration_blocks(self, blocks):
+    def _settle_week_meeting_blocks(self, blocks):
         """Same manual-firing technique `_settle_week_live_indicators` uses
         for the live line's own cold-start retry -- drives
-        `render_week_duration_blocks`'s geometry retry through to a final,
+        `render_week_meeting_blocks`'s geometry retry through to a final,
         resolved placement without waiting on the real 300ms timer."""
-        self.view.render_week_duration_blocks(blocks)
+        self.view.render_week_meeting_blocks(blocks)
         attempts = 0
-        while self.view._week_duration_retry_job is not None and attempts <= main_window._WEEK_LINE_MAX_RETRIES:
-            self.root.after_cancel(self.view._week_duration_retry_job)
-            self.view._apply_week_duration_blocks()
+        while (
+            self.view._week_meeting_block_retry_job is not None
+            and attempts <= main_window._WEEK_LINE_MAX_RETRIES
+        ):
+            self.root.after_cancel(self.view._week_meeting_block_retry_job)
+            self.view._apply_week_meeting_blocks()
             attempts += 1
 
-    def test_duration_block_places_at_the_correct_pure_arithmetic_y_and_height(self):
-        """SDD.md v2.15.0: Y/height are pure arithmetic against
+    def _placed_block_widgets(self):
+        return [w for w in self.view._week_meeting_blocks if w.frame.place_info()]
+
+    def test_block_places_at_the_correct_pure_arithmetic_y_and_height(self):
+        """SDD.md v2.16.0: Y/height are pure arithmetic against
         `WEEK_ROW_HEIGHT_PX` -- never `winfo_y()` -- mirroring
         `_apply_week_now_line`'s own Y math exactly."""
         monday = date(2026, 8, 10)
         cells = _full_week(monday, _blank_week_cell(monday, 0), filled_row=0, filled_col=0)
         self.view.render_week_grid("10-16 Ago 2026", ["L 10", "M 11", "M 12", "J 13", "V 14", "S 15", "D 16"], cells)
-        block = main_window.WeekDurationBlock(
-            day_index=0, lane=0, start_hour_float=9.5, duration_minutes=60, color="#ff0000", meeting_id="m1",
+        block = main_window.WeekMeetingBlock(
+            day_index=0, column_index=0, column_count=1, start_hour_float=9.5, duration_minutes=60,
+            color="#ff0000", title="Standup", time_text="09:30", meeting_id="m1",
         )
         try:
-            self._settle_week_duration_blocks([block])
-            placed = [f for f in self.view._week_duration_blocks if f.place_info()]
+            self._settle_week_meeting_blocks([block])
+            placed = self._placed_block_widgets()
             self.assertEqual(len(placed), 1)
-            place_info = placed[0].place_info()
+            place_info = placed[0].frame.place_info()
             self.assertAlmostEqual(float(place_info["y"]), main_window.WEEK_ROW_HEIGHT_PX * 9.5)
             self.assertAlmostEqual(float(place_info["height"]), main_window.WEEK_ROW_HEIGHT_PX * 1.0)
-            self.assertEqual(int(place_info["width"]), main_window.WEEK_DURATION_BAR_WIDTH_PX)
+            column_width = self.view._week_cells[0].frame.winfo_width()
+            self.assertAlmostEqual(float(place_info["width"]), column_width, delta=1.0)
             self.assertEqual(int(place_info["x"]), self.view._week_cells[0].frame.winfo_x())
         finally:
-            self._settle_week_duration_blocks([])
+            self._settle_week_meeting_blocks([])
 
-    def test_two_lanes_in_the_same_day_are_packed_side_by_side(self):
+    def test_two_overlapping_meetings_split_the_column_width_in_half(self):
         monday = date(2026, 8, 10)
         cells = _full_week(monday, _blank_week_cell(monday, 0), filled_row=0, filled_col=0)
         self.view.render_week_grid("10-16 Ago 2026", ["L 10", "M 11", "M 12", "J 13", "V 14", "S 15", "D 16"], cells)
         blocks = [
-            main_window.WeekDurationBlock(
-                day_index=2, lane=0, start_hour_float=9.0, duration_minutes=60, color="#ff0000", meeting_id="m1",
+            main_window.WeekMeetingBlock(
+                day_index=2, column_index=0, column_count=2, start_hour_float=9.0, duration_minutes=60,
+                color="#ff0000", title="A", time_text="09:00", meeting_id="m1",
             ),
-            main_window.WeekDurationBlock(
-                day_index=2, lane=1, start_hour_float=9.0, duration_minutes=60, color="#00ff00", meeting_id="m2",
+            main_window.WeekMeetingBlock(
+                day_index=2, column_index=1, column_count=2, start_hour_float=9.0, duration_minutes=60,
+                color="#00ff00", title="B", time_text="09:00", meeting_id="m2",
             ),
         ]
         try:
-            self._settle_week_duration_blocks(blocks)
-            placed = sorted(
-                (f for f in self.view._week_duration_blocks if f.place_info()),
-                key=lambda f: float(f.place_info()["x"]),
-            )
+            self._settle_week_meeting_blocks(blocks)
+            placed = sorted(self._placed_block_widgets(), key=lambda w: float(w.frame.place_info()["x"]))
             self.assertEqual(len(placed), 2)
-            x0 = float(placed[0].place_info()["x"])
-            x1 = float(placed[1].place_info()["x"])
-            self.assertAlmostEqual(
-                x1 - x0, main_window.WEEK_DURATION_BAR_WIDTH_PX + main_window.WEEK_DURATION_BAR_GAP_PX,
-            )
+            info0 = placed[0].frame.place_info()
+            info1 = placed[1].frame.place_info()
+            column_width = self.view._week_cells[2].frame.winfo_width()
             column_x = self.view._week_cells[2].frame.winfo_x()
-            self.assertEqual(int(x0), column_x)
+            expected_block_width = (column_width - main_window.WEEK_BLOCK_GAP_PX) / 2
+            self.assertAlmostEqual(float(info0["width"]), expected_block_width, delta=1.0)
+            self.assertAlmostEqual(float(info1["width"]), expected_block_width, delta=1.0)
+            self.assertEqual(int(info0["x"]), column_x)
+            self.assertAlmostEqual(
+                float(info1["x"]) - float(info0["x"]),
+                expected_block_width + main_window.WEEK_BLOCK_GAP_PX,
+                delta=1.0,
+            )
         finally:
-            self._settle_week_duration_blocks([])
+            self._settle_week_meeting_blocks([])
 
     def test_a_block_crossing_midnight_clips_at_the_end_of_its_own_day(self):
-        """SDD.md v2.15.0's explicit decision: a meeting whose bar would
-        cross midnight clips at the end of its OWN day's column, never
-        spilling into the next day's."""
+        """SDD.md's explicit decision (unchanged since v2.15.0): a meeting
+        whose block would cross midnight clips at the end of its OWN day's
+        column, never spilling into the next day's."""
         monday = date(2026, 8, 10)
         cells = _full_week(monday, _blank_week_cell(monday, 0), filled_row=0, filled_col=0)
         self.view.render_week_grid("10-16 Ago 2026", ["L 10", "M 11", "M 12", "J 13", "V 14", "S 15", "D 16"], cells)
-        block = main_window.WeekDurationBlock(
-            day_index=0, lane=0, start_hour_float=23.5, duration_minutes=120, color="#ff0000", meeting_id="m1",
+        block = main_window.WeekMeetingBlock(
+            day_index=0, column_index=0, column_count=1, start_hour_float=23.5, duration_minutes=120,
+            color="#ff0000", title="Late", time_text="23:30", meeting_id="m1",
         )
         try:
-            self._settle_week_duration_blocks([block])
-            placed = [f for f in self.view._week_duration_blocks if f.place_info()]
+            self._settle_week_meeting_blocks([block])
+            placed = self._placed_block_widgets()
             self.assertEqual(len(placed), 1)
-            place_info = placed[0].place_info()
+            place_info = placed[0].frame.place_info()
             total_height_px = main_window.WEEK_ROWS * main_window.WEEK_ROW_HEIGHT_PX
             expected_height = total_height_px - main_window.WEEK_ROW_HEIGHT_PX * 23.5
             self.assertAlmostEqual(float(place_info["height"]), expected_height)
         finally:
-            self._settle_week_duration_blocks([])
+            self._settle_week_meeting_blocks([])
+
+    def test_a_very_short_meeting_still_gets_the_minimum_height_floor(self):
+        monday = date(2026, 8, 10)
+        cells = _full_week(monday, _blank_week_cell(monday, 0), filled_row=0, filled_col=0)
+        self.view.render_week_grid("10-16 Ago 2026", ["L 10", "M 11", "M 12", "J 13", "V 14", "S 15", "D 16"], cells)
+        # 5 minutes at WEEK_ROW_HEIGHT_PX=70 would compute to ~5.8px --
+        # well under WEEK_BLOCK_MIN_HEIGHT_PX -- without the floor.
+        block = main_window.WeekMeetingBlock(
+            day_index=0, column_index=0, column_count=1, start_hour_float=9.0, duration_minutes=5,
+            color="#ff0000", title="Quick", time_text="09:00", meeting_id="m1",
+        )
+        try:
+            self._settle_week_meeting_blocks([block])
+            placed = self._placed_block_widgets()
+            self.assertEqual(len(placed), 1)
+            place_info = placed[0].frame.place_info()
+            self.assertGreaterEqual(float(place_info["height"]), main_window.WEEK_BLOCK_MIN_HEIGHT_PX)
+        finally:
+            self._settle_week_meeting_blocks([])
 
     def test_fewer_blocks_than_the_pool_hides_the_unused_slots(self):
         monday = date(2026, 8, 10)
         cells = _full_week(monday, _blank_week_cell(monday, 0), filled_row=0, filled_col=0)
         self.view.render_week_grid("10-16 Ago 2026", ["L 10", "M 11", "M 12", "J 13", "V 14", "S 15", "D 16"], cells)
-        block = main_window.WeekDurationBlock(
-            day_index=1, lane=0, start_hour_float=8.0, duration_minutes=30, color="#ff0000", meeting_id="m1",
+        block = main_window.WeekMeetingBlock(
+            day_index=1, column_index=0, column_count=1, start_hour_float=8.0, duration_minutes=30,
+            color="#ff0000", title="Solo", time_text="08:00", meeting_id="m1",
         )
         try:
-            self._settle_week_duration_blocks([block])
-            placed = [f for f in self.view._week_duration_blocks if f.place_info()]
+            self._settle_week_meeting_blocks([block])
+            placed = self._placed_block_widgets()
             self.assertEqual(len(placed), 1, "every other pool slot must stay hidden")
         finally:
-            self._settle_week_duration_blocks([])
+            self._settle_week_meeting_blocks([])
 
-    def test_duration_blocks_retry_until_geometry_resolves_then_place_correctly(self):
+    def test_meeting_blocks_retry_until_geometry_resolves_then_place_correctly(self):
         """Same cold-start race `test_now_line_retries_until_geometry_resolves_then_places_correctly`
-        proves for the live line, for the new duration-bar overlay's own
+        proves for the live line, for the meeting-block overlay's own
         independent retry job."""
         monday = date(2026, 8, 10)
         cells = _full_week(monday, _blank_week_cell(monday, 0), filled_row=0, filled_col=0)
@@ -410,31 +444,180 @@ class WeekViewWidgetTests(unittest.TestCase):
             return 18 if state["calls"] <= 2 else real_winfo_width()
 
         reference_frame.winfo_width = fake_winfo_width
-        block = main_window.WeekDurationBlock(
-            day_index=0, lane=0, start_hour_float=9.0, duration_minutes=30, color="#ff0000", meeting_id="m1",
+        block = main_window.WeekMeetingBlock(
+            day_index=0, column_index=0, column_count=1, start_hour_float=9.0, duration_minutes=30,
+            color="#ff0000", title="Standup", time_text="09:00", meeting_id="m1",
         )
         try:
-            self.view.render_week_duration_blocks([block])
+            self.view.render_week_meeting_blocks([block])
             self.assertEqual(
-                [f for f in self.view._week_duration_blocks if f.place_info()], [],
+                self._placed_block_widgets(), [],
                 "must stay hidden rather than place at an implausible pre-layout width",
             )
-            self.assertIsNotNone(self.view._week_duration_retry_job, "must self-schedule a retry")
+            self.assertIsNotNone(self.view._week_meeting_block_retry_job, "must self-schedule a retry")
 
-            self.root.after_cancel(self.view._week_duration_retry_job)
-            self.view._apply_week_duration_blocks()
-            self.assertEqual([f for f in self.view._week_duration_blocks if f.place_info()], [])
+            self.root.after_cancel(self.view._week_meeting_block_retry_job)
+            self.view._apply_week_meeting_blocks()
+            self.assertEqual(self._placed_block_widgets(), [])
 
-            self.root.after_cancel(self.view._week_duration_retry_job)
-            self.view._apply_week_duration_blocks()
-            placed = [f for f in self.view._week_duration_blocks if f.place_info()]
+            self.root.after_cancel(self.view._week_meeting_block_retry_job)
+            self.view._apply_week_meeting_blocks()
+            placed = self._placed_block_widgets()
             self.assertEqual(len(placed), 1, "must place once a plausible width is available")
         finally:
             reference_frame.winfo_width = real_winfo_width
-            if self.view._week_duration_retry_job is not None:
-                self.root.after_cancel(self.view._week_duration_retry_job)
-                self.view._week_duration_retry_job = None
-            self._settle_week_duration_blocks([])
+            if self.view._week_meeting_block_retry_job is not None:
+                self.root.after_cancel(self.view._week_meeting_block_retry_job)
+                self.view._week_meeting_block_retry_job = None
+            self._settle_week_meeting_blocks([])
+
+    def test_block_click_selects_and_right_click_opens_context_menu(self):
+        """SDD.md v2.16.0 decision #9 -- the highest-risk part of this
+        feature: a block is now the meeting's PRIMARY clickable surface."""
+        monday = date(2026, 8, 10)
+        cells = _full_week(monday, _blank_week_cell(monday, 0), filled_row=0, filled_col=0)
+        self.view.render_week_grid("10-16 Ago 2026", ["L 10", "M 11", "M 12", "J 13", "V 14", "S 15", "D 16"], cells)
+        block = main_window.WeekMeetingBlock(
+            day_index=0, column_index=0, column_count=1, start_hour_float=9.0, duration_minutes=30,
+            color="#ff0000", title="Standup", time_text="09:00", meeting_id="meeting-block-1",
+            series_occurrence_count=2,
+        )
+        try:
+            self._settle_week_meeting_blocks([block])
+            # A `.place()`d widget only becomes real-event-deliverable
+            # ("viewable") once Tk actually runs a geometry pass -- unlike
+            # the `.grid()`-based cells above (already mapped once at
+            # construction, see `_build_week_view`), this pool's widgets are
+            # freshly placed by the call just above, so a plain
+            # `event_generate` here needs one real event-loop pass first.
+            # (Test-only: this project's "no synchronous `update()`" rule
+            # targets production code, not test setup -- see `setUpClass`'s
+            # own `cls.root.update()` for the existing precedent.)
+            self.root.update()
+            widgets = self._placed_block_widgets()[0]
+
+            widgets.frame.event_generate("<Button-1>")
+            self.assertEqual(self.view._week_selected_meeting_id, "meeting-block-1")
+
+            # `_show_context_menu` must be patched here, same as EVERY other
+            # real `<Button-3>` test in this codebase (see
+            # `tests/test_context_menu.py`'s own module docstring): its real
+            # `tk_popup()` call uses the native Win32 popup-menu API, which
+            # blocks pumping real Windows messages until a human dismisses
+            # it -- confirmed directly to hang this exact test (and, by
+            # extension, the whole suite behind it) indefinitely when this
+            # patch was missing. No synthetic event can dismiss a *native*
+            # menu the way `event_generate` can for an ordinary Tk widget.
+            with patch.object(self.view, "_show_context_menu"):
+                widgets.label.event_generate("<Button-3>")
+            # Right-click both selects (already was) and opens the context
+            # menu -- same production path `_show_week_entry_context_menu`
+            # already uses for `entry_label`; the patch above proves this
+            # reaches that call (and the selection survives) without
+            # depending on `tk_popup()`'s own already-mature native-menu
+            # behavior, same reasoning `test_context_menu.py` already uses.
+            self.assertEqual(self.view._week_selected_meeting_id, "meeting-block-1")
+        finally:
+            self.view.clear_week_selection()
+            self._settle_week_meeting_blocks([])
+
+    def test_aggregate_chip_is_never_bound_to_a_click_handler(self):
+        monday = date(2026, 8, 10)
+        cells = _full_week(monday, _blank_week_cell(monday, 0), filled_row=0, filled_col=0)
+        self.view.render_week_grid("10-16 Ago 2026", ["L 10", "M 11", "M 12", "J 13", "V 14", "S 15", "D 16"], cells)
+        aggregate = main_window.WeekMeetingBlock(
+            day_index=0, column_index=3, column_count=4, start_hour_float=9.0, duration_minutes=60,
+            color="", title="", time_text="", meeting_id=None, is_overflow=True, overflow_count=2,
+        )
+        try:
+            self._settle_week_meeting_blocks([aggregate])
+            self.root.update()  # see the same-reasoning comment above
+            widgets = self._placed_block_widgets()[0]
+            calls = []
+            self.view.callbacks = _make_callbacks(
+                on_edit=lambda mid: calls.append(mid),
+            )
+            widgets.frame.event_generate("<Button-1>")
+            self.assertEqual(self.view._week_selected_meeting_id, None)
+            self.assertEqual(calls, [])
+        finally:
+            self._settle_week_meeting_blocks([])
+
+    def test_repeated_re_renders_of_the_block_pool_do_not_leak_tcl_commands(self):
+        """Same leak-detection method already established in this codebase
+        (tests/test_bind_leak_fixes.py) -- applied here to the new
+        `_week_meeting_blocks` pool's own click/right-click bindings, which
+        (unlike v2.15.0's purely decorative bars) are a REAL new `.bind()`
+        surface introduced by this feature (SDD.md decision #9)."""
+        from tests.testutils import count_tcl_commands
+
+        monday = date(2026, 8, 10)
+        cells = _full_week(monday, _blank_week_cell(monday, 0), filled_row=0, filled_col=0)
+        self.view.render_week_grid("10-16 Ago 2026", ["L 10", "M 11", "M 12", "J 13", "V 14", "S 15", "D 16"], cells)
+
+        def block_for(i: int) -> "main_window.WeekMeetingBlock":
+            return main_window.WeekMeetingBlock(
+                day_index=0, column_index=0, column_count=1, start_hour_float=9.0, duration_minutes=30,
+                color="#ff0000", title=f"Standup {i}", time_text="09:00", meeting_id=f"meeting-{i}",
+            )
+
+        try:
+            # Warm-up (same discipline as every other leak test in this
+            # codebase): the very first bind on a never-before-bound slot
+            # registers a real, permanent (non-leaking) Tcl command.
+            self._settle_week_meeting_blocks([block_for(0)])
+            self._settle_week_meeting_blocks([block_for(1)])
+            baseline = count_tcl_commands(self.root)
+            for i in range(2, 300):
+                self._settle_week_meeting_blocks([block_for(i)])
+            self.assertEqual(
+                count_tcl_commands(self.root), baseline,
+                "298 further real re-renders (each genuinely changing the one block's meeting) must not leak",
+            )
+        finally:
+            self._settle_week_meeting_blocks([])
+
+    # -- SDD.md v2.16.0 decision #5: text-degradation ladder -------------------
+
+    def _make_block(self, title="Standup", time_text="09:00"):
+        return main_window.WeekMeetingBlock(
+            day_index=0, column_index=0, column_count=1, start_hour_float=9.0, duration_minutes=30,
+            color="#ff0000", title=title, time_text=time_text, meeting_id="m1",
+        )
+
+    def test_full_text_shown_when_it_fits(self):
+        block = self._make_block(title="Standup")
+        text = self.view._format_week_block_text(block, available_px=10_000)
+        self.assertEqual(text, "09:00 Standup")
+
+    def test_truncates_with_ellipsis_when_only_partial_title_fits(self):
+        block = self._make_block(title="A Very Long Meeting Title That Cannot Possibly Fit")
+        font = self.view._get_week_block_font()
+        # Wide enough for the prefix plus a handful of title characters,
+        # narrow enough that the full text does not fit.
+        available = font.measure("09:00 A Very")
+        text = self.view._format_week_block_text(block, available_px=available)
+        self.assertTrue(text.endswith("…"))
+        self.assertTrue(text.startswith("09:00 "))
+        self.assertGreater(len(text), len("09:00 …"))
+
+    def test_falls_back_to_bare_time_when_not_one_title_character_fits(self):
+        block = self._make_block(title="Standup")
+        font = self.view._get_week_block_font()
+        # Just enough room for "09:00" alone, not even "09:00 S…".
+        available = font.measure("09:00")
+        text = self.view._format_week_block_text(block, available_px=available)
+        self.assertEqual(text, "09:00")
+
+    def test_empty_string_when_not_even_bare_time_fits(self):
+        block = self._make_block(title="Standup")
+        text = self.view._format_week_block_text(block, available_px=1)
+        self.assertEqual(text, "")
+
+    def test_zero_or_negative_available_width_returns_empty_string(self):
+        block = self._make_block(title="Standup")
+        self.assertEqual(self.view._format_week_block_text(block, available_px=0), "")
+        self.assertEqual(self.view._format_week_block_text(block, available_px=-5), "")
 
     def test_every_header_has_the_right_pair_of_view_switch_buttons(self):
         """Direct proof of SDD.md's v2.9.0 wiring requirement: each of the

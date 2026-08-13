@@ -17,14 +17,14 @@ import threading
 import tkinter as tk
 import webbrowser
 from datetime import date, datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from . import i18n, main_window, models, notifications, recurrence, retention, security, storage
 from .alarm_ui import AlarmController
 from .main_window import (
     CALENDAR_MAX_ENTRIES_PER_CELL,
+    WEEK_MAX_CONCURRENT_SPLIT,
     WEEK_MAX_DURATION_BLOCKS_PER_DAY,
-    WEEK_MAX_DURATION_LANES,
     WEEK_MAX_ENTRIES_PER_CELL,
     Callbacks,
     CalendarCellData,
@@ -32,7 +32,7 @@ from .main_window import (
     MainWindow,
     MeetingCardData,
     WeekCellData,
-    WeekDurationBlock,
+    WeekMeetingBlock,
 )
 from .tray_icon import TrayIcon
 
@@ -67,62 +67,191 @@ def _group_meetings_by_date(meetings: List[models.Meeting]) -> Dict[date, List[m
     return groups
 
 
-def _assign_week_duration_blocks(day_index: int, day_meetings: List[models.Meeting]) -> List[WeekDurationBlock]:
-    """Greedy lane packing for one day's worth of `WeekDurationBlock`s (SDD.md
-    v2.15.0), called once per visible day from `_refresh_week`. Pure/testable
-    on its own -- no Tk widgets involved, only arithmetic and sorting.
+def _cluster_meetings_by_overlap(ordered: List[models.Meeting]) -> List[List[models.Meeting]]:
+    """Groups an already start-time-sorted day's meetings into connected
+    components of overlap (SDD.md v2.16.0 decision #1) -- the standard
+    calendar-layout clustering Google Calendar/Outlook both use, not an
+    invention of this codebase. A cluster keeps accumulating meetings while
+    the next one (by start time) begins BEFORE the latest end time seen so
+    far anywhere in the cluster (`start < cluster_end`, strictly less-than);
+    the moment a meeting starts at or after that running maximum, it can
+    share no widget geometry with anything already in the cluster (even
+    transitively), so it closes the current cluster and opens a new one.
 
-    Sorted by start time; each meeting takes the lowest-index lane whose
-    previous occupant has already ended (`lane_end_hour[lane] <= start`) --
-    the same side-by-side-columns treatment Teams/Outlook use for concurrent
-    events, chosen explicitly over stacking or alpha-blending (see SDD.md's
-    design notes: Tk has no real per-widget alpha for an opaque `Frame`).
-
-    Two independent caps, checked in this order:
-    - `WEEK_MAX_DURATION_LANES`: a meeting that doesn't fit any of the first
-      N concurrency lanes gets no bar at all -- it's still visible via the
-      plain hour-cell text, which stays the sole authority on "what meetings
-      exist"; the bar layer is purely additive.
-    - `WEEK_MAX_DURATION_BLOCKS_PER_DAY`: an independent ceiling on the day's
-      TOTAL bar count (not on concurrency), since the week grid shows all 24
-      hours in one continuously-scrollable panel -- every meeting that day is
-      on screen at once even when nothing overlaps.
-
-    A meeting with no parseable `datetime` is skipped -- it can't have
-    reached this function anyway, since callers only ever pass meetings
-    already grouped by a successfully parsed date (`_group_meetings_by_date`),
-    but the guard costs nothing and avoids a crash if that ever changes.
-    """
-    ordered = sorted(day_meetings, key=_meeting_sort_key)
-    lane_end_hour: List[float] = []
-    blocks: List[WeekDurationBlock] = []
+    `start >= cluster_end` (not `>`) is deliberate, not an off-by-one: a
+    meeting that starts exactly when the busiest-so-far meeting in the
+    cluster ends must NOT be treated as overlapping it (an explicit
+    acceptance criterion) -- back-to-back meetings read as sequential, not
+    concurrent, to a human looking at the grid, and Teams/Outlook agree."""
+    clusters: List[List[models.Meeting]] = []
+    cluster_end: Optional[float] = None
     for meeting in ordered:
-        if len(blocks) >= WEEK_MAX_DURATION_BLOCKS_PER_DAY:
-            break
         when = meeting.local_datetime()
-        if when is None:
-            continue
-        start_hour = when.hour + when.minute / 60
+        start = when.hour + when.minute / 60
+        end = start + meeting.durationMinutes / 60
+        if cluster_end is None or start >= cluster_end:
+            clusters.append([meeting])
+            cluster_end = end
+        else:
+            clusters[-1].append(meeting)
+            cluster_end = max(cluster_end, end)
+    return clusters
+
+
+def _assign_cluster_blocks(
+    day_index: int, cluster: List[models.Meeting], series_sizes: Dict[str, int],
+) -> List[Tuple[WeekMeetingBlock, List[str]]]:
+    """Lane-assigns ONE overlap cluster (see `_cluster_meetings_by_overlap`)
+    and turns it into its final `WeekMeetingBlock`s, per SDD.md v2.16.0
+    decisions #1-#3. Returns `(block, meeting_ids_it_represents)` pairs --
+    the id list is `[meeting.id]` for a normal block and every absorbed
+    meeting's id for the shared "+N más" aggregate -- so the caller can
+    build the "which meetings already have SOME visual representation"
+    set `_refresh_week` needs to stop listing them a second time in their
+    hour-cell's plain text (SDD.md decision #7).
+
+    Lane assignment itself is the same *greedy* "lowest free lane whose
+    previous occupant already ended" algorithm `v2.15.0` used for its own
+    thin bars -- proven (not just asserted) to use exactly as many lanes as
+    the cluster's real peak concurrency, never more: because it always
+    fills the LOWEST available index first, the set of lanes "open" at the
+    cluster's busiest moment is always exactly `{0, ..., peak-1}`, so
+    `len(lane_end_hour)` after processing the whole cluster IS that peak
+    concurrency count, with no separate max-tracking needed."""
+    ordered = sorted(cluster, key=_meeting_sort_key)
+    lane_end_hour: List[float] = []
+    lane_of: Dict[str, int] = {}
+    for meeting in ordered:
+        when = meeting.local_datetime()
+        start = when.hour + when.minute / 60
         assigned_lane = next(
-            (lane for lane, end_hour in enumerate(lane_end_hour) if end_hour <= start_hour), None
+            (lane for lane, end_hour in enumerate(lane_end_hour) if end_hour <= start), None
         )
         if assigned_lane is None:
-            if len(lane_end_hour) >= WEEK_MAX_DURATION_LANES:
-                continue  # every lane still occupied and none left to open -- no bar this time
             assigned_lane = len(lane_end_hour)
             lane_end_hour.append(0.0)
-        lane_end_hour[assigned_lane] = start_hour + meeting.durationMinutes / 60
-        blocks.append(
-            WeekDurationBlock(
-                day_index=day_index,
-                lane=assigned_lane,
-                start_hour_float=start_hour,
-                duration_minutes=meeting.durationMinutes,
-                color=_color_for_work_name(meeting.workName),
-                meeting_id=meeting.id,
-            )
+        lane_end_hour[assigned_lane] = start + meeting.durationMinutes / 60
+        lane_of[meeting.id] = assigned_lane
+
+    def _series_count(meeting: models.Meeting) -> int:
+        if meeting.recurrenceType != "none" and meeting.seriesId:
+            return series_sizes.get(meeting.seriesId, 0)
+        return 0
+
+    def _real_block(meeting: models.Meeting, column_index: int, column_count: int) -> WeekMeetingBlock:
+        when = meeting.local_datetime()
+        start = when.hour + when.minute / 60
+        return WeekMeetingBlock(
+            day_index=day_index,
+            column_index=column_index,
+            column_count=column_count,
+            start_hour_float=start,
+            duration_minutes=meeting.durationMinutes,
+            color=_color_for_work_name(meeting.workName),
+            title=meeting.title,
+            time_text=when.strftime("%H:%M"),
+            series_occurrence_count=_series_count(meeting),
+            meeting_id=meeting.id,
         )
-    return blocks
+
+    real_concurrency = len(lane_end_hour)
+    if real_concurrency <= WEEK_MAX_CONCURRENT_SPLIT:
+        # Common case: this cluster's peak overlap already fits the
+        # structural cap -- every meeting gets its own real, titled block,
+        # `column_count` is just the cluster's real peak concurrency (a
+        # lone meeting still gets `column_count=1`, i.e. the full column
+        # width), never artificially padded up to the cap.
+        column_count = max(real_concurrency, 1)
+        return [
+            (_real_block(meeting, lane_of[meeting.id], column_count), [meeting.id]) for meeting in ordered
+        ]
+
+    # Peak concurrency exceeds the cap (SDD.md decision #3): reserve the
+    # LAST lane as one shared, non-interactive aggregate chip instead of
+    # silently dropping the excess meetings the way v2.15.0's thin bars
+    # did (their 4th+ concurrent meeting had no bar at all, only the
+    # hour-cell text). `column_count` itself becomes the cap, not the real
+    # (larger) concurrency, so the excess meetings' own lane indices
+    # (>= column_count - 1) all collapse onto that one reserved slot.
+    column_count = WEEK_MAX_CONCURRENT_SPLIT
+    real_lane_ceiling = column_count - 1
+    results: List[Tuple[WeekMeetingBlock, List[str]]] = []
+    overflow_meetings: List[models.Meeting] = []
+    for meeting in ordered:
+        lane = lane_of[meeting.id]
+        if lane < real_lane_ceiling:
+            results.append((_real_block(meeting, lane, column_count), [meeting.id]))
+        else:
+            overflow_meetings.append(meeting)
+
+    if overflow_meetings:
+        starts = [m.local_datetime().hour + m.local_datetime().minute / 60 for m in overflow_meetings]
+        ends = [s + m.durationMinutes / 60 for s, m in zip(starts, overflow_meetings)]
+        aggregate = WeekMeetingBlock(
+            day_index=day_index,
+            column_index=real_lane_ceiling,
+            column_count=column_count,
+            start_hour_float=min(starts),
+            duration_minutes=(max(ends) - min(starts)) * 60,
+            color="",
+            title="",
+            time_text="",
+            meeting_id=None,
+            is_overflow=True,
+            overflow_count=len(overflow_meetings),
+        )
+        results.append((aggregate, [m.id for m in overflow_meetings]))
+    return results
+
+
+def _assign_week_meeting_blocks(
+    day_index: int, day_meetings: List[models.Meeting], series_sizes: Optional[Dict[str, int]] = None,
+) -> Tuple[List[WeekMeetingBlock], Set[str]]:
+    """Full-width/split-width "Teams-style" block layout for one day's worth
+    of meetings (SDD.md v2.16.0, replaces `v2.15.0`'s thin-bar
+    `_assign_week_duration_blocks`), called once per visible day from
+    `_refresh_week`. Pure/testable on its own -- no Tk widgets involved,
+    only arithmetic and sorting -- exactly like its predecessor.
+
+    Returns `(blocks, covered_meeting_ids)`: the second element is every
+    meeting id that now has SOME visual representation in this layer (its
+    own real block, or folded into an aggregate "+N más" chip) -- `_refresh_week`
+    needs this set to stop listing those same meetings a second time in
+    their hour-cell's plain text (SDD.md decision #7); a meeting NOT in this
+    set got no representation at all here (only the day-level
+    `WEEK_MAX_DURATION_BLOCKS_PER_DAY` cap below can cause that) and must
+    keep showing in its hour-cell text exactly as it always has.
+
+    Single remaining cap, independent of concurrency, unchanged from
+    `v2.15.0`: `WEEK_MAX_DURATION_BLOCKS_PER_DAY`, a ceiling on the day's
+    TOTAL block count (real + aggregate combined), since the week grid shows
+    all 24 hours in one continuously-scrollable panel -- every meeting that
+    day is on screen at once even when nothing overlaps. Clusters are
+    processed in start-time order and a cluster that would push the running
+    total past the cap has its OWN blocks truncated to whatever budget is
+    left (including, in the rare case that truncation lands exactly on an
+    aggregate chip, silently dropping that chip along with the "coverage"
+    it would have given its absorbed meetings) -- an accepted, documented
+    limitation for an already-extreme compound case (12+ meetings a day AND
+    heavy overlap), not a regression against `v2.15.0`, which had the exact
+    same class of limit for its own 4th+ concurrent meeting."""
+    series_sizes = series_sizes or {}
+    ordered = [m for m in sorted(day_meetings, key=_meeting_sort_key) if m.local_datetime() is not None]
+    clusters = _cluster_meetings_by_overlap(ordered)
+
+    all_blocks: List[WeekMeetingBlock] = []
+    covered_ids: Set[str] = set()
+    for cluster in clusters:
+        if len(all_blocks) >= WEEK_MAX_DURATION_BLOCKS_PER_DAY:
+            break
+        cluster_blocks = _assign_cluster_blocks(day_index, cluster, series_sizes)
+        remaining_budget = WEEK_MAX_DURATION_BLOCKS_PER_DAY - len(all_blocks)
+        if len(cluster_blocks) > remaining_budget:
+            cluster_blocks = cluster_blocks[:remaining_budget]
+        for block, meeting_ids in cluster_blocks:
+            all_blocks.append(block)
+            covered_ids.update(meeting_ids)
+    return all_blocks, covered_ids
 
 
 def _shift_month(year: int, month: int, delta: int) -> Tuple[int, int]:
@@ -916,6 +1045,32 @@ class TimerMeetApp:
         # for the per-hour grouping, same reasoning applies here).
         series_sizes = {sid: len(group) for sid, group in recurrence.group_meetings_by_series(self.meetings).items()}
 
+        # Full-color meeting-block layer (SDD.md v2.16.0, replaces v2.15.0's
+        # thin decorative bar): computed per VISIBLE day from ALL of that
+        # day's meetings (`grouped`, never the hour-capped `hour_meetings`
+        # below, which would silently under-count blocks for a busy day) --
+        # cluster/lane/aggregate-chip logic is `_assign_week_meeting_blocks`'s
+        # own responsibility, not a side effect of hour-cell text truncation.
+        # Computed BEFORE the per-hour `cells` loop below (unlike v2.15.0's
+        # ordering) for two reasons: (1) `covered_ids_by_day` lets that loop
+        # filter out any meeting that already has its own block/aggregate
+        # representation here -- SDD.md decision #7, the old per-hour text
+        # list stops being this view's "source of truth for what meetings
+        # exist" and becomes a rare fallback for the 13th+ meeting of an
+        # already-extreme day; (2) `self.view.render_week_meeting_blocks(...)`
+        # is called before `self.view.render_week_grid(...)` below so that,
+        # by the time `render_week_grid` builds its own
+        # "selection still visible?" backstop, `MainWindow` already has this
+        # render's block data recorded and can fold block meeting ids into
+        # that same check (see `render_week_grid`'s own docstring for why a
+        # block-only selection would otherwise be wiped every render).
+        meeting_blocks: List[WeekMeetingBlock] = []
+        covered_ids_by_day: Dict[date, Set[str]] = {}
+        for day_index, day in enumerate(days):
+            day_blocks, covered_ids = _assign_week_meeting_blocks(day_index, grouped.get(day, []), series_sizes)
+            meeting_blocks.extend(day_blocks)
+            covered_ids_by_day[day] = covered_ids
+
         # First level of grouping reuses `_group_meetings_by_date` (by
         # calendar date, across the whole app); the second level -- by hour
         # within that date -- is local to this view, per SDD.md (no new
@@ -931,18 +1086,32 @@ class TimerMeetApp:
         cells: List[WeekCellData] = []
         for hour in range(24):
             for day in days:
+                covered_ids = covered_ids_by_day.get(day, set())
+                # SDD.md v2.16.0 decision #7: a meeting that already has a
+                # real block or is folded into this day's aggregate "+N más"
+                # chip is dropped from the plain hour-cell text entirely --
+                # its own block/chip IS its visual representation now, and
+                # showing it a second time here would just repeat the same
+                # title (worse, at a stale start-time-only format) right
+                # next to its own colored block. Only a meeting that got NO
+                # representation at all above (only possible via the
+                # independent `WEEK_MAX_DURATION_BLOCKS_PER_DAY` cap, an
+                # already-extreme "12+ meetings this day" case) still
+                # reaches this text list, exactly as it always has.
                 hour_meetings = sorted(
-                    meetings_by_day_and_hour[day].get(hour, []), key=_meeting_sort_key
+                    (
+                        m for m in meetings_by_day_and_hour[day].get(hour, [])
+                        if m.id not in covered_ids
+                    ),
+                    key=_meeting_sort_key,
                 )
                 entries = [
                     CalendarEntry(
                         meeting_id=meeting.id,
                         # Start-time only -- deliberately NOT the month
                         # view's "HH:MM-HH:MM" range (SDD.md v2.15.0 decision
-                        # #5): this hour-cell text stays exactly as before,
-                        # the new duration BAR (see `_assign_week_duration_blocks`
-                        # below) is the additive layer that conveys the
-                        # range visually instead.
+                        # #5, still true post-v2.16.0): this rarely-reached
+                        # fallback text stays exactly as it always has.
                         time_text=meeting.local_datetime().strftime("%H:%M"),
                         title=meeting.title,
                         color=_color_for_work_name(meeting.workName),
@@ -974,22 +1143,15 @@ class TimerMeetApp:
             f"{i18n.t(key, self.language)} {day.day}" for key, day in zip(_CALENDAR_WEEKDAY_KEYS, days)
         ]
 
-        # Duration-bar layer (SDD.md v2.15.0): computed per VISIBLE day from
-        # ALL of that day's meetings (`grouped`, not `hour_meetings`, which
-        # is already capped at `WEEK_MAX_ENTRIES_PER_CELL` per hour and would
-        # silently under-count bars for a busy day) -- lane/bar-count caps
-        # are `_assign_week_duration_blocks`'s own responsibility, not a
-        # side effect of the hour-cell text truncation.
-        duration_blocks: List[WeekDurationBlock] = []
-        for day_index, day in enumerate(days):
-            duration_blocks.extend(_assign_week_duration_blocks(day_index, grouped.get(day, [])))
-
         # Nivel A's dirty-check -- see this method's docstring for why
-        # hour/minute must never be part of this tuple. `duration_blocks`'s
+        # hour/minute must never be part of this tuple. `meeting_blocks`'s
         # own tuple form is folded in here (not just `duration_minutes` on
-        # each cell entry above) so a lane re-assignment -- possible even
-        # when no single meeting's own fields changed, e.g. an overlapping
-        # sibling was deleted -- also triggers a fresh render.
+        # each cell entry above) so a cluster/column re-assignment -- possible
+        # even when no single meeting's own fields changed, e.g. an
+        # overlapping sibling was deleted -- also triggers a fresh render.
+        # Every field of `WeekMeetingBlock` is listed explicitly (SDD.md
+        # v2.16.0 decision #11): a title-only edit (no time/duration change)
+        # must still re-render that meeting's own block text.
         signature = (
             self.language,
             week_range_label,
@@ -1007,13 +1169,21 @@ class TimerMeetApp:
                 for cell in cells
             ),
             tuple(
-                (b.day_index, b.lane, b.start_hour_float, b.duration_minutes, b.color, b.meeting_id)
-                for b in duration_blocks
+                (
+                    b.day_index, b.column_index, b.column_count, b.start_hour_float, b.duration_minutes,
+                    b.color, b.meeting_id, b.title, b.time_text, b.series_occurrence_count,
+                    b.is_overflow, b.overflow_count,
+                )
+                for b in meeting_blocks
             ),
         )
         if signature != self._last_rendered_week_signature:
+            # Block data recorded first -- see the comment above
+            # `meeting_blocks`'s own computation for why `render_week_grid`
+            # needs it already in place before it builds its own
+            # selection-still-visible backstop.
+            self.view.render_week_meeting_blocks(meeting_blocks)
             self.view.render_week_grid(week_range_label, day_header_texts, cells)
-            self.view.render_week_duration_blocks(duration_blocks)
             self._last_rendered_week_signature = signature
 
         # Nivel B's dirty-check -- cheap to recompute every heartbeat (plain

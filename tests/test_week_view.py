@@ -441,7 +441,7 @@ class WeekViewWidgetTests(unittest.TestCase):
             # Restore a known, ungadgeted state for later tests in this class.
             self.view.set_active_view("week")
 
-    def _settle_week_live_indicators(self, today_index, hour, minute):
+    def _settle_week_live_indicators(self, today_index, hour, minute, scroll_to_now=False):
         """Drives `update_week_live_indicators` through to a final,
         geometry-resolved placement without waiting on the real 300ms retry
         timer -- same manual-firing technique
@@ -450,7 +450,9 @@ class WeekViewWidgetTests(unittest.TestCase):
         deterministic placed line regardless of how much real wall-clock
         time has already elapsed since this session's one-time cold-start
         geometry delay (see `_apply_week_now_line`'s docstring)."""
-        self.view.update_week_live_indicators(today_index=today_index, hour=hour, minute=minute)
+        self.view.update_week_live_indicators(
+            today_index=today_index, hour=hour, minute=minute, scroll_to_now=scroll_to_now,
+        )
         attempts = 0
         while self.view._week_live_retry_job is not None and attempts <= main_window._WEEK_LINE_MAX_RETRIES:
             self.root.after_cancel(self.view._week_live_retry_job)
@@ -617,6 +619,121 @@ class WeekViewWidgetTests(unittest.TestCase):
                 self.view._week_live_retry_job = None
             self.view.set_active_view("week")
 
+    def _expected_scroll_to_now_fraction(self, hour, minute):
+        total_height_px = main_window.WEEK_ROWS * main_window.WEEK_ROW_HEIGHT_PX
+        margin_px = main_window.WEEK_AUTOSCROLL_MARGIN_HOURS * main_window.WEEK_ROW_HEIGHT_PX
+        y = main_window.WEEK_ROW_HEIGHT_PX * (hour + minute / 60)
+        return max(0.0, (y - margin_px) / total_height_px)
+
+    def test_scroll_to_now_centers_the_current_hour_with_margin_once_geometry_resolves(self):
+        """Direct regression test for the reported bug: the week grid used
+        to always open scrolled to 00:00, forcing the user to manually
+        scroll ~7 rows to see their morning meetings and the live "now"
+        line. `scroll_to_now=True` (the flag app.py passes on the specific
+        triggers documented in `update_week_live_indicators`'s docstring)
+        must move the scroll close to -- but with a small margin above,
+        never flush against -- the current hour, the instant real geometry
+        is available."""
+        monday = date(2026, 8, 10)
+        cells = _full_week(monday, _blank_week_cell(monday, 0), filled_row=0, filled_col=0)
+        self.view.render_week_grid("10-16 Ago 2026", ["L 10", "M 11", "M 12", "J 13", "V 14", "S 15", "D 16"], cells)
+        canvas = self.view._week_scroll.canvas
+        canvas.yview_moveto(0.0)
+        try:
+            self._settle_week_live_indicators(today_index=2, hour=10, minute=0, scroll_to_now=True)
+
+            self.assertFalse(
+                self.view._week_scroll_to_now_pending, "the one-shot request must be consumed once applied",
+            )
+            self.assertAlmostEqual(
+                canvas.yview()[0], self._expected_scroll_to_now_fraction(10, 0), delta=0.01,
+            )
+        finally:
+            canvas.yview_moveto(0.0)
+            self.view._week_scroll_to_now_pending = False
+
+    def test_scroll_to_now_clamps_to_the_top_for_early_morning_hours(self):
+        """A current time within the first `WEEK_AUTOSCROLL_MARGIN_HOURS` of
+        the day (e.g. 00:30) would compute a negative target -- must clamp
+        to the very top of the grid instead of a nonsensical negative
+        scroll."""
+        monday = date(2026, 8, 10)
+        cells = _full_week(monday, _blank_week_cell(monday, 0), filled_row=0, filled_col=0)
+        self.view.render_week_grid("10-16 Ago 2026", ["L 10", "M 11", "M 12", "J 13", "V 14", "S 15", "D 16"], cells)
+        canvas = self.view._week_scroll.canvas
+        canvas.yview_moveto(0.5)  # start away from the top, so a no-op couldn't pass by accident
+        try:
+            self._settle_week_live_indicators(today_index=2, hour=0, minute=30, scroll_to_now=True)
+
+            self.assertAlmostEqual(canvas.yview()[0], 0.0, delta=0.001)
+        finally:
+            canvas.yview_moveto(0.0)
+            self.view._week_scroll_to_now_pending = False
+
+    def test_scroll_to_now_is_not_reapplied_by_a_later_call_without_the_flag(self):
+        """The load-bearing usability guarantee: a per-minute-style
+        heartbeat call (`scroll_to_now=False`, the default every real
+        heartbeat tick uses) must never yank the scroll position away from
+        wherever the user left it -- proven here by manually scrolling
+        elsewhere first, then calling `update_week_live_indicators` again
+        with the SAME today_index/hour/minute and no scroll request, and
+        asserting the scroll position is untouched."""
+        monday = date(2026, 8, 10)
+        cells = _full_week(monday, _blank_week_cell(monday, 0), filled_row=0, filled_col=0)
+        self.view.render_week_grid("10-16 Ago 2026", ["L 10", "M 11", "M 12", "J 13", "V 14", "S 15", "D 16"], cells)
+        canvas = self.view._week_scroll.canvas
+        try:
+            self._settle_week_live_indicators(today_index=2, hour=10, minute=0, scroll_to_now=True)
+            first_fraction = canvas.yview()[0]
+            # Requesting 0.9 outright (rather than reading back whatever
+            # Tk actually applied) would be a fragile assumption here: this
+            # panel's real viewport covers a large fraction of the total
+            # scrollable content, so `yview_moveto` legitimately CLAMPS a
+            # request that would push the bottom of the view past 1.0 --
+            # confirmed directly (not assumed) against this same widget
+            # tree. What matters for this test is only that the manual
+            # scroll actually moved the view somewhere else, and that the
+            # later no-flag call doesn't move it AGAIN -- not the exact
+            # fraction Tk settles on.
+            canvas.yview_moveto(0.9)
+            manual_fraction = canvas.yview()[0]
+            self.assertNotAlmostEqual(
+                manual_fraction, first_fraction, delta=0.01,
+                msg="the manual scroll itself must have actually moved the view, or this test proves nothing",
+            )
+
+            # Same state as before, no scroll_to_now -- mirrors a real
+            # heartbeat tick re-confirming an unchanged minute.
+            self._settle_week_live_indicators(today_index=2, hour=10, minute=0, scroll_to_now=False)
+
+            self.assertAlmostEqual(
+                canvas.yview()[0], manual_fraction, delta=0.01,
+                msg="a call without scroll_to_now must never move the user's own scroll position",
+            )
+        finally:
+            canvas.yview_moveto(0.0)
+            self.view._week_scroll_to_now_pending = False
+
+    def test_scroll_to_now_is_skipped_when_the_shown_week_has_no_today(self):
+        """Navigating to a week that isn't the real current one has no
+        "now" to center on -- `today_index=None` -- so even a (defensively
+        impossible in real app.py usage, see `update_week_live_indicators`'s
+        docstring) stray `scroll_to_now=True` request must be a no-op,
+        leaving whatever scroll position was already there untouched."""
+        monday = date(2026, 8, 10)
+        cells = _full_week(monday, _blank_week_cell(monday, 0), filled_row=0, filled_col=0)
+        self.view.render_week_grid("10-16 Ago 2026", ["L 10", "M 11", "M 12", "J 13", "V 14", "S 15", "D 16"], cells)
+        canvas = self.view._week_scroll.canvas
+        canvas.yview_moveto(0.4)
+        try:
+            self._settle_week_live_indicators(today_index=None, hour=9, minute=0, scroll_to_now=True)
+
+            self.assertFalse(self.view._week_scroll_to_now_pending)
+            self.assertAlmostEqual(canvas.yview()[0], 0.4, delta=0.01)
+        finally:
+            canvas.yview_moveto(0.0)
+            self.view._week_scroll_to_now_pending = False
+
 
 @unittest.skipUnless(tk is not None, "Tkinter is not importable in this environment")
 class WeekViewGatingTests(unittest.TestCase):
@@ -731,6 +848,81 @@ class WeekViewGatingTests(unittest.TestCase):
         self.app._refresh_week(datetime(2026, 8, 12, 9, 0))
         called_today_index = self.live_mock.call_args[0][0]
         self.assertEqual(called_today_index, 2)
+
+    def test_refresh_week_forwards_scroll_to_now_to_the_view(self):
+        self.app._refresh_week(datetime(2026, 8, 12, 9, 0), scroll_to_now=True)
+        self.assertTrue(self.live_mock.call_args.kwargs.get("scroll_to_now"))
+
+    def test_refresh_week_defaults_scroll_to_now_to_false(self):
+        self.app._refresh_week(datetime(2026, 8, 12, 9, 0))
+        self.assertFalse(self.live_mock.call_args.kwargs.get("scroll_to_now"))
+
+    def test_refresh_week_forces_the_call_through_even_when_live_state_is_unchanged(self):
+        """Nivel B's dirty-check exists to skip redundant `.configure()`/
+        `.place()` calls when nothing changed -- but a real scroll-to-now
+        request carries no footprint of its own inside `live_state`
+        (today_index/hour/minute), so it must bypass that gate entirely or
+        it would be silently swallowed on the (rare but real) tick where the
+        state happens to already match the last recorded one."""
+        now = datetime(2026, 8, 12, 9, 30, 0)
+        self.app._refresh_week(now)
+        self.assertEqual(self.live_mock.call_count, 1)
+
+        # Unchanged state, no request -- Nivel B's ordinary gate applies.
+        self.app._refresh_week(now)
+        self.assertEqual(self.live_mock.call_count, 1)
+
+        # Unchanged state, WITH a request -- must still reach the view.
+        self.app._refresh_week(now, scroll_to_now=True)
+        self.assertEqual(self.live_mock.call_count, 2)
+        self.assertTrue(self.live_mock.call_args.kwargs.get("scroll_to_now"))
+
+    def test_handle_set_active_view_requests_scroll_to_now_only_when_entering_week_from_elsewhere(self):
+        """Two of `app.py`'s three documented auto-scroll triggers funnel
+        through `handle_set_active_view`: a real transition INTO week view
+        must request it, but a redundant call/heartbeat tick while already
+        in week view must not keep re-requesting it forever (which would
+        defeat the whole point -- the user's own later manual scroll would
+        get yanked back on the very next heartbeat)."""
+        self.app.active_view = "list"
+        refresh_week_mock = MagicMock()
+        with patch.object(self.app, "_refresh_week", refresh_week_mock):
+            self.app.handle_set_active_view("week")
+            self.assertTrue(refresh_week_mock.call_args.kwargs.get("scroll_to_now"))
+
+            # A later heartbeat-style refresh while already in week view
+            # (not a fresh handle_set_active_view("week") call) must not
+            # see the request again -- it was a one-shot, already consumed.
+            refresh_week_mock.reset_mock()
+            self.app._refresh_all()
+            self.assertFalse(refresh_week_mock.call_args.kwargs.get("scroll_to_now"))
+
+    def test_handle_set_active_view_does_not_request_scroll_to_now_when_leaving_week_view(self):
+        self.app.active_view = "week"
+        refresh_week_mock = MagicMock()
+        with patch.object(self.app, "_refresh_week", refresh_week_mock):
+            self.app.handle_set_active_view("list")
+            self.assertEqual(refresh_week_mock.call_count, 0, "list view must never call _refresh_week at all")
+
+    def test_handle_week_today_requests_scroll_to_now(self):
+        self.app.active_view = "week"
+        refresh_week_mock = MagicMock()
+        with patch.object(self.app, "_refresh_week", refresh_week_mock):
+            self.app.handle_week_today()
+            self.assertTrue(refresh_week_mock.call_args.kwargs.get("scroll_to_now"))
+
+    def test_handle_week_prev_and_next_do_not_request_scroll_to_now(self):
+        """Navigating between weeks (Prev/Next) is deliberately excluded
+        from the auto-scroll triggers -- the user is looking at a specific
+        week on purpose, not asking to see "now" again."""
+        self.app.active_view = "week"
+        refresh_week_mock = MagicMock()
+        with patch.object(self.app, "_refresh_week", refresh_week_mock):
+            self.app.handle_week_prev()
+            self.assertFalse(refresh_week_mock.call_args.kwargs.get("scroll_to_now"))
+            refresh_week_mock.reset_mock()
+            self.app.handle_week_next()
+            self.assertFalse(refresh_week_mock.call_args.kwargs.get("scroll_to_now"))
 
     def test_refresh_all_skips_both_week_render_levels_while_gadget_mode_is_active(self):
         """Drives the REAL `app.py::_refresh_all()` heartbeat entry point

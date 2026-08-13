@@ -344,6 +344,14 @@ class TimerMeetApp:
         self._last_rendered_calendar_signature = None
         self._last_rendered_week_signature = None  # Nivel A, see `_refresh_week`
         self._last_rendered_week_live_state = None  # Nivel B, see `_refresh_week`
+        # One-shot request for the week view's auto-scroll-to-now (v2.14.1):
+        # set True by `handle_set_active_view` (entering week view from
+        # another view) and `handle_week_today`, consumed by the very next
+        # `_refresh_all` -> `_refresh_week` call regardless of which of
+        # those two set it. Never set True by the heartbeat itself, which is
+        # exactly what keeps a per-minute re-render from ever re-centering
+        # the scroll out from under a user who scrolled elsewhere manually.
+        self._week_scroll_to_now_requested = False
 
         callbacks = Callbacks(
             on_save=self.handle_save,
@@ -693,7 +701,12 @@ class TimerMeetApp:
         if self.active_view == "calendar" and not self.gadget_mode:
             self._refresh_calendar(now)
         elif self.active_view == "week" and not self.gadget_mode:
-            self._refresh_week(now)
+            # `_week_scroll_to_now_requested` is consumed here, unconditionally,
+            # the moment it's actually handed to `_refresh_week` -- a one-shot
+            # flag, not a standing state, so a later heartbeat tick (this
+            # same `elif` branch, ~1s later) never re-sends `True` on its own.
+            self._refresh_week(now, scroll_to_now=self._week_scroll_to_now_requested)
+            self._week_scroll_to_now_requested = False
 
         # A near-zero-cost no-op unless gadget mode is active; piggybacks on
         # this existing 1s heartbeat instead of a separate self-rescheduling
@@ -797,11 +810,16 @@ class TimerMeetApp:
             self.view.render_calendar(month_label, weekday_labels, cells)
             self._last_rendered_calendar_signature = signature
 
-    def _refresh_week(self, now: datetime) -> None:
+    def _refresh_week(self, now: datetime, scroll_to_now: bool = False) -> None:
         """Build this heartbeat's display data for the weekly calendar view.
         Split into two independent dirty-checks, per SDD.md v2.9.0 decision
         #4 -- this is the load-bearing part of this whole feature, not a
         stylistic choice:
+
+        `scroll_to_now` (v2.14.1) is a one-shot request, forwarded from
+        `_refresh_all`, asking the view to re-center its scroll on "now" --
+        see Nivel B's dirty-check below for why it must bypass that gate
+        rather than just being an extra tuple element inside it.
 
         - Nivel A (`render_week_grid`): rebinds `.bind()` click handlers on
           all 168 cells, gated by `_last_rendered_week_signature`, which
@@ -922,8 +940,16 @@ class TimerMeetApp:
         if self.week_column_mode == "work" and today_date.weekday() >= 5:
             today_index = None
         live_state = (today_index, now.hour, now.minute)
-        if live_state != self._last_rendered_week_live_state:
-            self.view.update_week_live_indicators(today_index, now.hour, now.minute)
+        # `or scroll_to_now`: a real scroll-to-now request must always reach
+        # `MainWindow.update_week_live_indicators` -- even on the (rare but
+        # real) tick where `live_state` happens to already equal the last
+        # one recorded, e.g. the user leaves and re-enters week view within
+        # the same real minute. Without this, that request would be
+        # silently swallowed by a dirty-check that exists to skip redundant
+        # `.configure()`/`.place()` calls, not to gate a fresh user-intent
+        # signal that carries no footprint of its own in `live_state`.
+        if live_state != self._last_rendered_week_live_state or scroll_to_now:
+            self.view.update_week_live_indicators(today_index, now.hour, now.minute, scroll_to_now=scroll_to_now)
             self._last_rendered_week_live_state = live_state
 
     def _find_meeting(self, meeting_id: str) -> Optional[models.Meeting]:
@@ -1306,8 +1332,19 @@ class TimerMeetApp:
         # three views live inside the same normal, decorated root window, so
         # switching between them can never interfere with AlarmController's
         # independent Toplevel overlay.
+        # Auto-scroll-to-now (v2.14.1): only a real transition INTO week view
+        # from somewhere else counts -- checked against the OLD value,
+        # before it's overwritten below. Week view's own header never
+        # offers "week" as a target (see `_build_week_view`), so in
+        # practice `self.active_view` is never already "week" here, but the
+        # explicit check keeps this correct even if that ever changes,
+        # instead of quietly re-centering the scroll on every redundant
+        # same-view call.
+        entering_week = view == "week" and self.active_view != "week"
         self.active_view = view
         self.view.set_active_view(view)
+        if entering_week:
+            self._week_scroll_to_now_requested = True
         self._refresh_all()
 
     # -- calendar view ----------------------------------------------------------
@@ -1343,6 +1380,11 @@ class TimerMeetApp:
 
     def handle_week_today(self) -> None:
         self._week_anchor = datetime.now().date()
+        # Auto-scroll-to-now (v2.14.1): the user explicitly asked to see
+        # "now" again, same intent as a fresh entry into week view -- see
+        # `handle_set_active_view`'s own comment for why this is a one-shot
+        # request flag, not a standing state.
+        self._week_scroll_to_now_requested = True
         self._refresh_all()
 
     def handle_week_slot_click(self, day: date, hour: int) -> None:

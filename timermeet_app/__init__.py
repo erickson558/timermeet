@@ -5,4 +5,4 @@ web version's alerts depended on a browser tab staying open and focused; this
 package runs as a plain OS process so alarms fire regardless of any browser.
 """
 
-__version__ = "2.14.0"
+__version__ = "2.14.1"

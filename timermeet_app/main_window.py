@@ -552,6 +552,17 @@ _WEEK_LINE_MIN_PLAUSIBLE_WIDTH_PX = 80
 # that genuinely never resolves can't retry unconditionally forever even if
 # the active-view checks elsewhere in this method somehow have a gap.
 _WEEK_LINE_MAX_RETRIES = 20
+# Auto-scroll-to-now (v2.14.1): how far ABOVE the current time the scroll
+# lands, in whole hours' worth of `WEEK_ROW_HEIGHT_PX`, mirroring Teams'/
+# Outlook's own calendar view (neither ever pins "now" flush against the
+# very top edge -- there's always a little of the preceding hour visible).
+# A fixed hour count, not a fraction of the live viewport height, is a
+# deliberate simplicity/robustness trade-off: the viewport's real pixel
+# height depends on the window's live (resizable) size, which would add a
+# THIRD independent live-geometry dependency to this view (alongside the
+# existing column-width and row-height-derived-Y ones `_apply_week_now_line`
+# already documents) just for a cosmetic margin -- not worth it here.
+WEEK_AUTOSCROLL_MARGIN_HOURS = 1.5
 
 
 def _truncate_week_entry(text: str) -> str:
@@ -1217,6 +1228,16 @@ class MainWindow:
         self._week_live_state: Tuple[Optional[int], int, int] = (None, 0, 0)
         self._week_live_retry_job: Optional[str] = None
         self._week_live_retry_count = 0
+        # One-shot request flag for the auto-scroll-to-now feature (v2.14.1,
+        # see `update_week_live_indicators`'s `scroll_to_now` param): set
+        # True only on the specific triggers app.py decides deserve a
+        # re-center (entering week view, "Esta semana"), consumed (reset to
+        # False) the moment `_apply_week_now_line` actually performs the
+        # scroll. A per-minute heartbeat tick never sets this, so a scroll
+        # already consumed stays consumed until the next real trigger --
+        # the whole reason a per-minute tick can never yank the scroll
+        # position away from the user (see that method's docstring).
+        self._week_scroll_to_now_pending = False
         # Debounce handle for `_schedule_week_now_line_update` (see that
         # method) -- the same `after_idle`-coalescing pattern
         # `_ScrollablePanel._canvas_width_job` already uses for its own
@@ -2683,7 +2704,9 @@ class MainWindow:
         else:
             widgets.overflow_label.grid_remove()
 
-    def update_week_live_indicators(self, today_index: Optional[int], hour: int, minute: int) -> None:
+    def update_week_live_indicators(
+        self, today_index: Optional[int], hour: int, minute: int, scroll_to_now: bool = False,
+    ) -> None:
         """Nivel B (see SDD.md v2.9.0 decision #4): the ONLY two things this
         touches are the 7 day-header labels' colors (highlighting "today")
         and the live time-line's `.place()`/`.place_forget()` -- NEVER
@@ -2695,6 +2718,18 @@ class MainWindow:
         `today_index` is `None` whenever the visible week is not the real
         current week (see SDD.md decision #5) -- the line is hidden and no
         day header is highlighted in that case.
+
+        `scroll_to_now` (v2.14.1) is `False` on every one of those
+        once-a-minute heartbeat calls -- app.py only ever passes `True` from
+        the specific handful of call sites where the user just asked to see
+        "now" (entering week view from another view, "Esta semana"). This
+        method only *records the request*; the real scroll happens in
+        `_apply_week_now_line`, once real geometry is confirmed available,
+        for the exact same cold-start-race reason the live line's own x/width
+        already needs that method's retry loop (see its docstring) -- a
+        request arriving before the grid has ever been laid out this session
+        must survive until that geometry resolves, not scroll against
+        garbage or silently no-op.
         """
         for index, label in enumerate(self._week_day_header_labels):
             if index == today_index:
@@ -2706,6 +2741,16 @@ class MainWindow:
                 # header as "today" and a later tick un-highlights it (e.g.
                 # week navigation, or midnight rollover).
                 label.configure(bg=PANEL_BG, fg=TEXT)
+
+        if scroll_to_now and today_index is not None:
+            # Defensive re-check of `today_index` here too, not just at
+            # app.py's own call sites: this flag is a one-shot LATCH (only
+            # ever set True here, only ever cleared in
+            # `_apply_week_now_line`), so a caller mistake that asked to
+            # scroll-to-now for a week that turns out not to contain today
+            # would otherwise latch `True` with no `today_index` to ever
+            # resolve it against, silently never firing again.
+            self._week_scroll_to_now_pending = True
 
         self._week_live_state = (today_index, hour, minute)
         # A fresh state to place is a fresh attempt at resolving real
@@ -2789,6 +2834,17 @@ class MainWindow:
         since row 0's cells are the first `WEEK_COLS` entries in that
         row-major list).
 
+        Also drives auto-scroll-to-now (v2.14.1, see `_scroll_week_view_to`)
+        off this same successfully-resolved `y`, but only when
+        `self._week_scroll_to_now_pending` is `True` -- i.e. only on the
+        specific triggers app.py opted into via `update_week_live_indicators`'s
+        `scroll_to_now` param, never on an ordinary per-minute heartbeat
+        tick. Piggybacking on this method's own cold-start retry loop below
+        (rather than adding a second one) is what lets a scroll request
+        made before the grid has ever been laid out this session survive
+        until real geometry resolves, exactly like the line's own x/width
+        already has to.
+
         The `width < _WEEK_LINE_MIN_PLAUSIBLE_WIDTH_PX` guard and retry
         below exist because of a real, empirically-confirmed one-time
         cold-start delay: the very first time the week view is ever
@@ -2838,6 +2894,13 @@ class MainWindow:
             # line below has a matching one on the dot right next to it.
             self._week_now_line.place_forget()
             self._week_now_dot.place_forget()
+            # There's no "now" in the shown week to scroll to -- clears a
+            # stale request instead of leaving it latched forever (see
+            # `update_week_live_indicators`'s own defensive `today_index`
+            # check for why this shouldn't normally be reachable with the
+            # flag still `True`, but clearing it here costs nothing and
+            # closes the gap completely).
+            self._week_scroll_to_now_pending = False
             return
         reference_cell = self._week_cells[today_index].frame
         width = reference_cell.winfo_width()
@@ -2867,6 +2930,55 @@ class MainWindow:
         self._week_now_dot.place(
             x=x - dot_radius, y=y + (NOW_LINE_HEIGHT_PX / 2) - dot_radius,
         )
+
+        if self._week_scroll_to_now_pending:
+            self._week_scroll_to_now_pending = False
+            self._scroll_week_view_to(y)
+
+    def _scroll_week_view_to(self, y: float) -> None:
+        """Auto-scroll-to-now (v2.14.1): moves `self._week_scroll`'s canvas
+        so `y` (a pixel offset computed by the caller with the exact same
+        pure-arithmetic `WEEK_ROW_HEIGHT_PX * (hour + minute / 60)` formula
+        `_apply_week_now_line` already uses for the live line itself) lands
+        `WEEK_AUTOSCROLL_MARGIN_HOURS` worth of rows below the top of the
+        visible area, replicating Teams' calendar view always opening with
+        "now" a little below the top edge, never flush against it and never
+        scrolled off past the very first row (`max(0.0, ...)` below).
+
+        Deliberately only reachable from `_apply_week_now_line`'s own
+        success path (i.e. only once that method has already confirmed a
+        real, plausible column width) rather than a separate trigger of its
+        own -- this reuses that method's existing cold-start retry loop for
+        free instead of adding a second, parallel one: if geometry isn't
+        ready yet, `_week_scroll_to_now_pending` simply stays `True` and
+        this runs on that same method's next real invocation.
+
+        `canvas.configure(scrollregion=...)` here is set from this view's
+        own fixed row count/height constants, NOT read back from
+        `canvas.bbox("all")`/`winfo_height()`: `_ScrollablePanel`'s own
+        scrollregion recompute is a SEPARATE debounced pass (scheduled via
+        `after_idle` off `body`'s `<Configure>`), timed independently of the
+        column-width `<Configure>` chain this method reacts to -- calling
+        `yview_moveto` before that separate pass has ever run would compute
+        a fraction against a still-empty scrollregion and silently no-op.
+        Deriving it here from the same fixed constants sidesteps that race
+        entirely (mirrors `_apply_week_now_line`'s own Y math, which is pure
+        arithmetic against `WEEK_ROW_HEIGHT_PX` for exactly the same reason
+        -- see that method's docstring). The two writes never disagree:
+        every row's height is fixed via `grid_rowconfigure(...,
+        minsize=WEEK_ROW_HEIGHT_PX)`, never grown by content, so `body`'s
+        real height is always exactly `WEEK_ROWS * WEEK_ROW_HEIGHT_PX`
+        regardless of which one computed it first. The horizontal (x)
+        component only matters for a horizontal scrollbar this panel
+        doesn't have, so the canvas's current (possibly still-resolving)
+        width is good enough for it.
+        """
+        canvas = self._week_scroll.canvas
+        total_height_px = WEEK_ROWS * WEEK_ROW_HEIGHT_PX
+        canvas.configure(scrollregion=(0, 0, canvas.winfo_width(), total_height_px))
+        margin_px = WEEK_AUTOSCROLL_MARGIN_HOURS * WEEK_ROW_HEIGHT_PX
+        fraction = max(0.0, (y - margin_px) / total_height_px)
+        canvas.yview_moveto(fraction)
 
     def _handle_week_entry_click(self, meeting_id: str) -> None:
         self.callbacks.on_edit(meeting_id)

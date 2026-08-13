@@ -105,6 +105,35 @@ class WeeklySeriesRenewalTests(unittest.TestCase):
         self.assertEqual(len(sizes), 1)
         self.assertEqual(sizes.pop(), len(meetings))
 
+    def test_renewal_propagates_a_custom_duration_to_new_occurrences(self):
+        # SDD.md v2.15.0 acceptance criterion: a series with a non-default
+        # duration (e.g. a 90-minute standup) must NOT reset to the 30-
+        # minute default on renewal -- `extend_series_if_needed` enumerates
+        # fields explicitly rather than spreading the anchor's `to_dict()`,
+        # so `durationMinutes` had to be added there by hand.
+        now = datetime(2026, 8, 7, 19, 0)
+        anchor = models.normalize_meeting(
+            {
+                "workName": "Acme",
+                "title": "Standup",
+                "datetime": "2026-08-07T09:00",
+                "recurrenceType": "daily",
+                "seriesId": "series-duration",
+                "occurrenceIndex": 1,
+                "seriesSize": 1,
+                "durationMinutes": 90,
+            }
+        )
+        meetings = [anchor]
+
+        created = recurrence.run_weekly_series_renewal(meetings, now)
+
+        self.assertGreater(created, 0)
+        newly_created = [m for m in meetings if m.id != anchor.id]
+        self.assertTrue(newly_created)
+        for meeting in newly_created:
+            self.assertEqual(meeting.durationMinutes, 90)
+
     def test_meeting_without_series_id_is_ignored(self):
         now = datetime(2026, 8, 7, 19, 0)
         one_off = models.normalize_meeting(

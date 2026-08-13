@@ -28,6 +28,34 @@ class NormalizeMeetingTests(unittest.TestCase):
         self.assertEqual(len(meeting.workName), security.MAX_WORK_NAME_LENGTH)
         self.assertEqual(len(meeting.notes), security.MAX_NOTES_LENGTH)
 
+    def test_missing_duration_minutes_defaults_to_30(self):
+        # SDD.md v2.15.0: every legacy `data/meetings.json` record (PHP-era
+        # or Python pre-v2.15.0) has no `durationMinutes` key at all -- must
+        # default to 30, never crash or leave the field unset.
+        meeting = models.normalize_meeting({})
+        self.assertEqual(meeting.durationMinutes, models.DEFAULT_DURATION_MINUTES)
+        self.assertEqual(meeting.durationMinutes, 30)
+
+    def test_invalid_duration_minutes_falls_back_to_default(self):
+        for bad_value in ("not-a-number", None, "", [], {}):
+            meeting = models.normalize_meeting({"durationMinutes": bad_value})
+            self.assertEqual(meeting.durationMinutes, models.DEFAULT_DURATION_MINUTES)
+
+    def test_duration_minutes_below_minimum_is_clamped_up(self):
+        meeting = models.normalize_meeting({"durationMinutes": 1})
+        self.assertEqual(meeting.durationMinutes, models.MIN_DURATION_MINUTES)
+
+        meeting = models.normalize_meeting({"durationMinutes": -50})
+        self.assertEqual(meeting.durationMinutes, models.MIN_DURATION_MINUTES)
+
+    def test_duration_minutes_above_maximum_is_clamped_down(self):
+        meeting = models.normalize_meeting({"durationMinutes": 999999})
+        self.assertEqual(meeting.durationMinutes, models.MAX_DURATION_MINUTES)
+
+    def test_duration_minutes_in_range_passes_through_unchanged(self):
+        meeting = models.normalize_meeting({"durationMinutes": 90})
+        self.assertEqual(meeting.durationMinutes, 90)
+
 
 class ValidateMeetingTests(unittest.TestCase):
     def _valid_payload(self, **overrides):
@@ -37,6 +65,7 @@ class ValidateMeetingTests(unittest.TestCase):
             "date": "2026-08-10",  # a Monday
             "time": "09:00",
             "reminderMinutes": "15",
+            "durationMinutes": "30",
             "recurrenceType": "none",
             "occurrenceCount": "1",
             "teamsUrl": "",
@@ -46,6 +75,33 @@ class ValidateMeetingTests(unittest.TestCase):
 
     def test_valid_payload_passes(self):
         self.assertIsNone(models.validate_meeting(self._valid_payload()))
+
+    def test_non_numeric_duration_is_rejected(self):
+        payload = self._valid_payload(durationMinutes="not-a-number")
+        self.assertEqual(models.validate_meeting(payload), "validationDuration")
+
+    def test_duration_below_minimum_is_rejected(self):
+        payload = self._valid_payload(durationMinutes="4")
+        self.assertEqual(models.validate_meeting(payload), "validationDuration")
+
+    def test_duration_above_maximum_is_rejected(self):
+        payload = self._valid_payload(durationMinutes="1441")
+        self.assertEqual(models.validate_meeting(payload), "validationDuration")
+
+    def test_duration_at_the_inclusive_bounds_is_accepted(self):
+        for value in ("5", "1440"):
+            self.assertIsNone(models.validate_meeting(self._valid_payload(durationMinutes=value)))
+
+    def test_duration_check_runs_before_the_weekday_start_check(self):
+        # SDD.md v2.15.0 decision #2: the duration check is inserted
+        # immediately after the date/time check, before the
+        # recurrenceType=="weekdays" check -- proven here by an invalid
+        # duration on a payload that would otherwise also fail the weekday
+        # check (a Saturday start), asserting "validationDuration" wins.
+        payload = self._valid_payload(
+            date="2026-08-08", recurrenceType="weekdays", durationMinutes="not-a-number"  # a Saturday
+        )
+        self.assertEqual(models.validate_meeting(payload), "validationDuration")
 
     def test_missing_work_name_fails_first(self):
         self.assertEqual(models.validate_meeting(self._valid_payload(workName="")), "validationWork")

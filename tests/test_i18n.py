@@ -58,5 +58,25 @@ class WeekViewTranslationKeysTests(unittest.TestCase):
             self.assertIn(key, i18n.translations["en"])
 
 
+class DurationTranslationKeysTests(unittest.TestCase):
+    """SDD.md v2.15.0: exactly 2 new keys, in both languages -- the generic
+    parity test above already enforces this structurally, this documents
+    the specific acceptance criterion by name."""
+
+    def test_duration_keys_exist_in_both_languages_and_are_non_empty(self):
+        for key in ("durationLabel", "validationDuration"):
+            self.assertIn(key, i18n.translations["es"])
+            self.assertIn(key, i18n.translations["en"])
+            self.assertTrue(i18n.translations["es"][key].strip())
+            self.assertTrue(i18n.translations["en"][key].strip())
+
+    def test_duration_label_reuses_minutes_suffix_not_a_new_format_function(self):
+        # SDD.md decision #3 explicitly rules out a new i18n format function
+        # for this field -- the form label composes it inline the same way
+        # `reminderLabel` already does, reusing the existing `minutesSuffix`.
+        self.assertIn("minutesSuffix", i18n.translations["es"])
+        self.assertIn("minutesSuffix", i18n.translations["en"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -22,6 +22,9 @@ SOUND_PROFILES = ("soft", "urgent", "alarm", "siren", "fire")
 DEFAULT_REMINDER_MINUTES = 15
 DEFAULT_SOUND_PROFILE = "soft"
 DEFAULT_RECURRENCE_TYPE = "none"
+DEFAULT_DURATION_MINUTES = 30
+MIN_DURATION_MINUTES = 5
+MAX_DURATION_MINUTES = 1440
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _TIME_RE = re.compile(r"^\d{2}:\d{2}$")
@@ -42,6 +45,7 @@ class Meeting:
     title: str = ""
     datetime: str = ""  # naive local "YYYY-MM-DDTHH:MM", no seconds/timezone
     reminderMinutes: int = DEFAULT_REMINDER_MINUTES
+    durationMinutes: int = DEFAULT_DURATION_MINUTES
     soundProfile: str = DEFAULT_SOUND_PROFILE
     teamsUrl: str = ""
     notes: str = ""
@@ -110,6 +114,15 @@ def normalize_meeting(data: dict) -> Meeting:
         title=security.clamp_text(data.get("title"), security.MAX_TITLE_LENGTH),
         datetime=str(data.get("datetime") or "").strip(),
         reminderMinutes=max(1, _as_int(data.get("reminderMinutes"), DEFAULT_REMINDER_MINUTES)),
+        # Clamp to [MIN, MAX] rather than just falling back on invalid input,
+        # so an out-of-range value (e.g. a hand-edited 9999) is coerced into
+        # something sane instead of stored as-is and breaking the week-view
+        # duration bar's height math. Missing/non-numeric still resolves to
+        # the DEFAULT_DURATION_MINUTES fallback via _as_int() first.
+        durationMinutes=min(
+            MAX_DURATION_MINUTES,
+            max(MIN_DURATION_MINUTES, _as_int(data.get("durationMinutes"), DEFAULT_DURATION_MINUTES)),
+        ),
         soundProfile=normalize_sound_profile(data.get("soundProfile")),
         teamsUrl=teams_url,
         notes=security.clamp_text(data.get("notes"), security.MAX_NOTES_LENGTH),
@@ -154,6 +167,13 @@ def validate_meeting(payload: dict) -> Optional[str]:
         parsed = datetime.strptime(f"{date_value}T{time_value}", "%Y-%m-%dT%H:%M")
     except ValueError:
         return "validationDate"
+
+    try:
+        duration_minutes = float(payload.get("durationMinutes"))
+    except (TypeError, ValueError):
+        return "validationDuration"
+    if not (MIN_DURATION_MINUTES <= duration_minutes <= MAX_DURATION_MINUTES):
+        return "validationDuration"
 
     recurrence_type = normalize_recurrence_type(payload.get("recurrenceType"))
     if recurrence_type == "weekdays" and parsed.weekday() >= 5:  # Mon=0 ... Sat=5, Sun=6

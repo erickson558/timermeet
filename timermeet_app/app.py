@@ -23,6 +23,8 @@ from . import i18n, main_window, models, notifications, recurrence, retention, s
 from .alarm_ui import AlarmController
 from .main_window import (
     CALENDAR_MAX_ENTRIES_PER_CELL,
+    WEEK_MAX_DURATION_BLOCKS_PER_DAY,
+    WEEK_MAX_DURATION_LANES,
     WEEK_MAX_ENTRIES_PER_CELL,
     Callbacks,
     CalendarCellData,
@@ -30,6 +32,7 @@ from .main_window import (
     MainWindow,
     MeetingCardData,
     WeekCellData,
+    WeekDurationBlock,
 )
 from .tray_icon import TrayIcon
 
@@ -62,6 +65,64 @@ def _group_meetings_by_date(meetings: List[models.Meeting]) -> Dict[date, List[m
             continue
         groups.setdefault(when.date(), []).append(meeting)
     return groups
+
+
+def _assign_week_duration_blocks(day_index: int, day_meetings: List[models.Meeting]) -> List[WeekDurationBlock]:
+    """Greedy lane packing for one day's worth of `WeekDurationBlock`s (SDD.md
+    v2.15.0), called once per visible day from `_refresh_week`. Pure/testable
+    on its own -- no Tk widgets involved, only arithmetic and sorting.
+
+    Sorted by start time; each meeting takes the lowest-index lane whose
+    previous occupant has already ended (`lane_end_hour[lane] <= start`) --
+    the same side-by-side-columns treatment Teams/Outlook use for concurrent
+    events, chosen explicitly over stacking or alpha-blending (see SDD.md's
+    design notes: Tk has no real per-widget alpha for an opaque `Frame`).
+
+    Two independent caps, checked in this order:
+    - `WEEK_MAX_DURATION_LANES`: a meeting that doesn't fit any of the first
+      N concurrency lanes gets no bar at all -- it's still visible via the
+      plain hour-cell text, which stays the sole authority on "what meetings
+      exist"; the bar layer is purely additive.
+    - `WEEK_MAX_DURATION_BLOCKS_PER_DAY`: an independent ceiling on the day's
+      TOTAL bar count (not on concurrency), since the week grid shows all 24
+      hours in one continuously-scrollable panel -- every meeting that day is
+      on screen at once even when nothing overlaps.
+
+    A meeting with no parseable `datetime` is skipped -- it can't have
+    reached this function anyway, since callers only ever pass meetings
+    already grouped by a successfully parsed date (`_group_meetings_by_date`),
+    but the guard costs nothing and avoids a crash if that ever changes.
+    """
+    ordered = sorted(day_meetings, key=_meeting_sort_key)
+    lane_end_hour: List[float] = []
+    blocks: List[WeekDurationBlock] = []
+    for meeting in ordered:
+        if len(blocks) >= WEEK_MAX_DURATION_BLOCKS_PER_DAY:
+            break
+        when = meeting.local_datetime()
+        if when is None:
+            continue
+        start_hour = when.hour + when.minute / 60
+        assigned_lane = next(
+            (lane for lane, end_hour in enumerate(lane_end_hour) if end_hour <= start_hour), None
+        )
+        if assigned_lane is None:
+            if len(lane_end_hour) >= WEEK_MAX_DURATION_LANES:
+                continue  # every lane still occupied and none left to open -- no bar this time
+            assigned_lane = len(lane_end_hour)
+            lane_end_hour.append(0.0)
+        lane_end_hour[assigned_lane] = start_hour + meeting.durationMinutes / 60
+        blocks.append(
+            WeekDurationBlock(
+                day_index=day_index,
+                lane=assigned_lane,
+                start_hour_float=start_hour,
+                duration_minutes=meeting.durationMinutes,
+                color=_color_for_work_name(meeting.workName),
+                meeting_id=meeting.id,
+            )
+        )
+    return blocks
 
 
 def _shift_month(year: int, month: int, delta: int) -> Tuple[int, int]:
@@ -749,7 +810,17 @@ class TimerMeetApp:
                 entries = [
                     CalendarEntry(
                         meeting_id=meeting.id,
-                        time_text=meeting.local_datetime().strftime("%H:%M"),
+                        # "HH:MM-HH:MM" (Teams-style start-end range, SDD.md
+                        # v2.15.0), plain ASCII hyphen -- same separator
+                        # convention `i18n.format_week_range` already uses
+                        # for its own ranges. `_last_rendered_calendar_
+                        # signature` already treats `time_text` as an opaque
+                        # string, so a duration-only edit is detected for
+                        # free without touching that tuple.
+                        time_text=(
+                            f"{meeting.local_datetime().strftime('%H:%M')}-"
+                            f"{(meeting.local_datetime() + timedelta(minutes=meeting.durationMinutes)).strftime('%H:%M')}"
+                        ),
                         title=meeting.title,
                         color=_color_for_work_name(meeting.workName),
                         series_occurrence_count=(
@@ -866,6 +937,12 @@ class TimerMeetApp:
                 entries = [
                     CalendarEntry(
                         meeting_id=meeting.id,
+                        # Start-time only -- deliberately NOT the month
+                        # view's "HH:MM-HH:MM" range (SDD.md v2.15.0 decision
+                        # #5): this hour-cell text stays exactly as before,
+                        # the new duration BAR (see `_assign_week_duration_blocks`
+                        # below) is the additive layer that conveys the
+                        # range visually instead.
                         time_text=meeting.local_datetime().strftime("%H:%M"),
                         title=meeting.title,
                         color=_color_for_work_name(meeting.workName),
@@ -874,6 +951,12 @@ class TimerMeetApp:
                             if meeting.recurrenceType != "none" and meeting.seriesId
                             else 0
                         ),
+                        # Only real effect: keeps the Nivel A signature below
+                        # honest -- `time_text` here never changes when only
+                        # duration changes, unlike the month view's own
+                        # range-text (see `CalendarEntry.duration_minutes`'s
+                        # own docstring for why the two views differ).
+                        duration_minutes=meeting.durationMinutes,
                     )
                     for meeting in hour_meetings[:WEEK_MAX_ENTRIES_PER_CELL]
                 ]
@@ -891,8 +974,22 @@ class TimerMeetApp:
             f"{i18n.t(key, self.language)} {day.day}" for key, day in zip(_CALENDAR_WEEKDAY_KEYS, days)
         ]
 
+        # Duration-bar layer (SDD.md v2.15.0): computed per VISIBLE day from
+        # ALL of that day's meetings (`grouped`, not `hour_meetings`, which
+        # is already capped at `WEEK_MAX_ENTRIES_PER_CELL` per hour and would
+        # silently under-count bars for a busy day) -- lane/bar-count caps
+        # are `_assign_week_duration_blocks`'s own responsibility, not a
+        # side effect of the hour-cell text truncation.
+        duration_blocks: List[WeekDurationBlock] = []
+        for day_index, day in enumerate(days):
+            duration_blocks.extend(_assign_week_duration_blocks(day_index, grouped.get(day, [])))
+
         # Nivel A's dirty-check -- see this method's docstring for why
-        # hour/minute must never be part of this tuple.
+        # hour/minute must never be part of this tuple. `duration_blocks`'s
+        # own tuple form is folded in here (not just `duration_minutes` on
+        # each cell entry above) so a lane re-assignment -- possible even
+        # when no single meeting's own fields changed, e.g. an overlapping
+        # sibling was deleted -- also triggers a fresh render.
         signature = (
             self.language,
             week_range_label,
@@ -902,16 +999,21 @@ class TimerMeetApp:
                     cell.day,
                     cell.hour,
                     tuple(
-                        (e.meeting_id, e.time_text, e.title, e.color, e.series_occurrence_count)
+                        (e.meeting_id, e.time_text, e.title, e.color, e.series_occurrence_count, e.duration_minutes)
                         for e in cell.entries
                     ),
                     cell.overflow_count,
                 )
                 for cell in cells
             ),
+            tuple(
+                (b.day_index, b.lane, b.start_hour_float, b.duration_minutes, b.color, b.meeting_id)
+                for b in duration_blocks
+            ),
         )
         if signature != self._last_rendered_week_signature:
             self.view.render_week_grid(week_range_label, day_header_texts, cells)
+            self.view.render_week_duration_blocks(duration_blocks)
             self._last_rendered_week_signature = signature
 
         # Nivel B's dirty-check -- cheap to recompute every heartbeat (plain
@@ -995,6 +1097,10 @@ class TimerMeetApp:
         existing.title = security.clamp_text(payload.get("title"), security.MAX_TITLE_LENGTH)
         existing.datetime = composed_datetime
         existing.reminderMinutes = max(1, int(float(payload.get("reminderMinutes"))))
+        existing.durationMinutes = min(
+            models.MAX_DURATION_MINUTES,
+            max(models.MIN_DURATION_MINUTES, int(float(payload.get("durationMinutes")))),
+        )
         existing.soundProfile = models.normalize_sound_profile(payload.get("soundProfile"))
         existing.teamsUrl = security.clamp_text(payload.get("teamsUrl"), security.MAX_TEAMS_URL_LENGTH)
         existing.notes = security.clamp_text(payload.get("notes"), security.MAX_NOTES_LENGTH)
@@ -1026,6 +1132,7 @@ class TimerMeetApp:
                         "title": payload.get("title"),
                         "datetime": occurrence_date.strftime("%Y-%m-%dT%H:%M"),
                         "reminderMinutes": payload.get("reminderMinutes"),
+                        "durationMinutes": payload.get("durationMinutes"),
                         "soundProfile": payload.get("soundProfile"),
                         "teamsUrl": payload.get("teamsUrl"),
                         "notes": payload.get("notes"),

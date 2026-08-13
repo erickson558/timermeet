@@ -296,6 +296,146 @@ class WeekViewWidgetTests(unittest.TestCase):
                 self.root.after_cancel(self.view._week_live_retry_job)
                 self.view._week_live_retry_job = None
 
+    def _settle_week_duration_blocks(self, blocks):
+        """Same manual-firing technique `_settle_week_live_indicators` uses
+        for the live line's own cold-start retry -- drives
+        `render_week_duration_blocks`'s geometry retry through to a final,
+        resolved placement without waiting on the real 300ms timer."""
+        self.view.render_week_duration_blocks(blocks)
+        attempts = 0
+        while self.view._week_duration_retry_job is not None and attempts <= main_window._WEEK_LINE_MAX_RETRIES:
+            self.root.after_cancel(self.view._week_duration_retry_job)
+            self.view._apply_week_duration_blocks()
+            attempts += 1
+
+    def test_duration_block_places_at_the_correct_pure_arithmetic_y_and_height(self):
+        """SDD.md v2.15.0: Y/height are pure arithmetic against
+        `WEEK_ROW_HEIGHT_PX` -- never `winfo_y()` -- mirroring
+        `_apply_week_now_line`'s own Y math exactly."""
+        monday = date(2026, 8, 10)
+        cells = _full_week(monday, _blank_week_cell(monday, 0), filled_row=0, filled_col=0)
+        self.view.render_week_grid("10-16 Ago 2026", ["L 10", "M 11", "M 12", "J 13", "V 14", "S 15", "D 16"], cells)
+        block = main_window.WeekDurationBlock(
+            day_index=0, lane=0, start_hour_float=9.5, duration_minutes=60, color="#ff0000", meeting_id="m1",
+        )
+        try:
+            self._settle_week_duration_blocks([block])
+            placed = [f for f in self.view._week_duration_blocks if f.place_info()]
+            self.assertEqual(len(placed), 1)
+            place_info = placed[0].place_info()
+            self.assertAlmostEqual(float(place_info["y"]), main_window.WEEK_ROW_HEIGHT_PX * 9.5)
+            self.assertAlmostEqual(float(place_info["height"]), main_window.WEEK_ROW_HEIGHT_PX * 1.0)
+            self.assertEqual(int(place_info["width"]), main_window.WEEK_DURATION_BAR_WIDTH_PX)
+            self.assertEqual(int(place_info["x"]), self.view._week_cells[0].frame.winfo_x())
+        finally:
+            self._settle_week_duration_blocks([])
+
+    def test_two_lanes_in_the_same_day_are_packed_side_by_side(self):
+        monday = date(2026, 8, 10)
+        cells = _full_week(monday, _blank_week_cell(monday, 0), filled_row=0, filled_col=0)
+        self.view.render_week_grid("10-16 Ago 2026", ["L 10", "M 11", "M 12", "J 13", "V 14", "S 15", "D 16"], cells)
+        blocks = [
+            main_window.WeekDurationBlock(
+                day_index=2, lane=0, start_hour_float=9.0, duration_minutes=60, color="#ff0000", meeting_id="m1",
+            ),
+            main_window.WeekDurationBlock(
+                day_index=2, lane=1, start_hour_float=9.0, duration_minutes=60, color="#00ff00", meeting_id="m2",
+            ),
+        ]
+        try:
+            self._settle_week_duration_blocks(blocks)
+            placed = sorted(
+                (f for f in self.view._week_duration_blocks if f.place_info()),
+                key=lambda f: float(f.place_info()["x"]),
+            )
+            self.assertEqual(len(placed), 2)
+            x0 = float(placed[0].place_info()["x"])
+            x1 = float(placed[1].place_info()["x"])
+            self.assertAlmostEqual(
+                x1 - x0, main_window.WEEK_DURATION_BAR_WIDTH_PX + main_window.WEEK_DURATION_BAR_GAP_PX,
+            )
+            column_x = self.view._week_cells[2].frame.winfo_x()
+            self.assertEqual(int(x0), column_x)
+        finally:
+            self._settle_week_duration_blocks([])
+
+    def test_a_block_crossing_midnight_clips_at_the_end_of_its_own_day(self):
+        """SDD.md v2.15.0's explicit decision: a meeting whose bar would
+        cross midnight clips at the end of its OWN day's column, never
+        spilling into the next day's."""
+        monday = date(2026, 8, 10)
+        cells = _full_week(monday, _blank_week_cell(monday, 0), filled_row=0, filled_col=0)
+        self.view.render_week_grid("10-16 Ago 2026", ["L 10", "M 11", "M 12", "J 13", "V 14", "S 15", "D 16"], cells)
+        block = main_window.WeekDurationBlock(
+            day_index=0, lane=0, start_hour_float=23.5, duration_minutes=120, color="#ff0000", meeting_id="m1",
+        )
+        try:
+            self._settle_week_duration_blocks([block])
+            placed = [f for f in self.view._week_duration_blocks if f.place_info()]
+            self.assertEqual(len(placed), 1)
+            place_info = placed[0].place_info()
+            total_height_px = main_window.WEEK_ROWS * main_window.WEEK_ROW_HEIGHT_PX
+            expected_height = total_height_px - main_window.WEEK_ROW_HEIGHT_PX * 23.5
+            self.assertAlmostEqual(float(place_info["height"]), expected_height)
+        finally:
+            self._settle_week_duration_blocks([])
+
+    def test_fewer_blocks_than_the_pool_hides_the_unused_slots(self):
+        monday = date(2026, 8, 10)
+        cells = _full_week(monday, _blank_week_cell(monday, 0), filled_row=0, filled_col=0)
+        self.view.render_week_grid("10-16 Ago 2026", ["L 10", "M 11", "M 12", "J 13", "V 14", "S 15", "D 16"], cells)
+        block = main_window.WeekDurationBlock(
+            day_index=1, lane=0, start_hour_float=8.0, duration_minutes=30, color="#ff0000", meeting_id="m1",
+        )
+        try:
+            self._settle_week_duration_blocks([block])
+            placed = [f for f in self.view._week_duration_blocks if f.place_info()]
+            self.assertEqual(len(placed), 1, "every other pool slot must stay hidden")
+        finally:
+            self._settle_week_duration_blocks([])
+
+    def test_duration_blocks_retry_until_geometry_resolves_then_place_correctly(self):
+        """Same cold-start race `test_now_line_retries_until_geometry_resolves_then_places_correctly`
+        proves for the live line, for the new duration-bar overlay's own
+        independent retry job."""
+        monday = date(2026, 8, 10)
+        cells = _full_week(monday, _blank_week_cell(monday, 0), filled_row=0, filled_col=0)
+        self.view.render_week_grid("10-16 Ago 2026", ["L 10", "M 11", "M 12", "J 13", "V 14", "S 15", "D 16"], cells)
+        reference_frame = self.view._week_cells[0].frame
+        real_winfo_width = reference_frame.winfo_width
+        state = {"calls": 0}
+
+        def fake_winfo_width():
+            state["calls"] += 1
+            return 18 if state["calls"] <= 2 else real_winfo_width()
+
+        reference_frame.winfo_width = fake_winfo_width
+        block = main_window.WeekDurationBlock(
+            day_index=0, lane=0, start_hour_float=9.0, duration_minutes=30, color="#ff0000", meeting_id="m1",
+        )
+        try:
+            self.view.render_week_duration_blocks([block])
+            self.assertEqual(
+                [f for f in self.view._week_duration_blocks if f.place_info()], [],
+                "must stay hidden rather than place at an implausible pre-layout width",
+            )
+            self.assertIsNotNone(self.view._week_duration_retry_job, "must self-schedule a retry")
+
+            self.root.after_cancel(self.view._week_duration_retry_job)
+            self.view._apply_week_duration_blocks()
+            self.assertEqual([f for f in self.view._week_duration_blocks if f.place_info()], [])
+
+            self.root.after_cancel(self.view._week_duration_retry_job)
+            self.view._apply_week_duration_blocks()
+            placed = [f for f in self.view._week_duration_blocks if f.place_info()]
+            self.assertEqual(len(placed), 1, "must place once a plausible width is available")
+        finally:
+            reference_frame.winfo_width = real_winfo_width
+            if self.view._week_duration_retry_job is not None:
+                self.root.after_cancel(self.view._week_duration_retry_job)
+                self.view._week_duration_retry_job = None
+            self._settle_week_duration_blocks([])
+
     def test_every_header_has_the_right_pair_of_view_switch_buttons(self):
         """Direct proof of SDD.md's v2.9.0 wiring requirement: each of the
         three primary headers gets exactly 2 "go to view X" buttons (never

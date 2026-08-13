@@ -152,6 +152,12 @@ def extend_series_if_needed(
                     "title": latest.title,
                     "datetime": cursor_time.strftime("%Y-%m-%dT%H:%M"),
                     "reminderMinutes": latest.reminderMinutes,
+                    # This dict enumerates fields explicitly rather than
+                    # spreading `latest.to_dict()`, so a custom duration on
+                    # the anchor occurrence (e.g. a 90-minute standup) must
+                    # be copied by hand here too, or `normalize_meeting()`
+                    # would quietly default the new occurrence back to 30.
+                    "durationMinutes": latest.durationMinutes,
                     "soundProfile": latest.soundProfile,
                     "teamsUrl": latest.teamsUrl,
                     "notes": latest.notes,

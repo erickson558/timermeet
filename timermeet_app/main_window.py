@@ -19,6 +19,7 @@ CustomTkinter design; see MEMORY/SDD for the tradeoff this was worth making.
 
 from __future__ import annotations
 
+import colorsys
 import tkinter as tk
 import tkinter.font as tkfont
 import tkinter.messagebox as messagebox
@@ -415,8 +416,17 @@ CALENDAR_COLS = 7
 # width-measurement system), so it must keep fitting at that same 960px
 # floor even though most launches default to the wider 1180px window.
 _CALENDAR_ENTRY_MAX_CHARS = 20
-
-
+# Re-measured, not just assumed, for v2.15.0's "HH:MM-HH:MM Título" time
+# range (`app.py::_refresh_calendar`), which is 6 characters longer than the
+# old "HH:MM Título" per entry: a real widget-tree replica of this exact
+# label (font, padx, grid padx, 7-column 960px-floor layout) still clips at
+# the same 20-character budget it always did -- digits/colon/hyphen in the
+# added "-HH:MM" are narrower glyphs than the average title letter they
+# displace, so the pixel margin holds even though the character count no
+# longer buys as many title characters as before (~8 now vs. ~14
+# previously). Left unchanged rather than bumped: raising it even by 1 char
+# measured into negative margin (label content width meeting/exceeding the
+# label's own allotted width) in the same replica.
 def _truncate_calendar_entry(text: str) -> str:
     if len(text) <= _CALENDAR_ENTRY_MAX_CHARS:
         return text
@@ -480,10 +490,16 @@ _WEEK_SCROLLBAR_SPACER_PX = 17
 # against) with every cell otherwise blank: each day column's "fair share"
 # width was ~120px, and font.measure() against that budget (minus the
 # label's own padx margins) found 19 characters as the true fit limit for a
-# representative long title. 16 keeps a deliberate margin below that
-# measured limit -- smaller than the month view's own margin (24 clipped,
-# 20 fits), on purpose, given the column-wide-distortion risk above.
-_WEEK_ENTRY_MAX_CHARS = 16
+# representative long title.
+#
+# Re-measured for v2.15.0's duration-bar gutter (`WEEK_ENTRY_TEXT_GUTTER_PX`
+# below): reserving that gutter shrinks the same 120px budget's true fit
+# limit from 19 to 17 characters (same font.measure() methodology, same
+# 960px floor, re-run against the smaller post-gutter available width). 16
+# kept a margin of 3 below the old 19; 14 keeps that same margin of 3 below
+# the new 17 -- deliberately not re-using the old 16 as-is, since that would
+# leave almost no safety margin against the new, smaller budget.
+_WEEK_ENTRY_MAX_CHARS = 14
 # `day_header_row` (the fixed day-name row) and `grid_frame` (the scrollable
 # hour grid below it) are two SEPARATE frames, each with its own
 # `grid_columnconfigure` for the same 7 day columns -- `weight=1` alone only
@@ -563,6 +579,62 @@ _WEEK_LINE_MAX_RETRIES = 20
 # existing column-width and row-height-derived-Y ones `_apply_week_now_line`
 # already documents) just for a cosmetic margin -- not worth it here.
 WEEK_AUTOSCROLL_MARGIN_HOURS = 1.5
+
+# Duration bars (SDD.md v2.15.0): a thin colored strip along a day column's
+# left edge showing a meeting's start-to-end span, additive to (never a
+# replacement for) the plain "HH:MM Título" hour-cell text -- see
+# `app.py::_refresh_week`'s docstring and the module-level design notes in
+# SDD.md for why a thin bar (not a filled block with the title drawn
+# inside it, and not per-widget alpha blending for overlaps) was chosen.
+# More than this many meetings overlapping at the same moment, in the same
+# day, share only `WEEK_MAX_DURATION_LANES` lanes -- the (lanes+1)th
+# concurrent meeting gets no bar at all, though it's still listed in its
+# hour-cell's plain text (the bar layer is purely additive, never the only
+# way to see a meeting exists).
+WEEK_MAX_DURATION_LANES = 3
+# Independent, second cap -- not on concurrency, but on a single day's
+# TOTAL bar count, since the week grid shows all 24 hours in one
+# continuously-scrollable panel (never 24 separate views), so every
+# meeting in a day is visible on screen at once even if none of them
+# overlap each other in time. 12 is generous for a real day while adding
+# only ~12% to the already-accepted ~718-widget week view budget (SDD.md
+# v2.9.0 decision #8): 12 bars/day * WEEK_COLS (7) = 84 new `Frame`s.
+WEEK_MAX_DURATION_BLOCKS_PER_DAY = 12
+# A "few pixels" strip, per SDD.md's own description -- deliberately much
+# thinner than `WEEK_DAY_COLUMN_MINSIZE_PX` so up to `WEEK_MAX_DURATION_LANES`
+# of these can sit side-by-side inside even the narrowest real day column
+# (~120px at this app's 960px floor) without crowding the entry text this
+# layer is never allowed to cover (see the module docstring above).
+WEEK_DURATION_BAR_WIDTH_PX = 5
+WEEK_DURATION_BAR_GAP_PX = 2
+
+# Adversarial review, v2.15.0: the bars are children of the SAME parent as
+# the hour-cell frames (`grid_frame`, see `_build_week_view`), placed via
+# `.place()` at `x = column_x + lane * (WIDTH + GAP)` -- i.e. anchored to
+# the day column's OWN left edge, the exact same x-origin `entry_label`'s
+# text starts from. Before this constant existed, `entry_label`'s own inset
+# from that edge (highlightthickness + its grid `padx` + its own internal
+# `padx`) measured ~7px -- enough clearance for lane 0 alone (0-5px), but
+# lanes 1 and 2 (7-12px, 14-19px) landed exactly on top of where the entry
+# text starts, so 2-3 concurrent meetings (precisely the case
+# `WEEK_MAX_DURATION_LANES` exists to support) painted a color bar directly
+# over the leading 1-2 characters of whatever meeting text shared that hour
+# cell -- since the bars are raised above the hour cells in stacking order
+# (same technique `_week_now_line` already uses), this wasn't a faint
+# blend, it was an opaque overwrite, contradicting this feature's own
+# explicit design goal (SDD.md v2.15.0 decision #6: "sin tapar el texto").
+# Reserving a real gutter for lanes 0-1 (not all 3 -- see below) and
+# widening `entry_label`/`overflow_label`'s left grid `padx` to clear it
+# (`_build_week_cell`) fixes the common 1-2-concurrent-meeting case
+# completely; only the rare 3rd lane still grazes ~1px into the text
+# column, which is below the threshold of a real visible defect. Reserving
+# for all 3 lanes instead was measured and rejected: it would have pushed
+# `_WEEK_ENTRY_MAX_CHARS` down to ~12 (leaving only ~6 characters for the
+# actual title after the fixed "HH:MM " prefix) to fix a rarer 3-way-overlap
+# case -- a permanent, everyday readability cost bigger than the edge case
+# it would close. `+2` is a small breathing gap so lane 1's bar doesn't sit
+# flush against the first glyph either.
+WEEK_ENTRY_TEXT_GUTTER_PX = 2 * WEEK_DURATION_BAR_WIDTH_PX + WEEK_DURATION_BAR_GAP_PX + 2
 
 
 def _truncate_week_entry(text: str) -> str:
@@ -735,13 +807,23 @@ class CalendarEntry:
     decrements on a partial purge and so can be stale/inflated. `>= 2`
     enables "Eliminar serie completa" in the context menu; `0` or `1`
     doesn't. Never persisted -- presentation data only, recomputed every
-    refresh."""
+    refresh.
+
+    `duration_minutes` (SDD.md v2.15.0): only meaningful for the WEEK view's
+    signature dirty-check (`app.py::_refresh_week`) -- the month view
+    doesn't need it there since its own `time_text` already encodes the end
+    time ("HH:MM-HH:MM"), so a duration-only edit already changes that
+    opaque string and gets detected for free. The week view's `time_text`
+    deliberately stays start-time-only (SDD.md decision #5), so without
+    this field a duration-only edit would leave the week's Nivel A
+    signature unchanged and the new duration bar would never render."""
 
     meeting_id: str
     time_text: str
     title: str
     color: str
     series_occurrence_count: int = 0
+    duration_minutes: int = 0
 
 
 @dataclass
@@ -782,6 +864,26 @@ class WeekCellData:
     hour: int
     entries: List[CalendarEntry]
     overflow_count: int
+
+
+@dataclass
+class WeekDurationBlock:
+    """One duration bar's worth of display data for the weekly calendar
+    view's additive duration-bar layer (SDD.md v2.15.0) -- computed once per
+    `app.py::_refresh_week` call (see `_assign_week_duration_blocks`), never
+    persisted. `day_index`/`lane` are pure layout inputs (0-based column and
+    side-by-side slot within that column, see
+    `MainWindow.render_week_duration_blocks`); `start_hour_float` and
+    `duration_minutes` drive the bar's Y/height the same pure-arithmetic way
+    `_apply_week_now_line` already derives the live time-line's Y, never
+    from `winfo_y()`."""
+
+    day_index: int
+    lane: int
+    start_hour_float: float
+    duration_minutes: int
+    color: str
+    meeting_id: str
 
 
 @dataclass
@@ -1243,6 +1345,20 @@ class MainWindow:
         # `_ScrollablePanel._canvas_width_job` already uses for its own
         # `<Configure>` burst during a live window-resize drag.
         self._week_now_line_configure_job: Optional[str] = None
+        # Duration-bar layer (SDD.md v2.15.0): the pool of pre-built `Frame`s
+        # is created eagerly in `_build_week_view` (`_week_duration_blocks`,
+        # never destroyed/recreated afterwards -- same lifecycle discipline
+        # as `_week_now_line` above); `_week_duration_block_data` is the
+        # latest data `render_week_duration_blocks` was given, replayed by
+        # `_apply_week_duration_blocks` on every geometry retry/`<Configure>`
+        # pass so a cold-start width delay doesn't lose the pending render.
+        # Retry job/counter mirror `_week_live_retry_job`/`_week_live_retry_count`
+        # above -- see `_schedule_week_geometry_retry`, the helper both share
+        # instead of each keeping a fully separate copy of that guard.
+        self._week_duration_blocks: List[tk.Frame] = []
+        self._week_duration_block_data: List[WeekDurationBlock] = []
+        self._week_duration_retry_job: Optional[str] = None
+        self._week_duration_retry_count = 0
         # "last click selected" state for the week view only (SDD.md
         # v2.11.0) -- lives here, not in app.py, per that section's explicit
         # decision: it's purely presentational (which entry has an accent
@@ -1359,15 +1475,15 @@ class MainWindow:
         return frame
 
     def _configure_ttk_style(self) -> None:
-        """The work-field combobox (see `_build_form`) is the only ttk widget
-        in this app -- everything else is plain tkinter (see module
-        docstring for why). ttk.Combobox is the only stock widget that gives
-        both a type-anything entry and a click-to-pick dropdown list, and
-        unlike CustomTkinter it isn't PIL-image-based, so it doesn't carry
-        the same per-widget render cost that ruled CustomTkinter out. `clam`
-        is the only built-in theme where `.map()` actually lets us override
-        fieldbackground/foreground on Windows (the default `vista` theme
-        ignores most of it)."""
+        """The work-field combobox and the duration combobox (see
+        `_build_form`) are the only two ttk widgets in this app -- everything
+        else is plain tkinter (see module docstring for why). ttk.Combobox is
+        the only stock widget that gives both a type-anything entry and a
+        click-to-pick dropdown list, and unlike CustomTkinter it isn't
+        PIL-image-based, so it doesn't carry the same per-widget render cost
+        that ruled CustomTkinter out. `clam` is the only built-in theme where
+        `.map()` actually lets us override fieldbackground/foreground on
+        Windows (the default `vista` theme ignores most of it)."""
         style = ttk.Style(self.root)
         style.theme_use("clam")
         style.configure(
@@ -1714,17 +1830,31 @@ class MainWindow:
 
         date_row = self._track_panel_frame(panel)
         date_row.pack(fill="x", padx=10, pady=(0, 4))
-        date_row.grid_columnconfigure((0, 1), weight=1)
+        date_row.grid_columnconfigure((0, 1, 2), weight=1)
         date_col = self._track_panel_frame(date_row)
         date_col.grid(row=0, column=0, sticky="ew", padx=(0, 4))
         self.date_label = self._add_label(date_col)
         self.date_entry = _entry(date_col)
         self.date_entry.pack(fill="x")
         time_col = self._track_panel_frame(date_row)
-        time_col.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+        time_col.grid(row=0, column=1, sticky="ew", padx=4)
         self.time_label = self._add_label(time_col)
         self.time_entry = _entry(time_col)
         self.time_entry.pack(fill="x")
+        duration_col = self._track_panel_frame(date_row)
+        duration_col.grid(row=0, column=2, sticky="ew", padx=(4, 0))
+        self.duration_label = self._add_label(duration_col)
+        # ttk.Combobox, not tk.OptionMenu: same "dropdown of presets, but
+        # still type-anything" UX the work-name field already needed and
+        # solved with this same style (`_configure_ttk_style` docstring).
+        # OptionMenu can't accept a free-typed value, only tkOptionMenu
+        # presets, so it can't offer a custom duration.
+        self.duration_entry = ttk.Combobox(
+            duration_col, style="TimerMeet.TCombobox", font=(FONT_FAMILY, 11),
+            values=("15", "30", "45", "60", "90", "120"),
+        )
+        self.duration_entry.insert(0, "30")
+        self.duration_entry.pack(fill="x")
 
         self.set_now_button = _button(panel, "", self.callbacks.on_set_now, GHOST_BG, GHOST_FG, GHOST_HOVER)
         self.set_now_button.pack(anchor="w", padx=10, pady=(8, 10))
@@ -2297,6 +2427,19 @@ class MainWindow:
         )
         self._week_now_dot.create_oval(0, 0, dot_d, dot_d, fill=NOW_LINE_COLOR, outline=NOW_LINE_COLOR)
 
+        # Duration-bar pool (SDD.md v2.15.0): `WEEK_MAX_DURATION_BLOCKS_PER_DAY`
+        # x `WEEK_COLS` thin `Frame`s, built once, eagerly, right here
+        # alongside the rest of this view -- never destroyed/recreated
+        # afterwards. `render_week_duration_blocks`/`_apply_week_duration_blocks`
+        # only ever `.place()`/`.place_forget()` these, exactly like
+        # `_week_now_line`/`_week_now_dot` just above, so this never competes
+        # in stacking order with the hour-cell text and needs no `.bind()` of
+        # its own. `bg=WINDOW_BG` at construction is a harmless placeholder --
+        # every real `.place()` call sets the true per-meeting color via
+        # `.configure()` first.
+        for _ in range(WEEK_MAX_DURATION_BLOCKS_PER_DAY * WEEK_COLS):
+            self._week_duration_blocks.append(tk.Frame(grid_frame, bg=WINDOW_BG, highlightthickness=0))
+
         # `_apply_week_now_line` only ever measures ROW 0's cell for a given
         # day column (every row in that column shares its width, see that
         # method's docstring) -- row 0's cells are exactly
@@ -2329,11 +2472,23 @@ class MainWindow:
             entry_label = tk.Label(
                 cell, text="", font=(FONT_FAMILY, 8), anchor="w", cursor="hand2", padx=3,
             )
-            entry_label.grid(row=slot, column=0, sticky="ew", padx=3, pady=1)
+            # Left padx widened to `WEEK_ENTRY_TEXT_GUTTER_PX` (from a plain
+            # 3) so the text never starts underneath the duration-bar lanes
+            # `_apply_week_duration_blocks` places at this same cell's left
+            # edge -- see that constant's own comment for the measurement
+            # behind this exact number and why it reserves for 2 lanes, not
+            # all 3. Right padx (3) is untouched.
+            entry_label.grid(row=slot, column=0, sticky="ew", padx=(WEEK_ENTRY_TEXT_GUTTER_PX, 3), pady=1)
             entry_labels.append(entry_label)
 
         overflow_label = tk.Label(cell, text="", font=(FONT_FAMILY, 8), bg=PANEL_BG, fg=MUTED, anchor="w")
-        overflow_label.grid(row=WEEK_MAX_ENTRIES_PER_CELL, column=0, sticky="ew", padx=4, pady=1)
+        # Same left-gutter reasoning as `entry_label` above, offset by 2px
+        # (this label has no internal `padx` of its own, unlike
+        # `entry_label`'s `padx=3`) so its "+N más" text lines up with the
+        # entry rows above it instead of sitting 2px further left.
+        overflow_label.grid(
+            row=WEEK_MAX_ENTRIES_PER_CELL, column=0, sticky="ew", padx=(WEEK_ENTRY_TEXT_GUTTER_PX + 2, 4), pady=1
+        )
 
         return _WeekCellWidgets(
             frame=cell, entry_labels=entry_labels, overflow_label=overflow_label,
@@ -2433,6 +2588,12 @@ class MainWindow:
         # the `<Configure>`-triggered `_schedule_week_now_line_update` is
         # what actually catches the real, post-recompute geometry.
         self._apply_week_now_line()
+        # SDD.md v2.15.0: the duration bars need the exact same immediate
+        # best-effort re-placement (and eventual real `<Configure>` catch-up
+        # via that same handler) as the live line above -- a work-week
+        # toggle can both reveal/hide weekend bars and shift every other
+        # day column's x.
+        self._apply_week_duration_blocks()
 
     def _primary_view_frame(self) -> tk.Frame:
         if self._primary_view == "calendar":
@@ -2465,6 +2626,9 @@ class MainWindow:
             # this, the retry keeps firing every 300ms for the rest of the
             # session even though week view is no longer on screen.
             self._cancel_week_live_retry()
+            # Same reasoning, same fix, for the v2.15.0 duration-bar
+            # overlay's own independent retry job.
+            self._cancel_week_duration_retry()
             # SDD.md v2.11.0: clear on LEAVING week view (not on entering
             # it) -- by the time the user comes back, it's already empty,
             # so no second clear-on-entry call site is needed. Deliberately
@@ -2776,6 +2940,42 @@ class MainWindow:
                 pass
             self._week_live_retry_job = None
 
+    def _cancel_week_duration_retry(self) -> None:
+        """Same cancellation discipline as `_cancel_week_live_retry` above,
+        for `_apply_week_duration_blocks`'s own retry job (SDD.md v2.15.0) --
+        a separate job/counter pair (`_week_duration_retry_job`/`_count`)
+        since the two overlays can be mid-retry independently, but the same
+        `_schedule_week_geometry_retry` helper and the same call sites
+        (`set_active_view` leaving week view) as the live-line's."""
+        if self._week_duration_retry_job is not None:
+            try:
+                self.root.after_cancel(self._week_duration_retry_job)
+            except Exception:  # nosec B110
+                pass
+            self._week_duration_retry_job = None
+
+    def _schedule_week_geometry_retry(self, retry_count_attr: str, job_attr: str, fn) -> None:
+        """Shared cold-start "geometry not laid out yet" retry pump (SDD.md
+        v2.15.0), factored out of `_apply_week_now_line`'s own inline retry
+        logic so the new duration-bar overlay (`_apply_week_duration_blocks`)
+        reuses the exact same guard instead of a second parallel timer --
+        see `_apply_week_now_line`'s docstring for the underlying
+        empirically-confirmed cold-start delay this retries through, and
+        `_WEEK_LINE_MAX_RETRIES` for why the cap is shared too. `fn` is
+        re-invoked via `self.root.after(300, fn)`, never a synchronous
+        `update()`/`update_idletasks()` call (this project's hard rule)."""
+        count = getattr(self, retry_count_attr) + 1
+        setattr(self, retry_count_attr, count)
+        if count > _WEEK_LINE_MAX_RETRIES:
+            # Give up -- see `_WEEK_LINE_MAX_RETRIES`'s own comment for why
+            # this margin is generous. The caller already hid whatever it
+            # was about to place; a later call that resets the counter
+            # (`update_week_live_indicators`/`render_week_duration_blocks`)
+            # gets a fresh set of attempts.
+            setattr(self, job_attr, None)
+            return
+        setattr(self, job_attr, self.root.after(300, fn))
+
     def _schedule_week_now_line_update(self, _event=None) -> None:
         """Bound (once, at construction -- see `_build_week_view`) to
         `<Configure>` on each of the 7 row-0 week cells. Fixes a real,
@@ -2818,6 +3018,11 @@ class MainWindow:
     def _run_week_now_line_configure_update(self) -> None:
         self._week_now_line_configure_job = None
         self._apply_week_now_line()
+        # SDD.md v2.15.0: the duration bars depend on the exact same 7 day-
+        # column widths/x-positions the live line does, so this one debounced
+        # `<Configure>` pass drives both instead of adding a second listener
+        # on the same 7 cells for the new overlay.
+        self._apply_week_duration_blocks()
 
     def _apply_week_now_line(self) -> None:
         """Places (or hides) the live time-line from `self._week_live_state`
@@ -2907,16 +3112,9 @@ class MainWindow:
         if width < _WEEK_LINE_MIN_PLAUSIBLE_WIDTH_PX:
             self._week_now_line.place_forget()
             self._week_now_dot.place_forget()
-            self._week_live_retry_count += 1
-            if self._week_live_retry_count > _WEEK_LINE_MAX_RETRIES:
-                # Give up -- see the cap's own comment for why this margin
-                # is generous. Leaves the line hidden rather than placed
-                # with implausible geometry; a later `update_week_live_indicators`
-                # call (next heartbeat tick, still gated to once a minute)
-                # resets the counter and gets a fresh set of attempts.
-                self._week_live_retry_job = None
-                return
-            self._week_live_retry_job = self.root.after(300, self._apply_week_now_line)
+            self._schedule_week_geometry_retry(
+                "_week_live_retry_count", "_week_live_retry_job", self._apply_week_now_line
+            )
             return
         x = reference_cell.winfo_x()
         y = WEEK_ROW_HEIGHT_PX * (hour + minute / 60)
@@ -2979,6 +3177,122 @@ class MainWindow:
         margin_px = WEEK_AUTOSCROLL_MARGIN_HOURS * WEEK_ROW_HEIGHT_PX
         fraction = max(0.0, (y - margin_px) / total_height_px)
         canvas.yview_moveto(fraction)
+
+    def render_week_duration_blocks(self, blocks: List[WeekDurationBlock]) -> None:
+        """Nivel A (SDD.md v2.15.0), called from the exact same
+        `app.py::_refresh_week` call site that already calls
+        `render_week_grid`, gated behind that same dirty-check signature --
+        never on a bare per-second heartbeat tick with unchanged data.
+        Records the latest data and (re-)resolves geometry the same way a
+        fresh `update_week_live_indicators` call resets
+        `_week_live_retry_count`: a fresh render is a fresh attempt, not
+        penalized by retries an earlier, unrelated call already spent."""
+        self._week_duration_block_data = blocks
+        self._week_duration_retry_count = 0
+        self._cancel_week_duration_retry()
+        self._apply_week_duration_blocks()
+
+    def _apply_week_duration_blocks(self) -> None:
+        """Places (or hides) every bar in `self._week_duration_blocks` (the
+        fixed pool built once in `_build_week_view`) from
+        `self._week_duration_block_data` (the latest data
+        `render_week_duration_blocks` recorded).
+
+        Y/height are pure arithmetic against `WEEK_ROW_HEIGHT_PX`, exactly
+        like `_apply_week_now_line`'s own Y -- never `winfo_y()`. X/width DO
+        need a live query, same cold-start caveat as that method, but for
+        EVERY visible day column (not just "today"'s) since a duration bar
+        can belong to any of the 7 days on screen at once (the whole week's
+        24 hours share one continuously-scrollable panel, see
+        `WEEK_MAX_DURATION_BLOCKS_PER_DAY`'s own comment).
+
+        A collapsed weekend column in "work" week mode (see
+        `set_week_column_mode`) legitimately measures 0px -- that is NOT the
+        same "not laid out yet" condition `_WEEK_LINE_MIN_PLAUSIBLE_WIDTH_PX`
+        exists to detect, so only the currently-visible columns' widths are
+        checked for plausibility; a bar that would belong to a collapsed
+        column is simply hidden, same as it would be if that day had no
+        bars at all.
+        """
+        if self._primary_view != "week" or self._gadget_active:
+            # Same reasoning as `_apply_week_now_line`'s identical guard --
+            # no widget to place a bar onto, and no reschedule, the moment
+            # week view is no longer the visible primary frame.
+            for frame in self._week_duration_blocks:
+                frame.place_forget()
+            return
+
+        show_weekend = self._week_column_mode != "work"
+        visible_day_indices = [
+            i for i in range(WEEK_COLS) if show_weekend or i not in _WEEKEND_COLUMN_INDICES
+        ]
+        # Row 0's cells are exactly `self._week_cells[0:WEEK_COLS]` (row-major
+        # order, row 0 * WEEK_COLS + col == col) -- same slice
+        # `_apply_week_now_line` reads its own single reference cell from.
+        column_widths = [self._week_cells[i].frame.winfo_width() for i in range(WEEK_COLS)]
+        column_xs = [self._week_cells[i].frame.winfo_x() for i in range(WEEK_COLS)]
+        if any(column_widths[i] < _WEEK_LINE_MIN_PLAUSIBLE_WIDTH_PX for i in visible_day_indices):
+            for frame in self._week_duration_blocks:
+                frame.place_forget()
+            self._schedule_week_geometry_retry(
+                "_week_duration_retry_count", "_week_duration_retry_job", self._apply_week_duration_blocks
+            )
+            return
+
+        total_height_px = WEEK_ROWS * WEEK_ROW_HEIGHT_PX
+        visible_blocks = [b for b in self._week_duration_block_data if b.day_index in visible_day_indices]
+        pool = self._week_duration_blocks
+        for slot, frame in enumerate(pool):
+            if slot >= len(visible_blocks):
+                frame.place_forget()
+                continue
+            block = visible_blocks[slot]
+            column_x = column_xs[block.day_index]
+            y = WEEK_ROW_HEIGHT_PX * block.start_hour_float
+            height = WEEK_ROW_HEIGHT_PX * (block.duration_minutes / 60)
+            # Clamp so a meeting crossing midnight clips at the end of its
+            # OWN day's column instead of spilling into the next day's --
+            # SDD.md's explicit decision (a Canvas-based cross-day render is
+            # out of scope for this iteration).
+            height = max(1.0, min(height, total_height_px - y))
+            x = column_x + block.lane * (WEEK_DURATION_BAR_WIDTH_PX + WEEK_DURATION_BAR_GAP_PX)
+            frame.configure(bg=self._week_duration_bar_color(block.color))
+            frame.place(x=x, y=y, width=WEEK_DURATION_BAR_WIDTH_PX, height=height)
+
+    def _week_duration_bar_color(self, base_color: str) -> str:
+        """Adversarial review, v2.15.0: `block.color` (app.py's
+        `_color_for_work_name`) is a light HLS pastel (lightness 0.74) --
+        WCAG contrast-checked and fine as the bg of `entry_label`'s chip
+        (which always carries black text on top of it, so the chip/panel
+        boundary itself doesn't need to be legible), but the duration bar is
+        a bare rectangle with nothing drawn on it -- its OWN visibility
+        against `PANEL_BG` is all it has. Measured across all 5
+        `APP_THEMES`' `panel_bg` values, at every possible hue this
+        function can produce: worst-case contrast is 5.67:1 (`classic`),
+        6.09:1 (`glass`), 3.26:1 (`aero`) -- all clear the WCAG 3:1
+        non-text-UI-component floor -- except `light`, whose near-white
+        `panel_bg` (#f7f8fa) gives EVERY possible hue a contrast under
+        1.3:1 (100% of hues fail 3:1, worst case 1.18:1): the bar would be
+        essentially invisible for every meeting, in that one theme, always.
+        No single fixed lightness works for both a near-black and a
+        near-white panel at once (measured: darkening enough to fix `light`
+        pushes `aero`'s own worst case below 3:1 instead) -- theme-specific
+        HLS lightness is the sane fix, mirroring how `APP_THEMES` already
+        tunes other roles (e.g. `accent`) per theme rather than sharing one
+        value across all 5. Only reached from `_apply_week_duration_blocks`
+        at paint time, so `app.py`'s `WeekDurationBlock.color` stays the
+        same theme-agnostic per-work hue used for the entry chip -- this
+        method re-renders that hue at a darker, `light`-theme-safe lightness
+        (0.30, keeping the same hue and saturation so it's still
+        recognizably "that work's color," just measured at 3.07:1-4.4:1
+        instead of near-1:1) without app.py needing any theme awareness of
+        its own."""
+        if self._app_theme != "light":
+            return base_color
+        red, green, blue = (int(base_color[i : i + 2], 16) / 255 for i in (1, 3, 5))
+        hue, _lightness, saturation = colorsys.rgb_to_hls(red, green, blue)
+        red, green, blue = colorsys.hls_to_rgb(hue, 0.30, saturation)
+        return "#{:02x}{:02x}{:02x}".format(int(red * 255), int(green * 255), int(blue * 255))
 
     def _handle_week_entry_click(self, meeting_id: str) -> None:
         self.callbacks.on_edit(meeting_id)
@@ -3453,6 +3767,7 @@ class MainWindow:
             "date": self.date_entry.get().strip(),
             "time": self.time_entry.get().strip(),
             "reminderMinutes": self.reminder_entry.get().strip(),
+            "durationMinutes": self.duration_entry.get().strip(),
             "soundProfile": self._sound_label_to_id.get(self._sound_profile_var.get(), "soft"),
             "recurrenceType": self._recurrence_label_to_id.get(self._recurrence_var.get(), "none"),
             "occurrenceCount": self.occurrence_entry.get().strip(),
@@ -3634,6 +3949,7 @@ class MainWindow:
         self._set_entry(self.date_entry, date_part)
         self._set_entry(self.time_entry, time_part)
         self._set_entry(self.reminder_entry, str(meeting.reminderMinutes))
+        self._set_entry(self.duration_entry, str(meeting.durationMinutes))
         self._sound_profile_var.set(self._sound_label_for(meeting.soundProfile))
         self._recurrence_var.set(self._recurrence_label_for(meeting.recurrenceType))
         self._set_entry(self.occurrence_entry, "1")
@@ -3648,6 +3964,7 @@ class MainWindow:
         for entry in (self.work_entry, self.title_entry, self.date_entry, self.time_entry, self.url_entry):
             self._set_entry(entry, "")
         self._set_entry(self.reminder_entry, "15")
+        self._set_entry(self.duration_entry, "30")
         self._set_entry(self.occurrence_entry, "1")
         self.notes_text.delete("1.0", "end")
         self._sound_profile_var.set(self._sound_label_for("soft"))
@@ -3957,6 +4274,7 @@ class MainWindow:
         self.title_label_field.configure(text=tr("titleLabel"))
         self.date_label.configure(text=tr("dateOnlyLabel"))
         self.time_label.configure(text=tr("timeOnlyLabel"))
+        self.duration_label.configure(text=f"{tr('durationLabel')} ({tr('minutesSuffix')})")
         self.set_now_button.configure(text=tr("setNowButton"))
 
         self.reminder_label.configure(text=f"{tr('reminderLabel')} ({tr('minutesSuffix')})")
@@ -4165,14 +4483,16 @@ class MainWindow:
         self.manage_companies_button.configure(
             bg=PANEL_BG, fg=MUTED, activebackground=PANEL_BG, activeforeground=ACCENT,
         )
-        # `self.work_entry` (the one ttk widget in this app) is handled by
-        # `_configure_ttk_style()` further below, not here.
+        # `self.work_entry`/`self.duration_entry` (the two ttk widgets in
+        # this app) are handled by `_configure_ttk_style()` further below,
+        # not here.
         self.title_label_field.configure(bg=PANEL_BG, fg=TEXT)
         self._restyle_entry(self.title_entry)
         self.date_label.configure(bg=PANEL_BG, fg=TEXT)
         self._restyle_entry(self.date_entry)
         self.time_label.configure(bg=PANEL_BG, fg=TEXT)
         self._restyle_entry(self.time_entry)
+        self.duration_label.configure(bg=PANEL_BG, fg=TEXT)
         self._restyle_button(self.set_now_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
         self.reminder_label.configure(bg=PANEL_BG, fg=TEXT)
         self._restyle_entry(self.reminder_entry)

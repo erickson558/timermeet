@@ -29,18 +29,46 @@ _FLASH_INTERVAL_MS = 700
 _RELIFT_INTERVAL_MS = 2000
 _TITLE_BLINK_INTERVAL_MS = 850
 
+# v2.16.1 visual overhaul: the previous layout put every label (tag, title,
+# body, meta, hint, buttons) directly on `container` -- the same frame whose
+# `bg` alternates between `_FLASH_COLORS` every `_FLASH_INTERVAL_MS`. Two
+# real, reported problems came from that: (1) every label's own flat `bg`
+# read as a separate disconnected "chip" rather than one cohesive alert, and
+# (2) the old dismiss button's color (`_DANGER_BG = "#7f1d1d"`) was IDENTICAL
+# to `_FLASH_COLORS[1]` -- for half of every flash cycle the button visually
+# vanished into the background it sat on, which is very likely what read as
+# "looks like plain text" rather than a real button.
+#
+# Fix: split "the flashing attention-grabbing halo" from "the readable
+# content" into two layers. `container` (still the thing `_flash_overlay`
+# toggles) is now only ever seen as a thin border/glow around a second,
+# STATIC-background `card` frame that holds all text and both buttons --
+# so nothing the user needs to read or click ever changes color underneath
+# them, and no button color is chosen to coincide with a flash color.
+_CARD_BG = "#2a0505"
+_CARD_BORDER = "#ef4444"
+_ACCENT_STRIP_COLORS = ("#ef4444", "#fca5a5")
+_TAG_BADGE_BG = "#ef4444"
+_TAG_BADGE_FG = "#2a0505"
+_DIVIDER_COLOR = "#5b1414"
+
 _TEXT_ON_RED = "white"
 _MUTED_ON_RED = "#fecaca"
 _BUTTON_BG = "#3b82f6"
 _BUTTON_HOVER = "#2563eb"
-_DANGER_BG = "#7f1d1d"
+# Deliberately the same red family as `main_window.DANGER`/`DANGER_HOVER`
+# for brand consistency, but chosen without regard for `_FLASH_COLORS`
+# above -- safe now because this button lives on the static `_CARD_BG`
+# card, never on the flashing `container`, so it can never blend in.
+_DANGER_BG = "#b91c1c"
 _DANGER_HOVER = "#991b1b"
 
 
 def _alarm_button(parent, text: str, command, bg: str, hover: str, state: str = "normal") -> tk.Button:
     btn = tk.Button(
         parent, text=text, command=command, bg=bg, fg="white", activebackground=hover, activeforeground="white",
-        relief="flat", borderwidth=0, padx=14, pady=8, cursor="hand2", font=("Segoe UI", 11, "bold"), state=state,
+        disabledforeground=_MUTED_ON_RED, relief="flat", borderwidth=0, padx=18, pady=10, cursor="hand2",
+        font=("Segoe UI", 11, "bold"), state=state, highlightthickness=1, highlightbackground=_CARD_BORDER,
     )
     if state != "disabled":
         btn.bind("<Enter>", lambda _e: btn.configure(bg=hover))
@@ -71,6 +99,11 @@ class AlarmController:
 
         self._overlay: Optional[tk.Toplevel] = None
         self._flash_container = None
+        # Thin strip at the top of the static card (see `_CARD_BG` note
+        # above) that pulses in sync with `_flash_container`'s own halo --
+        # keeps the "still ringing, still urgent" motion cue alive even
+        # though the text/buttons underneath no longer change color.
+        self._flash_accent = None
         self._flash_state = False
         self._flash_job = None
         self._relift_job = None
@@ -212,45 +245,68 @@ class AlarmController:
     def _show_overlay(self, language, tag_key, title_text, body_text, meta_text) -> None:
         overlay = tk.Toplevel(self._root)
         overlay.title(i18n.t("alarmOverlayTag", language))
-        overlay.geometry("560x340")
+        overlay.geometry("600x380")
         overlay.attributes("-topmost", True)
         overlay.protocol("WM_DELETE_WINDOW", self.dismiss)
 
+        # Outer "halo": the only thing whose color `_flash_overlay` ever
+        # toggles now. It fills the whole window and is visible only as a
+        # thin pulsing border around `card` (below), never behind readable
+        # text/buttons -- see the module-level comment above `_CARD_BG`.
         container = tk.Frame(overlay, bg=_FLASH_COLORS[0])
         container.pack(fill="both", expand=True)
 
+        card = tk.Frame(container, bg=_CARD_BG, highlightthickness=2, highlightbackground=_CARD_BORDER)
+        card.pack(fill="both", expand=True, padx=16, pady=16)
+
+        accent_strip = tk.Frame(card, bg=_ACCENT_STRIP_COLORS[0], height=5)
+        accent_strip.pack(fill="x", side="top")
+        accent_strip.pack_propagate(False)
+
+        content = tk.Frame(card, bg=_CARD_BG)
+        content.pack(fill="both", expand=True, padx=28, pady=(20, 22))
+
+        # Tag as a small solid "badge" (one intentional chip, not several
+        # disconnected ones) so it visually reads as a category label sitting
+        # above the actual headline below it, rather than a second headline.
         tk.Label(
-            container, text=i18n.t(tag_key, language), font=("Segoe UI", 14, "bold"),
-            fg=_TEXT_ON_RED, bg=_FLASH_COLORS[0],
-        ).pack(pady=(28, 4))
+            content, text=i18n.t(tag_key, language).upper(), font=("Segoe UI", 10, "bold"),
+            fg=_TAG_BADGE_FG, bg=_TAG_BADGE_BG, padx=10, pady=3,
+        ).pack(anchor="w", pady=(0, 12))
+
         tk.Label(
-            container, text=title_text, font=("Segoe UI", 22, "bold"), fg=_TEXT_ON_RED, bg=_FLASH_COLORS[0],
-            wraplength=480,
-        ).pack(pady=(0, 8))
+            content, text=title_text, font=("Segoe UI", 22, "bold"), fg=_TEXT_ON_RED, bg=_CARD_BG,
+            wraplength=500, justify="left", anchor="w",
+        ).pack(fill="x", pady=(0, 6))
         tk.Label(
-            container, text=body_text, font=("Segoe UI", 14), fg=_TEXT_ON_RED, bg=_FLASH_COLORS[0], wraplength=480,
-        ).pack(pady=(0, 4))
+            content, text=body_text, font=("Segoe UI", 14), fg=_TEXT_ON_RED, bg=_CARD_BG, wraplength=500,
+            justify="left", anchor="w",
+        ).pack(fill="x", pady=(0, 2))
         if meta_text:
             tk.Label(
-                container, text=meta_text, font=("Segoe UI", 12), fg=_MUTED_ON_RED, bg=_FLASH_COLORS[0],
-            ).pack(pady=(0, 4))
-        tk.Label(
-            container, text=i18n.t("alarmOverlayHint", language), font=("Segoe UI", 11),
-            fg=_MUTED_ON_RED, bg=_FLASH_COLORS[0], wraplength=480,
-        ).pack(pady=(4, 18))
+                content, text=meta_text, font=("Segoe UI", 11), fg=_MUTED_ON_RED, bg=_CARD_BG, anchor="w",
+            ).pack(fill="x", pady=(0, 4))
 
-        buttons = tk.Frame(container, bg=_FLASH_COLORS[0])
-        buttons.pack(pady=(0, 24))
+        tk.Frame(content, bg=_DIVIDER_COLOR, height=1).pack(fill="x", pady=(14, 12))
+
+        tk.Label(
+            content, text=i18n.t("alarmOverlayHint", language), font=("Segoe UI", 10), fg=_MUTED_ON_RED,
+            bg=_CARD_BG, wraplength=500, justify="left", anchor="w",
+        ).pack(fill="x", pady=(0, 18))
+
+        buttons = tk.Frame(content, bg=_CARD_BG)
+        buttons.pack(anchor="w")
         _alarm_button(
             buttons, i18n.t("openTeams", language), self.open_link, _BUTTON_BG, _BUTTON_HOVER,
             state="normal" if self._current_url else "disabled",
-        ).pack(side="left", padx=8)
+        ).pack(side="left", padx=(0, 10))
         _alarm_button(
             buttons, i18n.t("dismissAlarm", language), self.dismiss, _DANGER_BG, _DANGER_HOVER,
-        ).pack(side="left", padx=8)
+        ).pack(side="left")
 
         self._overlay = overlay
         self._flash_container = container
+        self._flash_accent = accent_strip
         self._flash_state = False
         self._flash_overlay()
         self._relift()
@@ -263,6 +319,7 @@ class AlarmController:
         self._flash_state = not self._flash_state
         try:
             self._flash_container.configure(bg=_FLASH_COLORS[int(self._flash_state)])
+            self._flash_accent.configure(bg=_ACCENT_STRIP_COLORS[int(self._flash_state)])
         except Exception:
             return
         self._flash_job = self._root.after(_FLASH_INTERVAL_MS, self._flash_overlay)

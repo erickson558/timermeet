@@ -1361,6 +1361,20 @@ Se leyó `_build_calendar_cell`/`_update_calendar_cell` (`main_window.py`) antes
 - El modo bandeja oculta la ventana y muestra un ícono en la bandeja del sistema; mostrar desde el menú del ícono (o el clic por defecto) restaura la ventana con normalidad, y "Salir" desde ese mismo menú cierra la app sin dejar el ícono ni procesos colgados. Una alarma real disparada en modo bandeja sigue sonando y mostrando el overlay con normalidad, y cambiar a este modo se rechaza mientras esa alarma esté activa.
 - Un re-render completo de la lista de reuniones con datos reales toma milisegundos, no segundos (verificado con `time.perf_counter()`, no con una llamada a `update()`, que por sí sola fuerza un vaciado de cola que contaminaría la medición); mover o maximizar la ventana no se siente congelado ni "reordena" visualmente las tarjetas.
 
+## v2.16.1: rediseño visual de la ventana de alarma
+
+**Por qué `v2.16.1` y no `v2.17.0`:** patrón `v2.9.0`→`v2.9.1` -- un bug real encontrado en código ya publicado (la ventana de alarma existía desde antes de `v2.16.0`) más un ajuste visual de la misma superficie para corregirlo, sin agregar ninguna capacidad nueva: mismos botones, mismo parpadeo, misma cola FIFO de alarmas, mismo contrato con `app.py`.
+
+Pedido directo del usuario tras ver una captura de la alarma en pantalla: "no me gusta, la siento algo simple". Implementado por `timermeet-ui-designer` sobre `timermeet_app/alarm_ui.py`.
+
+**Bug real encontrado antes de rediseñar:** el botón "Silenciar alarma" (`_DANGER_BG = "#7f1d1d"`) usaba exactamente el mismo color que una de las dos fases de `_FLASH_COLORS`, el fondo que `container` alterna cada `_FLASH_INTERVAL_MS` -- durante la mitad de cada ciclo de parpadeo, el botón se volvía visualmente indistinguible del fondo sobre el que estaba. Eso es, con altísima probabilidad, la causa concreta de que se viera "como texto plano" en vez de un botón real.
+
+**Corrección:** se separó el halo parpadeante de la tarjeta de contenido. `container` (el `Frame` que `_flash_overlay()` sigue alternando entre `_FLASH_COLORS`) ahora solo es visible como un borde delgado alrededor de una segunda `card` de fondo **fijo** (`_CARD_BG`) que contiene todo el texto y ambos botones -- nada legible o clickeable cambia de color bajo el usuario, y ningún color de botón se eligió sin verificar que nunca coincide con una fase del parpadeo. Se agregó una franja de acento (`_ACCENT_STRIP_COLORS`) en la parte superior de la tarjeta que pulsa en sincronía con el halo, para no perder la señal de movimiento de "sigue sonando" aunque el texto ya no la lleve. La etiqueta "Recordatorio"/"Inicio" pasó de chip suelto a una sola insignia (`_TAG_BADGE_BG`/`_TAG_BADGE_FG`), y se ordenó la jerarquía tipográfica (insignia 10pt -> título 22pt -> reunión 14pt -> hora 11pt -> aviso 10pt) con un separador (`_DIVIDER_COLOR`) entre los datos de la reunión y el aviso de "sigue sonando hasta silenciarla".
+
+**Alcance explícitamente fuera de esta versión:** no se conectó a `APP_THEMES`/el sistema de temas de `v2.14.0` -- la alarma necesita verse igual de urgente sin importar qué tema tenga elegido el usuario (incluido `light`), y heredar colores de tema arriesgaba un rojo pastel que debilitara la señal de "no se puede ignorar". Sin cambios en `app.py`, `notifications.py`, `audio.py`, ni en las claves de i18n existentes.
+
+`python -m unittest discover -s tests` en verde (295 tests). `bandit`/`pip-audit` sin hallazgos.
+
 ## SDD Workflow
 
 1. Traducir la petición del usuario a objetivo, restricciones y criterio de aceptación (skill `timermeet-spec-driver`).

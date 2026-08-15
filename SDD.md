@@ -1375,6 +1375,42 @@ Pedido directo del usuario tras ver una captura de la alarma en pantalla: "no me
 
 `python -m unittest discover -s tests` en verde (295 tests). `bandit`/`pip-audit` sin hallazgos.
 
+## v2.17.0: contador en vivo, indicador de pulso y atajos de teclado en la alarma
+
+Continuación directa de `v2.16.1`: esa versión rediseñó la superficie visual de la alarma pero dejó explícitamente pendientes el contador en vivo, el indicador de pulso y los atajos de teclado que el usuario pidió como parte del mismo rediseño. Mismo archivo (`timermeet_app/alarm_ui.py`), mismo contrato con `app.py`/`audio.py`/`notifications.py`/`security.py` -- ningún cambio de comportamiento fuera de la propia ventana de alarma.
+
+**Contador en vivo:** nueva etiqueta bajo la fecha/hora que muestra `i18n.t("alarmStartsIn"/"alarmStartedAgo")` con el tiempo restante/transcurrido en `MM:SS` (o `HH:MM:SS` pasada una hora), actualizada una vez por segundo mediante su propia cadena `root.after()` (`AlarmController._update_countdown`/`_countdown_job`) -- independiente del `_flash_job` de 700ms, porque necesita precisión de segundo completo, no el mismo compás del parpadeo. Lee `_current_meeting_start` (fijado en `_present()`) en cada tick en vez de capturarlo por clausura, así que un relevo de la cola FIFO (`dismiss()` -> `_present()` para la siguiente alerta, sin ninguna vuelta del mainloop de por medio) queda reflejado automáticamente sin reiniciar el bucle.
+
+**Indicador de pulso "● ALARMA ACTIVA":** en vez de un cuarto temporizador independiente, la etiqueta cambia de color en el mismo tick de `_flash_overlay()` que ya alterna el halo y la franja de acento -- una línea de código adicional dentro de un `try` ya existente, no un nuevo mecanismo periódico.
+
+**Atajos de teclado:** `Enter` llama a `open_link()` solo si hay un enlace de Teams válido (mismo criterio que deshabilita el botón), para que Enter nunca silencie la alarma sin abrir nada cuando no hay enlace. `Alt+S` llama a `dismiss()`. `Esc` se enlaza explícitamente a un no-op (`return "break"`) para que ninguna posible reacción por defecto la cierre por accidente. Se agregó `overlay.focus_force()` para garantizar que estos bindings reciban el foco de teclado (`-topmost` por sí solo no lo garantiza).
+
+**Botones:** `pady` de `_alarm_button` subió de 10 a 13 -- una cota medida, no una preferencia estética, para que la altura del botón despeje el mínimo de ~45px pedido.
+
+**Ventana:** `geometry` pasó de `600x380` a `620x460` (el ancho se mantiene dentro del rango 600-700px pedido; el alto se recalculó para las dos líneas nuevas sin apretar el resto del contenido) y ganó `resizable(False, False)` -- ya no se puede redimensionar, consistente con el resto de popups de la app.
+
+**Alcance explícitamente fuera de esta versión:** no se tocó el sonido, el parpadeo del halo/franja, la cola FIFO de alarmas, ni ninguna clave i18n existente -- solo se agregaron 3 claves nuevas (`alarmStartsIn`, `alarmStartedAgo`, `alarmActiveIndicator`) en ambos idiomas.
+
+`python -m unittest discover -s tests` en verde (295 tests, sin agregar ni quitar ninguno -- el cambio es aditivo sobre una superficie ya cubierta por `tests/test_alarm_queue.py`).
+
+## v2.17.1: bug real -- dos empresas reales colisionaban casi al mismo color en semana/mes/lista
+
+**Pedido del usuario:** "necesito un color distinto para cada empresa" en la vista semanal, sin saber si ya estaba implementado.
+
+**Investigación antes de tocar código:** el color por empresa YA estaba implementado desde antes (`_color_for_work_name` en `app.py`, usado por la vista de lista desde el principio, por el calendario mensual desde `v2.7.0`, y por los bloques de la vista semanal desde `v2.16.0`) -- un hash determinista del nombre de la empresa a un matiz (0-360°), con luminosidad/saturación fijas (HLS 0.74/0.70). El bug no era "falta la función", era que el hash no garantiza separación entre nombres distintos.
+
+**Bug real confirmado con los datos reales del usuario** (`data/meetings.json`, 4 empresas): `_color_for_work_name` producía `CoreStory -> #c98eeb`, `Isolved -> #8eeb9d`, pero **`Direct English -> #eb8ee6` y `SRS -> #eb8ede`** -- dos empresas distintas, a 2 dígitos hexadecimales de diferencia, indistinguibles a simple vista. Esto es exactamente lo que se ve en la captura que adjuntó el usuario: bloques de "Daily SRS"/"Team Aqua Refinement" y de "Clase de Inglés" en el mismo rosa, aunque son empresas distintas.
+
+**Corrección:** nueva `_build_work_color_map(work_names)`, que ya no hashea cada nombre por separado -- ordena alfabéticamente el conjunto ACTUAL de empresas guardadas y les asigna un matiz por incrementos de ángulo dorado (`137.508°`, `360/φ²`), garantizando separación máxima entre vecinas sin importar cuántas empresas haya. Con los mismos 4 nombres reales: `CoreStory -> #eb8e8e`, `Direct English -> #8eeba9`, `Isolved -> #c48eeb`, `SRS -> #ebdf8e` -- 4 colores claramente distintos. `_color_for_work_name` se conserva sin cambios como *fallback* de `_work_block_color` para llamadas directas sin mapa (usado por `tests/test_app_helpers.py`, que sigue pasando sin modificarse).
+
+**Trade-off aceptado y documentado:** a diferencia del hash puro, el color de una empresa ya no es permanentemente fijo -- puede desplazarse si el conjunto de empresas guardadas cambia (se agrega/quita una). Aceptable porque el mapa se reconstruye entero, en cada vista, en cada heartbeat, desde `self.meetings` -- el mismo patrón "recalcular barato en cada tick" que `series_sizes` ya usa en `_refresh_calendar`/`_refresh_week`, así que nunca queda obsoleto.
+
+**Dirty-check corregido de paso:** la firma de re-render de la vista de LISTA (`_refresh_all`) no incluía `color` en su tupla (a diferencia de las firmas de calendario/semana, que sí lo hacían desde antes) -- inofensivo mientras el color dependía solo del propio `workName` de esa reunión, pero con el nuevo mapa dependiente del conjunto completo de empresas, una tarjeta podía quedarse con un color obsoleto si ninguno de sus otros campos cambiaba. Se agregó `c.color` a esa tupla.
+
+**Alcance explícitamente fuera de esta versión:** sin cambios en `main_window.py` (sigue siendo una vista pura, solo recibe `color` ya resuelto), sin cambios en el hash de `_color_for_work_name` en sí, sin cambios de comportamiento fuera del color asignado.
+
+`python -m unittest discover -s tests` en verde (295 tests, sin agregar ni quitar ninguno).
+
 ## SDD Workflow
 
 1. Traducir la petición del usuario a objetivo, restricciones y criterio de aceptación (skill `timermeet-spec-driver`).

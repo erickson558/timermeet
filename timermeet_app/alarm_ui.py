@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import tkinter as tk
 import webbrowser
+from datetime import datetime, timedelta
 from typing import Callable, Optional
 
 from . import audio, i18n, notifications, security
@@ -65,15 +66,30 @@ _DANGER_HOVER = "#991b1b"
 
 
 def _alarm_button(parent, text: str, command, bg: str, hover: str, state: str = "normal") -> tk.Button:
+    # pady=13 (not the app's usual 10) is a measured floor, not a style
+    # preference: Segoe UI 11pt bold plus this padding clears the ~45px
+    # minimum touch/click target height the redesign calls for.
     btn = tk.Button(
         parent, text=text, command=command, bg=bg, fg="white", activebackground=hover, activeforeground="white",
-        disabledforeground=_MUTED_ON_RED, relief="flat", borderwidth=0, padx=18, pady=10, cursor="hand2",
+        disabledforeground=_MUTED_ON_RED, relief="flat", borderwidth=0, padx=18, pady=13, cursor="hand2",
         font=("Segoe UI", 11, "bold"), state=state, highlightthickness=1, highlightbackground=_CARD_BORDER,
     )
     if state != "disabled":
         btn.bind("<Enter>", lambda _e: btn.configure(bg=hover))
         btn.bind("<Leave>", lambda _e: btn.configure(bg=bg))
     return btn
+
+
+def _format_countdown(delta: timedelta) -> str:
+    """``MM:SS`` (or ``HH:MM:SS`` past an hour) for the alarm's live
+    countdown -- always non-negative, the caller decides which side of "now"
+    ``delta`` came from."""
+    total_seconds = max(0, int(delta.total_seconds()))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
 
 
 class AlarmController:
@@ -109,6 +125,14 @@ class AlarmController:
         self._relift_job = None
         self._title_blink_job = None
         self._blink_on = False
+
+        # Live "starts in / started ago" countdown (v2.17.0): its own
+        # `after()` chain, separate from `_flash_job`, because it needs
+        # whole-second precision independent of the 700ms flash cadence.
+        self._countdown_label = None
+        self._indicator_label = None
+        self._current_meeting_start: Optional[datetime] = None
+        self._countdown_job = None
 
         self._current_url = ""
         self._base_title = "TimerMeet"
@@ -167,6 +191,7 @@ class AlarmController:
         body_text = f"{meeting.workName} · {meeting.title}".strip(" ·")
         when = meeting.local_datetime()
         meta_text = i18n.format_datetime_display(when, language) if when else ""
+        self._current_meeting_start = when
 
         self._player.play(meeting.soundProfile, mode, loop=True)
         self._show_overlay(language, tag_key, title_text, body_text, meta_text)
@@ -186,7 +211,7 @@ class AlarmController:
         # the window manager (e.g. the user closed the overlay directly) or
         # a Tkinter job id is already stale -- a raised exception here would
         # leave the alarm "stuck" active, which is worse than ignoring it.
-        for attr in ("_flash_job", "_title_blink_job", "_relift_job"):
+        for attr in ("_flash_job", "_title_blink_job", "_relift_job", "_countdown_job"):
             job = getattr(self, attr)
             if job is not None:
                 try:
@@ -201,6 +226,9 @@ class AlarmController:
             except Exception:  # nosec B110
                 pass
             self._overlay = None
+        self._countdown_label = None
+        self._indicator_label = None
+        self._current_meeting_start = None
 
         try:
             self._root.title(self._base_title)
@@ -245,9 +273,18 @@ class AlarmController:
     def _show_overlay(self, language, tag_key, title_text, body_text, meta_text) -> None:
         overlay = tk.Toplevel(self._root)
         overlay.title(i18n.t("alarmOverlayTag", language))
-        overlay.geometry("600x380")
+        # 620x460 (was 600x380): still within the compact 600-700px width
+        # target, but the height was measured up to fit the countdown +
+        # pulse-indicator lines added in v2.17.0 without cramping the
+        # existing content.
+        overlay.geometry("620x460")
+        overlay.resizable(False, False)
         overlay.attributes("-topmost", True)
         overlay.protocol("WM_DELETE_WINDOW", self.dismiss)
+        # Esc must never dismiss an active alarm (only the two explicit
+        # buttons/shortcuts below may) -- "break" consumes the key so no
+        # ancestor/default binding can act on it either.
+        overlay.bind("<Escape>", lambda _e: "break")
 
         # Outer "halo": the only thing whose color `_flash_overlay` ever
         # toggles now. It fills the whole window and is visible only as a
@@ -287,6 +324,26 @@ class AlarmController:
                 content, text=meta_text, font=("Segoe UI", 11), fg=_MUTED_ON_RED, bg=_CARD_BG, anchor="w",
             ).pack(fill="x", pady=(0, 4))
 
+        # Live countdown ("Starts in 04:32" / "Meeting started 00:15 ago"),
+        # updated once a second via its own `after()` chain (see
+        # `_update_countdown`) -- independent of `_flash_job`'s 700ms
+        # cadence since this needs whole-second precision, not a flash beat.
+        self._countdown_label = tk.Label(
+            content, text="", font=("Segoe UI", 12, "bold"), fg=_TEXT_ON_RED, bg=_CARD_BG, anchor="w",
+        )
+        self._countdown_label.pack(fill="x", pady=(2, 6))
+
+        # "ALARMA ACTIVA" pulse indicator: rides the same `_flash_job` tick
+        # as the accent strip/halo (see `_flash_overlay`) so it pulses in
+        # sync with the rest of the "still ringing" motion cue, without a
+        # third independent timer -- the countdown above is the only piece
+        # that genuinely needs its own cadence.
+        self._indicator_label = tk.Label(
+            content, text=f"● {i18n.t('alarmActiveIndicator', language)}", font=("Segoe UI", 9, "bold"),
+            fg=_ACCENT_STRIP_COLORS[0], bg=_CARD_BG, anchor="w",
+        )
+        self._indicator_label.pack(fill="x", pady=(0, 4))
+
         tk.Frame(content, bg=_DIVIDER_COLOR, height=1).pack(fill="x", pady=(14, 12))
 
         tk.Label(
@@ -310,6 +367,18 @@ class AlarmController:
         self._flash_state = False
         self._flash_overlay()
         self._relift()
+        self._update_countdown()
+
+        # Keyboard shortcuts: Enter = Open Teams (only when a real link is
+        # available, mirroring the button's own disabled state -- otherwise
+        # Enter would silently dismiss the alarm without opening anything),
+        # Alt+S = Silence alarm. Esc is deliberately excluded (bound to a
+        # no-op above). Needs real keyboard focus on the overlay itself,
+        # which `-topmost` alone doesn't guarantee.
+        overlay.bind("<Return>", lambda _e: self.open_link() if self._current_url else None)
+        overlay.bind("<Alt-s>", lambda _e: self.dismiss())
+        overlay.bind("<Alt-S>", lambda _e: self.dismiss())
+        overlay.focus_force()
 
     # -- periodic effects ------------------------------------------------------
 
@@ -320,9 +389,35 @@ class AlarmController:
         try:
             self._flash_container.configure(bg=_FLASH_COLORS[int(self._flash_state)])
             self._flash_accent.configure(bg=_ACCENT_STRIP_COLORS[int(self._flash_state)])
+            if self._indicator_label is not None:
+                self._indicator_label.configure(fg=_ACCENT_STRIP_COLORS[int(self._flash_state)])
         except Exception:
             return
         self._flash_job = self._root.after(_FLASH_INTERVAL_MS, self._flash_overlay)
+
+    def _update_countdown(self) -> None:
+        """Refresh the "starts in / started ago" label once a second while
+        the overlay is up. Reads `_current_meeting_start` fresh each tick
+        (set in `_present`) rather than closing over it, so a queued
+        hand-off (`dismiss` -> `_present` for the next alert, no mainloop
+        turn in between) is picked up automatically without restarting this
+        loop."""
+        if self._overlay is None or self._countdown_label is None:
+            return
+        if self._current_meeting_start is not None:
+            language = self._get_language()
+            delta = self._current_meeting_start - datetime.now()
+            if delta.total_seconds() > 0:
+                text = i18n.format_text("alarmStartsIn", language, time=_format_countdown(delta))
+            else:
+                text = i18n.format_text("alarmStartedAgo", language, time=_format_countdown(-delta))
+        else:
+            text = ""
+        try:
+            self._countdown_label.configure(text=text)
+        except Exception:
+            return
+        self._countdown_job = self._root.after(1000, self._update_countdown)
 
     def _relift(self) -> None:
         """Periodically re-raise the overlay so it can't be buried under

@@ -100,6 +100,7 @@ def _cluster_meetings_by_overlap(ordered: List[models.Meeting]) -> List[List[mod
 
 def _assign_cluster_blocks(
     day_index: int, cluster: List[models.Meeting], series_sizes: Dict[str, int],
+    work_colors: Optional[Dict[str, str]] = None,
 ) -> List[Tuple[WeekMeetingBlock, List[str]]]:
     """Lane-assigns ONE overlap cluster (see `_cluster_meetings_by_overlap`)
     and turns it into its final `WeekMeetingBlock`s, per SDD.md v2.16.0
@@ -147,7 +148,7 @@ def _assign_cluster_blocks(
             column_count=column_count,
             start_hour_float=start,
             duration_minutes=meeting.durationMinutes,
-            color=_color_for_work_name(meeting.workName),
+            color=_work_block_color(meeting.workName, work_colors),
             title=meeting.title,
             time_text=when.strftime("%H:%M"),
             series_occurrence_count=_series_count(meeting),
@@ -206,6 +207,7 @@ def _assign_cluster_blocks(
 
 def _assign_week_meeting_blocks(
     day_index: int, day_meetings: List[models.Meeting], series_sizes: Optional[Dict[str, int]] = None,
+    work_colors: Optional[Dict[str, str]] = None,
 ) -> Tuple[List[WeekMeetingBlock], Set[str]]:
     """Full-width/split-width "Teams-style" block layout for one day's worth
     of meetings (SDD.md v2.16.0, replaces `v2.15.0`'s thin-bar
@@ -244,7 +246,7 @@ def _assign_week_meeting_blocks(
     for cluster in clusters:
         if len(all_blocks) >= WEEK_MAX_DURATION_BLOCKS_PER_DAY:
             break
-        cluster_blocks = _assign_cluster_blocks(day_index, cluster, series_sizes)
+        cluster_blocks = _assign_cluster_blocks(day_index, cluster, series_sizes, work_colors)
         remaining_budget = WEEK_MAX_DURATION_BLOCKS_PER_DAY - len(all_blocks)
         if len(cluster_blocks) > remaining_budget:
             cluster_blocks = cluster_blocks[:remaining_budget]
@@ -402,7 +404,12 @@ def _to_signed_32(value: int) -> int:
 def _color_for_work_name(name: str) -> str:
     """Deterministic per-name color chip, in the spirit of the original's
     `stringToColor()` string hash -- not a byte-exact port (purely cosmetic),
-    just guaranteed stable for a given work name."""
+    just guaranteed stable for a given work name.
+
+    Kept as the fallback `_work_block_color` uses when no `work_colors` map
+    is available (direct/unit-test callers) -- real render paths build a map
+    via `_build_work_color_map` instead, see that function's docstring for
+    why a raw hash alone isn't enough."""
     if not name:
         return "#d4d4d8"
     hash_value = 0
@@ -412,6 +419,51 @@ def _color_for_work_name(name: str) -> str:
     hue = abs(_to_signed_32(hash_value)) % 360
     red, green, blue = colorsys.hls_to_rgb(hue / 360, 0.74, 0.70)
     return "#{:02x}{:02x}{:02x}".format(int(red * 255), int(green * 255), int(blue * 255))
+
+
+# 360 / phi^2: the golden-angle hue increment. Assigning each company a hue
+# this far from the previous one (walking the CURRENT, sorted set of company
+# names in order) spreads any number of colors around the wheel with maximal
+# separation between neighbors -- unlike `_color_for_work_name`'s raw string
+# hash above, which has no such guarantee. Real-data proof this matters
+# (v2.17.1): two actual saved companies, "SRS" and "Direct English", hashed
+# to #eb8ede/#eb8ee6 -- two hex digits apart, indistinguishable by eye in the
+# week/month/list views, even though the hash itself never collided (it's
+# the same problem a birthday-paradox-style near-collision always risks with
+# an unconstrained hash-to-hue mapping over a small set of buckets).
+_GOLDEN_ANGLE_DEGREES = 137.508
+
+
+def _build_work_color_map(work_names) -> Dict[str, str]:
+    """Assigns every distinct, non-blank name in `work_names` its own color,
+    spaced by `_GOLDEN_ANGLE_DEGREES` around the hue wheel in sorted-name
+    order -- guarantees every company CURRENTLY present in the data reads as
+    visually distinct from every other one, which a per-name hash cannot
+    promise (see `_color_for_work_name`'s docstring). Trade-off, accepted:
+    unlike a pure hash, a company's color can shift if the overall set of
+    saved company names changes (one added/removed/renamed) -- acceptable
+    here since every render path rebuilds this map fresh from the current
+    `self.meetings` on every heartbeat tick anyway, so it's never stale."""
+    ordered = sorted({name for name in work_names if name})
+    colors: Dict[str, str] = {}
+    for index, name in enumerate(ordered):
+        hue = (index * _GOLDEN_ANGLE_DEGREES) % 360
+        red, green, blue = colorsys.hls_to_rgb(hue / 360, 0.74, 0.70)
+        colors[name] = "#{:02x}{:02x}{:02x}".format(int(red * 255), int(green * 255), int(blue * 255))
+    return colors
+
+
+def _work_block_color(name: str, work_colors: Optional[Dict[str, str]]) -> str:
+    """Look up `name`'s color in a precomputed `_build_work_color_map` result
+    when one is available, falling back to the plain per-name hash otherwise
+    (direct/unit-test calls that don't build a map, e.g.
+    `tests/test_app_helpers.py`'s direct `_assign_week_meeting_blocks` calls)
+    -- never raises on a missing/blank name either way."""
+    if work_colors is not None:
+        color = work_colors.get(name)
+        if color:
+            return color
+    return _color_for_work_name(name)
 
 
 class TimerMeetApp:
@@ -843,7 +895,14 @@ class TimerMeetApp:
 
         storage_key = "storageServer" if self.storage_ok else "storageLocal"
         self.view.update_storage_status(i18n.t(storage_key, self.language))
-        self.view.update_filter_options(self._work_names(), self.work_filter)
+        work_names = self._work_names()
+        self.view.update_filter_options(work_names, self.work_filter)
+        # Built fresh from the full, current meeting list on every tick (same
+        # redundant-but-cheap precedent `series_sizes` already sets in
+        # `_refresh_calendar`/`_refresh_week` below, rather than threading a
+        # shared value through) -- see `_build_work_color_map`'s docstring
+        # for why this guarantees distinct colors instead of a raw hash.
+        work_colors = _build_work_color_map(work_names)
 
         cards = [
             MeetingCardData(
@@ -851,7 +910,7 @@ class TimerMeetApp:
                 status_key=_meeting_status(meeting, now),
                 countdown_text=_countdown_text(meeting, now, self.language),
                 recurrence_text=_recurrence_text(meeting, self.language),
-                color=_color_for_work_name(meeting.workName),
+                color=_work_block_color(meeting.workName, work_colors),
             )
             for meeting in sorted(self._visible_meetings(), key=_meeting_sort_key)
         ]
@@ -868,7 +927,13 @@ class TimerMeetApp:
         signature = (
             self.language,
             tuple(
-                (c.meeting.id, c.status_key, c.countdown_text, c.recurrence_text, c.meeting.updatedAt)
+                # `c.color` included so a card whose OWN fields didn't change
+                # still re-renders if the color map itself shifted (e.g. a
+                # company was added/removed elsewhere, reflowing every other
+                # company's golden-angle-indexed hue) -- see
+                # `_build_work_color_map`'s docstring for why colors aren't
+                # permanently fixed per name anymore.
+                (c.meeting.id, c.status_key, c.countdown_text, c.recurrence_text, c.meeting.updatedAt, c.color)
                 for c in cards
             ),
         )
@@ -920,6 +985,10 @@ class TimerMeetApp:
         # right-click menu's "Eliminar serie completa" enablement actually
         # checks -- see that field's own docstring in main_window.py.
         series_sizes = {sid: len(group) for sid, group in recurrence.group_meetings_by_series(self.meetings).items()}
+        # Same redundant-but-cheap "compute fresh from self.meetings" pattern
+        # `series_sizes` above already uses, applied to colors -- see
+        # `_build_work_color_map`'s docstring.
+        work_colors = _build_work_color_map(self._work_names())
         # "Today" is only highlighted while the *visible* month is the real
         # current month (see SDD.md) -- comparing bare dates would wrongly
         # highlight a leading/trailing padding cell that happens to literally
@@ -951,7 +1020,7 @@ class TimerMeetApp:
                             f"{(meeting.local_datetime() + timedelta(minutes=meeting.durationMinutes)).strftime('%H:%M')}"
                         ),
                         title=meeting.title,
-                        color=_color_for_work_name(meeting.workName),
+                        color=_work_block_color(meeting.workName, work_colors),
                         series_occurrence_count=(
                             series_sizes.get(meeting.seriesId, 0)
                             if meeting.recurrenceType != "none" and meeting.seriesId
@@ -1044,6 +1113,10 @@ class TimerMeetApp:
         # a shared helper (see the "no new public helper" note just below
         # for the per-hour grouping, same reasoning applies here).
         series_sizes = {sid: len(group) for sid, group in recurrence.group_meetings_by_series(self.meetings).items()}
+        # Same redundant-but-cheap "compute fresh from self.meetings" pattern
+        # `series_sizes` above already uses, applied to colors -- see
+        # `_build_work_color_map`'s docstring.
+        work_colors = _build_work_color_map(self._work_names())
 
         # Full-color meeting-block layer (SDD.md v2.16.0, replaces v2.15.0's
         # thin decorative bar): computed per VISIBLE day from ALL of that
@@ -1067,7 +1140,9 @@ class TimerMeetApp:
         meeting_blocks: List[WeekMeetingBlock] = []
         covered_ids_by_day: Dict[date, Set[str]] = {}
         for day_index, day in enumerate(days):
-            day_blocks, covered_ids = _assign_week_meeting_blocks(day_index, grouped.get(day, []), series_sizes)
+            day_blocks, covered_ids = _assign_week_meeting_blocks(
+                day_index, grouped.get(day, []), series_sizes, work_colors
+            )
             meeting_blocks.extend(day_blocks)
             covered_ids_by_day[day] = covered_ids
 
@@ -1114,7 +1189,7 @@ class TimerMeetApp:
                         # fallback text stays exactly as it always has.
                         time_text=meeting.local_datetime().strftime("%H:%M"),
                         title=meeting.title,
-                        color=_color_for_work_name(meeting.workName),
+                        color=_work_block_color(meeting.workName, work_colors),
                         series_occurrence_count=(
                             series_sizes.get(meeting.seriesId, 0)
                             if meeting.recurrenceType != "none" and meeting.seriesId

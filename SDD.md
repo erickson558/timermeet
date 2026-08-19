@@ -1447,6 +1447,20 @@ Continuación directa de `v2.16.1`: esa versión rediseñó la superficie visual
 
 `python -m unittest discover -s tests` en verde (308 tests -- 10 nuevos en `tests/test_edit_series.py`: bloqueo/desbloqueo de campos en el formulario, el payload lleva el flag correcto, aplicación real de los campos compartidos preservando la fecha propia de cada ocurrencia, aislamiento de una segunda serie y de reuniones sueltas, y los dos guardias defensivos) más 4 nuevos en `tests/test_context_menu.py` (el ítem aparece/no aparece bajo la misma regla que "Eliminar serie completa", y el clic llama `on_edit_series` + cambia a vista de lista, en calendario y semana). `bandit`/`pip-audit` sin hallazgos.
 
+## v2.19.1: más opciones de duración (cada 5 min) + validación anti-caracteres raros
+
+**Pedido del usuario:** al usar "Editar serie completa" (`v2.19.0`) quiso poner una duración de 80 minutos y no estaba en el desplegable del campo Duración; propuso agregar opciones cada 5 minutos, o alternativamente convertir el campo en un textbox simple con validación para que no se puedan escribir letras ni caracteres raros.
+
+**Decisión, sin necesidad de elegir una sola opción:** el campo Duración (`duration_entry`, `main_window.py`) YA es un `ttk.Combobox` editable desde `v2.15.0` -- "opciones rápidas, pero se puede escribir cualquier valor" (ver el comentario original junto al widget). El problema real no era "falta poder escribir 80" (eso ya funcionaba), sino que el desplegable de 6 presets (15/30/45/60/90/120) no tenía ninguno cercano a 80, y no había ninguna protección contra escribir texto no numérico. Convertirlo en un textbox plano habría sacrificado el atajo de un clic que el combobox ya da para los valores más comunes -- en vez de eso, se combinan ambas mejoras sin perder esa ventaja:
+1. El desplegable pasa de 6 presets fijos a incrementos de 5 minutos, de 5 a 120 (`5, 10, 15, ..., 120` -- 24 opciones), calculado con `range(5, 121, 5)` en vez de una tupla escrita a mano. 80 ya aparece.
+2. Un `validatecommand` de tipo `"key"` (primer uso de esta técnica de Tk en el proyecto) rechaza cualquier tecla cuyo resultado no sea una cadena vacía o solo dígitos (`str.isdigit()`) -- letras, signos, espacios, y símbolos quedan bloqueados AL ESCRIBIR, no solo al guardar. La cadena vacía debe aceptarse explícitamente o el campo no podría borrarse nunca (incluye cada `_set_entry(self.duration_entry, ...)` programático, que siempre limpia con `.delete(0, "end")` primero).
+
+**Por qué esto no reemplaza la validación de `models.validate_meeting`:** el rango numérico real (`MIN_DURATION_MINUTES`..`MAX_DURATION_MINUTES`, 5 a 1440) se sigue verificando al guardar, sin cambios -- la validación nueva es una guarda de UX a nivel de tecleo (evita que el campo contenga basura no numérica), no un reemplazo del límite de negocio.
+
+**Alcance explícitamente fuera de esta versión:** sin cambios en `duration_entry` para la vista de gadget/mini (no tiene formulario), sin la misma validación en otros campos numéricos (`reminder_entry`, `occurrence_entry`) -- no fue lo que se pidió, y esos campos no tuvieron el mismo reporte.
+
+`python -m unittest discover -s tests` en verde (315 tests -- 5 nuevos en `tests/test_duration.py::DurationFieldWidgetTests`: el desplegable trae los 24 valores esperados incluyendo "80", el validador standalone acepta vacío/dígitos y rechaza letras/signos, y dos pruebas de extremo a extremo contra el widget real -- `.insert()` de un valor inválido se revierte, uno válido se acepta). `bandit`/`pip-audit` sin hallazgos.
+
 ## SDD Workflow
 
 1. Traducir la petición del usuario a objetivo, restricciones y criterio de aceptación (skill `timermeet-spec-driver`).

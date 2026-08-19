@@ -2025,10 +2025,26 @@ class MainWindow:
         # presets, so it can't offer a custom duration.
         self.duration_entry = ttk.Combobox(
             duration_col, style="TimerMeet.TCombobox", font=(FONT_FAMILY, 11),
-            values=("15", "30", "45", "60", "90", "120"),
+            # 5-minute increments (SDD.md v2.19.1), up from the original 6
+            # coarse presets (15/30/45/60/90/120) -- a real user reported
+            # wanting 80, which fell between two presets with no dropdown
+            # option close to it. Still just "quick picks": the field stays
+            # a free-typed value below, this only widens the dropdown.
+            values=tuple(str(m) for m in range(5, 121, 5)),
         )
         self.duration_entry.insert(0, "30")
         self.duration_entry.pack(fill="x")
+        # Keystroke-level validation (SDD.md v2.19.1): rejects anything
+        # that isn't purely digits (letters, symbols, whitespace) as it's
+        # typed, addressing the same report's second half ("no letras ni
+        # caracteres raros"). Narrows WHAT can be typed, not whether a
+        # hand-typed value has to match a dropdown preset -- free custom
+        # values are still the whole point of this being a combobox, not a
+        # locked dropdown. `validate_meeting`'s own numeric-range check
+        # (`MIN_DURATION_MINUTES`..`MAX_DURATION_MINUTES`) still runs at
+        # Save time regardless; this is a UX guard, not a replacement.
+        duration_vcmd = (self.root.register(self._validate_digits_only), "%P")
+        self.duration_entry.configure(validate="key", validatecommand=duration_vcmd)
 
         self.set_now_button = _button(panel, "", self.callbacks.on_set_now, GHOST_BG, GHOST_FG, GHOST_HOVER)
         self.set_now_button.pack(anchor="w", padx=10, pady=(8, 10))
@@ -4393,6 +4409,16 @@ class MainWindow:
         entry.insert(0, value or "")
         if previous_state == "disabled":
             entry.configure(state="disabled")
+
+    @staticmethod
+    def _validate_digits_only(proposed: str) -> bool:
+        """`validatecommand` for `duration_entry` (SDD.md v2.19.1, `%P` --
+        the entry's value AFTER the edit being validated would apply).
+        Empty string must pass -- otherwise the field could never be
+        cleared (e.g. to retype a value), including every programmatic
+        `_set_entry(self.duration_entry, ...)` call above, which always
+        clears via `.delete(0, "end")` first."""
+        return proposed == "" or proposed.isdigit()
 
     def _sound_label_for(self, profile_id: str) -> str:
         return self._sound_id_to_label.get(profile_id, self._sound_id_to_label.get("soft", ""))

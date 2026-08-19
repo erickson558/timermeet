@@ -24,10 +24,33 @@ from unittest.mock import MagicMock, patch
 try:
     import tkinter as tk
 
+    from timermeet_app import main_window
     from timermeet_app.app import TimerMeetApp
 except ImportError:  # pragma: no cover - non-Windows/no-Tk dev environments
     tk = None
+    main_window = None
     TimerMeetApp = None
+
+
+def _no_op(*_args, **_kwargs):
+    return None
+
+
+def _make_callbacks(**overrides):
+    fields = {
+        "on_save": _no_op, "on_clear": _no_op, "on_edit": _no_op, "on_delete": _no_op,
+        "on_open_link": _no_op, "on_test_sound": _no_op, "on_set_now": _no_op,
+        "on_toggle_language": _no_op, "on_test_notification": _no_op, "on_filter_change": _no_op,
+        "on_clear_past": _no_op, "on_exit": _no_op, "on_add_company": _no_op, "on_remove_company": _no_op,
+        "on_toggle_gadget_mode": _no_op, "on_enter_tray_mode": _no_op, "on_set_active_view": _no_op,
+        "on_calendar_prev_month": _no_op, "on_calendar_next_month": _no_op, "on_calendar_today": _no_op,
+        "on_calendar_day_click": _no_op, "on_week_prev": _no_op, "on_week_next": _no_op,
+        "on_week_today": _no_op, "on_week_slot_click": _no_op, "on_toggle_week_column_mode": _no_op,
+        "on_delete_series": _no_op, "on_edit_series": _no_op,
+        "on_set_app_theme": _no_op, "on_gadget_resize": _no_op,
+    }
+    fields.update(overrides)
+    return main_window.Callbacks(**fields)
 
 
 @unittest.skipUnless(tk is not None, "Tkinter is not importable in this environment")
@@ -234,6 +257,68 @@ class MonthViewDurationRangeTextTests(unittest.TestCase):
 
         entries = self._entries_for_day(date(2026, 8, 10), render_mock)
         self.assertEqual(entries[0].time_text, "23:30-00:30")
+
+
+@unittest.skipUnless(tk is not None, "Tkinter is not importable in this environment")
+class DurationFieldWidgetTests(unittest.TestCase):
+    """SDD.md v2.19.1: a real user wanted to type 80 into `duration_entry`
+    and found no dropdown preset close to it, then separately asked for
+    protection against typing letters/stray characters -- widens the
+    dropdown to 5-minute increments and adds keystroke-level numeric-only
+    validation, without giving up the combobox's original "quick presets,
+    but still type-anything" design (see the widget's own construction
+    comment in `main_window.py`)."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            cls.root = tk.Tk()
+        except tk.TclError as exc:  # e.g. a headless CI runner with no display
+            raise unittest.SkipTest(f"No display available for Tk: {exc}")
+        cls.root.geometry("1000x700+0+0")
+        cls.view = main_window.MainWindow(cls.root, _make_callbacks())
+
+    @classmethod
+    def tearDownClass(cls):
+        try:
+            cls.root.destroy()
+        except tk.TclError:  # nosec B110 - already gone, nothing to clean up
+            pass
+
+    def test_dropdown_offers_5_minute_increments_including_80(self):
+        values = self.view.duration_entry.cget("values")
+        self.assertEqual(values, tuple(str(m) for m in range(5, 121, 5)))
+        self.assertIn("80", values)
+
+    def test_validate_digits_only_accepts_empty_and_pure_digit_strings(self):
+        self.assertTrue(self.view._validate_digits_only(""))
+        self.assertTrue(self.view._validate_digits_only("8"))
+        self.assertTrue(self.view._validate_digits_only("80"))
+
+    def test_validate_digits_only_rejects_letters_symbols_and_signs(self):
+        for proposed in ("8a", "abc", "-5", "1.5", "80 ", "8/0"):
+            self.assertFalse(self.view._validate_digits_only(proposed), f"{proposed!r} must be rejected")
+
+    def test_inserting_a_non_digit_value_into_the_real_widget_is_rejected(self):
+        """End-to-end proof the `validatecommand` is actually wired on the
+        real widget, not just that the standalone method is correct --
+        `.insert()` validates the same way a real keystroke would (`%P` is
+        the value the edit would produce), so an invalid edit is reverted
+        and the field's prior content survives untouched."""
+        self.view._set_entry(self.view.duration_entry, "45")
+        try:
+            self.view.duration_entry.insert(0, "8a")
+            self.assertEqual(self.view.duration_entry.get(), "45")
+        finally:
+            self.view._set_entry(self.view.duration_entry, "30")
+
+    def test_inserting_a_digit_value_into_the_real_widget_is_accepted(self):
+        self.view._set_entry(self.view.duration_entry, "")
+        try:
+            self.view.duration_entry.insert(0, "80")
+            self.assertEqual(self.view.duration_entry.get(), "80")
+        finally:
+            self.view._set_entry(self.view.duration_entry, "30")
 
 
 if __name__ == "__main__":

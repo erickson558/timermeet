@@ -630,6 +630,7 @@ class TimerMeetApp:
             on_week_slot_click=self.handle_week_slot_click,
             on_toggle_week_column_mode=self.handle_toggle_week_column_mode,
             on_delete_series=self.handle_delete_series,
+            on_edit_series=self.handle_edit_series,
             on_set_app_theme=self.handle_set_app_theme,
             on_gadget_resize=self.handle_gadget_resize,
         )
@@ -1329,7 +1330,9 @@ class TimerMeetApp:
         # one without saving a meeting first.
         self._register_company(payload.get("workName", ""))
 
-        if meeting_id:
+        if meeting_id and payload.get("editSeries"):
+            self._save_edit_series(meeting_id, payload, time_value)
+        elif meeting_id:
             self._save_edit(meeting_id, payload, recurrence_type, composed_datetime)
         else:
             self._save_new(payload, recurrence_type, composed_datetime)
@@ -1365,6 +1368,70 @@ class TimerMeetApp:
         self.view.clear_form()
         self.view.show_form_feedback(i18n.t("formUpdatedSingle", self.language))
         self.view.show_toast(i18n.t("updated", self.language))
+
+    def _save_edit_series(self, meeting_id: str, payload: dict, time_value: str) -> None:
+        """SDD.md v2.19.0 counterpart to `handle_delete_series`: applies the
+        form's shared fields to EVERY occurrence sharing this meeting's
+        `seriesId`, not just the one that was right-clicked.
+
+        Deliberately does NOT touch each occurrence's own DATE (only the
+        time-of-day, `time_value`, applies across all of them) or its
+        `recurrenceType`/`occurrenceIndex`/`seriesSize` -- an existing
+        series is a set of already-materialized occurrences on their own
+        dates, not a single recurrence rule that could be edited and
+        replayed; changing what "the same series" even means (a different
+        cadence, a different start) is `handle_delete_series` + a fresh
+        `_save_new` call, not this. `main_window.py::populate_form`'s
+        `edit_series` param locks the date/recurrence/occurrence-count
+        fields in the form itself so the user is never offered a control
+        that this method would silently ignore.
+
+        `not target.seriesId` guard mirrors `handle_delete_series` exactly
+        (same reasoning: an empty `seriesId` would otherwise match every
+        OTHER standalone meeting's own empty `seriesId` in the filter
+        below) -- unreachable from the real UI today since "Editar serie
+        completa" is only offered when `series_occurrence_count > 1`, same
+        as "Eliminar serie completa", but kept as the same defensive
+        second line, not the first line of defense.
+        """
+        target = self._find_meeting(meeting_id)
+        if target is None or not target.seriesId:
+            self.view.show_form_feedback(i18n.t("saveError", self.language), is_error=True)
+            return
+
+        work_name = security.clamp_text(payload.get("workName"), security.MAX_WORK_NAME_LENGTH)
+        title = security.clamp_text(payload.get("title"), security.MAX_TITLE_LENGTH)
+        reminder_minutes = max(1, int(float(payload.get("reminderMinutes"))))
+        duration_minutes = min(
+            models.MAX_DURATION_MINUTES,
+            max(models.MIN_DURATION_MINUTES, int(float(payload.get("durationMinutes")))),
+        )
+        sound_profile = models.normalize_sound_profile(payload.get("soundProfile"))
+        teams_url = security.clamp_text(payload.get("teamsUrl"), security.MAX_TEAMS_URL_LENGTH)
+        notes = security.clamp_text(payload.get("notes"), security.MAX_NOTES_LENGTH)
+
+        updated = 0
+        for meeting in self.meetings:
+            if meeting.seriesId != target.seriesId:
+                continue
+            own_date, _, _ = meeting.datetime.partition("T")
+            meeting.workName = work_name
+            meeting.title = title
+            meeting.datetime = f"{own_date}T{time_value}"
+            meeting.reminderMinutes = reminder_minutes
+            meeting.durationMinutes = duration_minutes
+            meeting.soundProfile = sound_profile
+            meeting.teamsUrl = teams_url
+            meeting.notes = notes
+            meeting.reminderSent = False
+            meeting.startSent = False
+            meeting.updatedAt = models.now_iso()
+            updated += 1
+
+        self._persist(silent=False)
+        self.view.clear_form()
+        self.view.show_form_feedback(i18n.format_text("formUpdatedSeries", self.language, count=updated))
+        self.view.show_toast(i18n.format_text("updatedSeriesToast", self.language, count=updated))
 
     def _save_new(self, payload: dict, recurrence_type: str, composed_datetime: str) -> None:
         if recurrence_type == "none":
@@ -1413,6 +1480,19 @@ class TimerMeetApp:
         meeting = self._find_meeting(meeting_id)
         if meeting is not None:
             self.view.populate_form(meeting)
+
+    def handle_edit_series(self, meeting_id: str) -> None:
+        """SDD.md v2.19.0: same form as `handle_edit`, flagged so its own
+        Save (`_save_edit_series` below) applies the shared fields to every
+        occurrence sharing this meeting's `seriesId`, not just this one.
+        Populated from THIS specific occurrence (so the form shows a real
+        date/time as context), even though that date -- unlike the time --
+        is not itself applied to the other occurrences on save; see
+        `main_window.py::populate_form`'s `edit_series` param for how the
+        view locks the fields that don't apply."""
+        meeting = self._find_meeting(meeting_id)
+        if meeting is not None:
+            self.view.populate_form(meeting, edit_series=True)
 
     def handle_delete(self, meeting_id: str) -> None:
         removed = self._apply_meetings([m for m in self.meetings if m.id != meeting_id])

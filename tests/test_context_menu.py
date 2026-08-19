@@ -52,7 +52,7 @@ def _make_callbacks(**overrides):
         "on_calendar_prev_month": _no_op, "on_calendar_next_month": _no_op, "on_calendar_today": _no_op,
         "on_calendar_day_click": _no_op, "on_week_prev": _no_op, "on_week_next": _no_op,
         "on_week_today": _no_op, "on_week_slot_click": _no_op, "on_toggle_week_column_mode": _no_op,
-        "on_delete_series": _no_op,
+        "on_delete_series": _no_op, "on_edit_series": _no_op,
         "on_set_app_theme": _no_op, "on_gadget_resize": _no_op,
     }
     fields.update(overrides)
@@ -295,8 +295,33 @@ class ContextMenuTests(unittest.TestCase):
         widgets.entry_labels[0].event_generate("<Button-3>")
 
         self.assertEqual(
-            self._menu_labels(), [i18n.t("edit", "es"), i18n.t("delete", "es"), i18n.t("deleteSeries", "es")]
+            self._menu_labels(),
+            [i18n.t("edit", "es"), i18n.t("editSeries", "es"), i18n.t("delete", "es"), i18n.t("deleteSeries", "es")],
         )
+
+    def test_calendar_entry_menu_edit_series_edits_whole_series_and_switches_to_list(self):
+        """SDD.md v2.19.0: "Editar serie completa" populates the form via
+        `on_edit_series` (not plain `on_edit`) and still switches to list
+        view, same as "Editar"."""
+        self.view.set_active_view("calendar")
+        self.root.update()
+        target = date(2026, 8, 21)
+        cells = [_calendar_cell_with_entry(target, "meeting-1", series_occurrence_count=3)] + [
+            _blank_calendar_cell(date(2025, 12, 1) + timedelta(days=i)) for i in range(41)
+        ]
+        self.view.render_calendar("Agosto 2026", ["L", "M", "M", "J", "V", "S", "D"], cells)
+        widgets = self.view._calendar_cells[0]
+        calls = {"edited_series": None, "views": []}
+        self.view.callbacks = _make_callbacks(
+            on_edit_series=lambda mid: calls.__setitem__("edited_series", mid),
+            on_set_active_view=lambda v: calls["views"].append(v),
+        )
+
+        widgets.entry_labels[0].event_generate("<Button-3>")
+        self.view._context_menu.invoke(1)  # "Editar serie completa"
+
+        self.assertEqual(calls["edited_series"], "meeting-1")
+        self.assertEqual(calls["views"], ["list"])
 
     def test_calendar_entry_menu_delete_series_confirms_with_count_and_calls_on_delete_series(self):
         self.view.set_active_view("calendar")
@@ -312,7 +337,7 @@ class ContextMenuTests(unittest.TestCase):
 
         widgets.entry_labels[0].event_generate("<Button-3>")
         with patch.object(main_window.messagebox, "askyesno", return_value=True) as askyesno:
-            self.view._context_menu.invoke(2)  # "Eliminar serie completa"
+            self.view._context_menu.invoke(3)  # "Eliminar serie completa"
             askyesno.assert_called_once_with(
                 i18n.t("deleteSeries", "es"), i18n.format_text("deleteSeriesConfirm", "es", count=5)
             )
@@ -333,7 +358,7 @@ class ContextMenuTests(unittest.TestCase):
 
         widgets.entry_labels[0].event_generate("<Button-3>")
         with patch.object(main_window.messagebox, "askyesno", return_value=False):
-            self.view._context_menu.invoke(2)
+            self.view._context_menu.invoke(3)
 
         self.assertIsNone(calls["deleted_series"])
 
@@ -465,8 +490,32 @@ class ContextMenuTests(unittest.TestCase):
         widgets.entry_labels[0].event_generate("<Button-3>")
 
         self.assertEqual(
-            self._menu_labels(), [i18n.t("edit", "es"), i18n.t("delete", "es"), i18n.t("deleteSeries", "es")]
+            self._menu_labels(),
+            [i18n.t("edit", "es"), i18n.t("editSeries", "es"), i18n.t("delete", "es"), i18n.t("deleteSeries", "es")],
         )
+        self.view.clear_week_selection()
+
+    def test_week_entry_menu_edit_series_edits_whole_series_and_switches_to_list(self):
+        """Week-view counterpart to
+        `test_calendar_entry_menu_edit_series_edits_whole_series_and_switches_to_list`."""
+        self.view.set_active_view("week")
+        self.root.update()
+        monday = date(2026, 8, 10)
+        cell = _week_cell_with_entry(monday, 9, "meeting-week-1", series_occurrence_count=4)
+        cells = _full_week(monday, cell, filled_row=9, filled_col=0)
+        self.view.render_week_grid("10-16 Ago 2026", ["L 10", "M 11", "M 12", "J 13", "V 14", "S 15", "D 16"], cells)
+        widgets = self.view._week_cells[9 * main_window.WEEK_COLS + 0]
+        calls = {"edited_series": None, "views": []}
+        self.view.callbacks = _make_callbacks(
+            on_edit_series=lambda mid: calls.__setitem__("edited_series", mid),
+            on_set_active_view=lambda v: calls["views"].append(v),
+        )
+
+        widgets.entry_labels[0].event_generate("<Button-3>")
+        self.view._context_menu.invoke(1)  # "Editar serie completa"
+
+        self.assertEqual(calls["edited_series"], "meeting-week-1")
+        self.assertEqual(calls["views"], ["list"])
         self.view.clear_week_selection()
 
     def test_week_entry_menu_delete_series_confirms_with_count_and_calls_on_delete_series(self):
@@ -482,7 +531,7 @@ class ContextMenuTests(unittest.TestCase):
 
         widgets.entry_labels[0].event_generate("<Button-3>")
         with patch.object(main_window.messagebox, "askyesno", return_value=True) as askyesno:
-            self.view._context_menu.invoke(2)
+            self.view._context_menu.invoke(3)
             askyesno.assert_called_once_with(
                 i18n.t("deleteSeries", "es"), i18n.format_text("deleteSeriesConfirm", "es", count=6)
             )

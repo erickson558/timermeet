@@ -204,6 +204,10 @@ translations = {
             "Esta acción no se puede deshacer."
         ),
         "deletedSeriesToast": "Se eliminaron {count} reuniones de la serie.",
+        "editSeries": "Editar serie completa",
+        "updateSeriesButton": "Actualizar serie",
+        "formUpdatedSeries": "Se actualizaron las {count} reuniones de la serie.",
+        "updatedSeriesToast": "Serie actualizada ({count} reuniones).",
         "weekToolbarAddButton": "Agregar",
         "meetingsSkippedToast": "{count} reunión(es) no se pudieron cargar -- revisa el registro.",
         "meetingsFileCorruptToast": (
@@ -394,6 +398,10 @@ translations = {
         "deleteSeries": "Delete entire series",
         "deleteSeriesConfirm": "ALL {count} meetings in this series will be deleted, past and future. This cannot be undone.",
         "deletedSeriesToast": "{count} meetings in the series were deleted.",
+        "editSeries": "Edit entire series",
+        "updateSeriesButton": "Update series",
+        "formUpdatedSeries": "All {count} meetings in the series were updated.",
+        "updatedSeriesToast": "Series updated ({count} meetings).",
         "weekToolbarAddButton": "Add",
         "meetingsSkippedToast": "{count} meeting(s) could not be loaded -- check the log.",
         "meetingsFileCorruptToast": (

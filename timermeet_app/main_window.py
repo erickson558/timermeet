@@ -1142,6 +1142,12 @@ class Callbacks:
     on_week_slot_click: Callable[[date, int], None]
     on_toggle_week_column_mode: Callable[[], None]
     on_delete_series: Callable[[str], None]
+    # SDD.md v2.19.0: populates the form from this meeting like `on_edit`,
+    # but flags the form so its own Save applies the shared fields to
+    # every occurrence sharing this meeting's `seriesId`, not just this one
+    # -- see `populate_form`'s `edit_series` param and
+    # `app.py::handle_edit_series`.
+    on_edit_series: Callable[[str], None]
     # Renamed from `on_set_gadget_skin` in v2.14.0 when the gadget-only skin
     # picker grew into a whole-app theme picker (SDD.md v2.14.0) -- ONE
     # callback now backs both entry points (the gadget's own picker button/
@@ -1969,6 +1975,12 @@ class MainWindow:
         self.form_hint_label.pack(anchor="w", pady=(0, 12), padx=10)
 
         self.meeting_id_var = tk.StringVar(value="")
+        # SDD.md v2.19.0: True only between a `populate_form(meeting,
+        # edit_series=True)` call and the next `clear_form()`/plain
+        # `populate_form()` -- read once, at Save time, by `_handle_save`
+        # to flag the payload so `app.py::handle_save` routes to
+        # `_save_edit_series` instead of the single-occurrence `_save_edit`.
+        self._form_edit_series = False
 
         work_header = self._track_panel_frame(panel)
         work_header.pack(fill="x", padx=10)
@@ -2957,6 +2969,14 @@ class MainWindow:
         self.callbacks.on_edit(meeting_id)
         self.callbacks.on_set_active_view("list")
 
+    def _handle_calendar_entry_edit_series_click(self, meeting_id: str) -> None:
+        """"Editar serie completa" counterpart (SDD.md v2.19.0) to
+        `_handle_calendar_entry_click` just above -- same two-step
+        populate-then-switch-to-list pattern, `on_edit_series` instead of
+        `on_edit`."""
+        self.callbacks.on_edit_series(meeting_id)
+        self.callbacks.on_set_active_view("list")
+
     def _handle_calendar_day_click(self, day: date) -> None:
         # Mirrors `_handle_calendar_entry_click`'s two-step pattern (data
         # action first, then hand the view-switch to app.py) -- here the
@@ -3693,6 +3713,12 @@ class MainWindow:
         self.callbacks.on_edit(meeting_id)
         self.callbacks.on_set_active_view("list")
 
+    def _handle_week_entry_edit_series_click(self, meeting_id: str) -> None:
+        """"Editar serie completa" counterpart (SDD.md v2.19.0) to
+        `_handle_week_entry_click` just above."""
+        self.callbacks.on_edit_series(meeting_id)
+        self.callbacks.on_set_active_view("list")
+
     def _handle_week_slot_click(self, day: date, hour: int) -> None:
         self.callbacks.on_week_slot_click(day, hour)
         self.callbacks.on_set_active_view("list")
@@ -3818,6 +3844,15 @@ class MainWindow:
         self._context_menu.add_command(
             label=i18n.t("edit", self.language), command=lambda mid=meeting_id: self._handle_calendar_entry_click(mid)
         )
+        # "Editar serie completa" (SDD.md v2.19.0): same enablement rule as
+        # "Eliminar serie completa" below (2+ LIVE siblings sharing this
+        # entry's `seriesId`) -- grouped right after "Editar" rather than
+        # next to the two delete items, since it is itself an edit action.
+        if series_occurrence_count > 1:
+            self._context_menu.add_command(
+                label=i18n.t("editSeries", self.language),
+                command=lambda mid=meeting_id: self._handle_calendar_entry_edit_series_click(mid),
+            )
         # Deliberately does NOT call `on_set_active_view("list")` (unlike
         # "Editar" above) -- matches the list view's own "Eliminar" button,
         # which never forces a view switch either; `handle_delete` in
@@ -3862,6 +3897,13 @@ class MainWindow:
         self._context_menu.add_command(
             label=i18n.t("edit", self.language), command=lambda mid=meeting_id: self._handle_week_entry_click(mid)
         )
+        # "Editar serie completa" (SDD.md v2.19.0) -- same enablement rule
+        # and placement (right after "Editar") as the month view's menu above.
+        if series_occurrence_count > 1:
+            self._context_menu.add_command(
+                label=i18n.t("editSeries", self.language),
+                command=lambda mid=meeting_id: self._handle_week_entry_edit_series_click(mid),
+            )
         # Same no-view-switch reasoning as `_show_calendar_entry_context_menu`.
         self._context_menu.add_command(
             label=i18n.t("delete", self.language), command=lambda mid=meeting_id: self._confirm_delete(mid)
@@ -4189,6 +4231,7 @@ class MainWindow:
             "occurrenceCount": self.occurrence_entry.get().strip(),
             "teamsUrl": self.url_entry.get().strip(),
             "notes": self.notes_text.get("1.0", "end").strip(),
+            "editSeries": self._form_edit_series,
         }
         self.callbacks.on_save(payload)
 
@@ -4357,7 +4400,15 @@ class MainWindow:
     def _recurrence_label_for(self, recurrence_id: str) -> str:
         return self._recurrence_id_to_label.get(recurrence_id, self._recurrence_id_to_label.get("none", ""))
 
-    def populate_form(self, meeting: models.Meeting) -> None:
+    def populate_form(self, meeting: models.Meeting, edit_series: bool = False) -> None:
+        # Unconditionally unlocked here, BEFORE populating -- undoes a
+        # previous call's `edit_series=True` lock (below) regardless of
+        # which kind of edit this new call is, so `_set_entry` never mistakes
+        # a stale "disabled" for this call's own intent.
+        self.date_entry.configure(state="normal")
+        self._recurrence_menu_widget.configure(state="normal")
+
+        self._form_edit_series = edit_series
         self.meeting_id_var.set(meeting.id)
         self._set_entry(self.work_entry, meeting.workName)
         self._set_entry(self.title_entry, meeting.title)
@@ -4372,10 +4423,26 @@ class MainWindow:
         self._set_entry(self.url_entry, meeting.teamsUrl)
         self.notes_text.delete("1.0", "end")
         self.notes_text.insert("1.0", meeting.notes)
-        self.save_button.configure(text=i18n.t("updateButton", self.language))
         self._handle_recurrence_change(self._recurrence_var.get())
+        if edit_series:
+            # SDD.md v2.19.0: locks exactly the fields `_save_edit_series`
+            # does NOT apply across the series (own date, recurrence
+            # pattern, occurrence count) -- never a control the user could
+            # change here only to have it silently ignored on Save. Comes
+            # AFTER `_handle_recurrence_change` above, which would otherwise
+            # re-enable `occurrence_entry` for any non-"none" recurrence
+            # type, overriding this lock right back off.
+            self.save_button.configure(text=i18n.t("updateSeriesButton", self.language))
+            self.date_entry.configure(state="disabled")
+            self._recurrence_menu_widget.configure(state="disabled")
+            self.occurrence_entry.configure(state="disabled")
+        else:
+            self.save_button.configure(text=i18n.t("updateButton", self.language))
 
     def clear_form(self) -> None:
+        self._form_edit_series = False
+        self.date_entry.configure(state="normal")
+        self._recurrence_menu_widget.configure(state="normal")
         self.meeting_id_var.set("")
         for entry in (self.work_entry, self.title_entry, self.date_entry, self.time_entry, self.url_entry):
             self._set_entry(entry, "")

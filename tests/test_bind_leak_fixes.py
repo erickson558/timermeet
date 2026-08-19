@@ -153,7 +153,7 @@ def _make_callbacks(**overrides):
         "on_calendar_prev_month": _no_op, "on_calendar_next_month": _no_op, "on_calendar_today": _no_op,
         "on_calendar_day_click": _no_op, "on_week_prev": _no_op, "on_week_next": _no_op,
         "on_week_today": _no_op, "on_week_slot_click": _no_op, "on_toggle_week_column_mode": _no_op,
-        "on_delete_series": _no_op,
+        "on_delete_series": _no_op, "on_edit_series": _no_op,
         "on_set_app_theme": _no_op, "on_gadget_resize": _no_op,
     }
     fields.update(overrides)

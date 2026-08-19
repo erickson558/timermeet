@@ -543,6 +543,74 @@ class WeekViewWidgetTests(unittest.TestCase):
         finally:
             self._settle_week_meeting_blocks([])
 
+    def test_hovering_a_meeting_block_shows_a_tooltip_with_exact_date_and_time(self):
+        """SDD.md v2.17.2: the weekly view's blocks only ever show
+        "HH:MM Título" -- too little for an overlapping-heavy day, hence
+        the hover tooltip surfacing the full, unambiguous date/time."""
+        monday = date(2026, 8, 10)
+        cells = _full_week(monday, _blank_week_cell(monday, 0), filled_row=0, filled_col=0)
+        self.view.render_week_grid("10-16 Ago 2026", ["L 10", "M 11", "M 12", "J 13", "V 14", "S 15", "D 16"], cells)
+        block = main_window.WeekMeetingBlock(
+            day_index=0, column_index=0, column_count=1, start_hour_float=9.5, duration_minutes=30,
+            color="#ff0000", title="Standup", time_text="09:30", meeting_id="meeting-block-1",
+            start_dt=datetime(2026, 8, 10, 9, 30), end_dt=datetime(2026, 8, 10, 10, 0),
+        )
+        try:
+            self._settle_week_meeting_blocks([block])
+            self.root.update()  # see the same-reasoning comment above
+            widgets = self._placed_block_widgets()[0]
+
+            widgets.frame.event_generate("<Enter>")
+            self.assertEqual(self.view._week_tooltip.state(), "normal")
+            tooltip_text = self.view._week_tooltip_label.cget("text")
+            self.assertIn("Standup", tooltip_text)
+            self.assertIn("10 ago 2026, 09:30", tooltip_text)
+            self.assertIn("10:00", tooltip_text)
+        finally:
+            self._settle_week_meeting_blocks([])
+
+    def test_leaving_a_meeting_block_hides_the_tooltip(self):
+        monday = date(2026, 8, 10)
+        cells = _full_week(monday, _blank_week_cell(monday, 0), filled_row=0, filled_col=0)
+        self.view.render_week_grid("10-16 Ago 2026", ["L 10", "M 11", "M 12", "J 13", "V 14", "S 15", "D 16"], cells)
+        block = main_window.WeekMeetingBlock(
+            day_index=0, column_index=0, column_count=1, start_hour_float=9.5, duration_minutes=30,
+            color="#ff0000", title="Standup", time_text="09:30", meeting_id="meeting-block-1",
+            start_dt=datetime(2026, 8, 10, 9, 30), end_dt=datetime(2026, 8, 10, 10, 0),
+        )
+        try:
+            self._settle_week_meeting_blocks([block])
+            self.root.update()
+            widgets = self._placed_block_widgets()[0]
+
+            widgets.frame.event_generate("<Enter>")
+            self.assertEqual(self.view._week_tooltip.state(), "normal")
+            widgets.frame.event_generate("<Leave>")
+            self.assertEqual(self.view._week_tooltip.state(), "withdrawn")
+        finally:
+            self._settle_week_meeting_blocks([])
+
+    def test_aggregate_chip_shows_no_tooltip_on_hover(self):
+        """Mirrors `test_aggregate_chip_is_never_bound_to_a_click_handler`
+        above -- the shared "+N más" chip stays fully non-interactive,
+        hover included."""
+        monday = date(2026, 8, 10)
+        cells = _full_week(monday, _blank_week_cell(monday, 0), filled_row=0, filled_col=0)
+        self.view.render_week_grid("10-16 Ago 2026", ["L 10", "M 11", "M 12", "J 13", "V 14", "S 15", "D 16"], cells)
+        aggregate = main_window.WeekMeetingBlock(
+            day_index=0, column_index=3, column_count=4, start_hour_float=9.0, duration_minutes=60,
+            color="", title="", time_text="", meeting_id=None, is_overflow=True, overflow_count=2,
+        )
+        try:
+            self._settle_week_meeting_blocks([aggregate])
+            self.root.update()
+            widgets = self._placed_block_widgets()[0]
+
+            widgets.frame.event_generate("<Enter>")
+            self.assertEqual(self.view._week_tooltip.state(), "withdrawn")
+        finally:
+            self._settle_week_meeting_blocks([])
+
     def test_repeated_re_renders_of_the_block_pool_do_not_leak_tcl_commands(self):
         """Same leak-detection method already established in this codebase
         (tests/test_bind_leak_fixes.py) -- applied here to the new

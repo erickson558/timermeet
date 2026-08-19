@@ -1411,6 +1411,23 @@ Continuación directa de `v2.16.1`: esa versión rediseñó la superficie visual
 
 `python -m unittest discover -s tests` en verde (295 tests, sin agregar ni quitar ninguno).
 
+## v2.18.0: tooltip con fecha/hora exacta al pasar el mouse sobre un bloque de la vista semanal
+
+**Pedido del usuario:** "necesito un tooltip en la vista semanal cuando pase el mouse sobre cada reunión para ver la hora y fecha exacta".
+
+**Por qué hace falta:** un bloque de la vista semanal (`v2.16.0`) solo muestra `"HH:MM Título"` recortado al ancho disponible -- suficiente para identificar la reunión de un vistazo, pero sin la fecha completa (solo se infiere por la columna del día) ni la hora de fin, y un bloque angosto (varias reuniones simultáneas dividiendo la columna) o muy corto (duración mínima con el piso `WEEK_BLOCK_MIN_HEIGHT_PX`) puede recortar hasta el título mismo.
+
+**Diseño:**
+- `WeekMeetingBlock` (`main_window.py`) suma dos campos, `start_dt`/`end_dt` (`Optional[datetime]`, `None` para el chip agregado) -- `app.py::_assign_cluster_blocks._real_block` los llena con `meeting.local_datetime()` y esa misma fecha + `durationMinutes`. Necesarios porque `time_text` (`"HH:MM"`) y `day_index` (0-6, sin año/mes/día real) no alcanzan para reconstruir la fecha completa que pide el usuario.
+- El texto del tooltip (`"{título}\n{fecha/hora exacta} - {hora fin}"`) se arma en `main_window.py::_apply_week_meeting_blocks`, en el mismo punto donde ya se decide `widgets.meeting_id`, reusando `i18n.format_datetime_display` (ya existía, usado por la ventana de alarma) para el formato "10 ago 2026, 09:30" acorde al idioma activo -- cero i18n nuevo.
+- Un único `Toplevel` (`self._week_tooltip`) construido una sola vez en `_build_week_view`, igual que `_week_now_line`/`_week_now_dot`: nunca se destruye/recrea, solo se reposiciona (`geometry()`) y se muestra/oculta (`deiconify()`/`withdraw()`).
+- `<Enter>`/`<Leave>` se enlazan UNA sola vez por slot del pool, en la misma construcción del pool (no en cada render como sí ocurre con los `<Button-1>`/`<Button-3>` de clic) -- el handler lee `widgets.tooltip_text` (nuevo campo en `_WeekMeetingBlockWidgets`, `""` = "sin tooltip") en el momento del hover, no un valor capturado al enlazar, así que no hace falta pasar por `_rebind()` ni arriesgar la fuga de comandos Tcl que existe para *ese* patrón. El chip agregado "+N más" nunca recibe `tooltip_text` (se queda en `""`), igual que ya es no-interactivo al clic.
+- El tooltip se oculta explícitamente al inicio de `_apply_week_meeting_blocks` (cualquier llamada implica que el layout está por cambiar) y al salir de la vista semanal (`set_active_view`) -- mismo criterio que ya usan `_cancel_week_live_retry`/`_cancel_week_meeting_block_retry` en ese segundo punto.
+
+**Alcance explícitamente fuera de esta versión:** sin retraso antes de mostrar el tooltip (aparece de inmediato al entrar el cursor), sin tooltip para el chip "+N más", sin cambios en el clic/clic derecho/selección ni en el texto ya visible de cada bloque.
+
+`python -m unittest discover -s tests` en verde (298 tests -- 3 nuevos: hover muestra título+fecha/hora exacta, `<Leave>` oculta, el chip agregado no muestra tooltip). `bandit`/`pip-audit` sin hallazgos.
+
 ## SDD Workflow
 
 1. Traducir la petición del usuario a objetivo, restricciones y criterio de aceptación (skill `timermeet-spec-driver`).

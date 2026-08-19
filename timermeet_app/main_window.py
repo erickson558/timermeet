@@ -979,6 +979,12 @@ class WeekMeetingBlock:
     meeting_id: Optional[str] = None
     is_overflow: bool = False
     overflow_count: int = 0
+    # `None` for the aggregate "+N más" chip (same as `title`/`time_text`
+    # above) -- populated for a real block so the hover tooltip (SDD.md
+    # v2.17.2) can show the exact date, not just the "HH:MM" `time_text`
+    # already baked into the block's own label.
+    start_dt: Optional[datetime] = None
+    end_dt: Optional[datetime] = None
 
 
 @dataclass
@@ -1027,12 +1033,24 @@ class _WeekMeetingBlockWidgets:
     slot and for a non-interactive aggregate chip) this slot currently
     represents, so `_apply_week_selection_highlight`'s immediate-path
     re-application (camino 1, see that method) can compare against it
-    without re-deriving it from `MainWindow._week_meeting_block_data`."""
+    without re-deriving it from `MainWindow._week_meeting_block_data`.
+
+    `tooltip_text` (SDD.md v2.17.2) is the one field here that's NOT part
+    of the click-handler rebind story above: `<Enter>`/`<Leave>` are bound
+    ONCE per slot at pool-construction time in `_build_week_view` (same
+    "permanent widget, one-time bind" precedent as the week-cell
+    `<Configure>` binds there), reading this attribute fresh on every hover
+    instead of closing over per-render meeting data the way the click
+    handlers do -- so `_apply_week_meeting_blocks` only ever needs to
+    overwrite the string, never touch the binding itself. Empty string
+    means "no tooltip" (unused slot or the non-interactive aggregate
+    chip)."""
 
     frame: tk.Frame
     label: tk.Label
     bind_funcids: Dict[str, Optional[str]] = field(default_factory=dict)
     meeting_id: Optional[str] = None
+    tooltip_text: str = ""
 
 
 @dataclass
@@ -1489,6 +1507,13 @@ class MainWindow:
         self._week_meeting_block_data: List[WeekMeetingBlock] = []
         self._week_meeting_block_retry_job: Optional[str] = None
         self._week_meeting_block_retry_count = 0
+        # Hover tooltip (SDD.md v2.17.2): one shared `Toplevel`, built once
+        # in `_build_week_view` alongside the block pool itself, never
+        # destroyed/recreated -- same "single long-lived overlay widget,
+        # just repositioned/reconfigured" precedent as `_week_now_line`/
+        # `_week_now_dot` above, not a fresh `Toplevel` per hover.
+        self._week_tooltip: Optional[tk.Toplevel] = None
+        self._week_tooltip_label: Optional[tk.Label] = None
         # Cached font for measuring a block's own "HH:MM Título" text
         # against its live, per-render pixel width via
         # `_truncate_text_to_pixel_width` (SDD.md decision #5) -- same
@@ -2590,7 +2615,35 @@ class MainWindow:
             block_label.place(
                 x=WEEK_BLOCK_LABEL_INSET_PX, y=1, relwidth=1.0, width=-2 * WEEK_BLOCK_LABEL_INSET_PX
             )
-            self._week_meeting_blocks.append(_WeekMeetingBlockWidgets(frame=block_frame, label=block_label))
+            widgets = _WeekMeetingBlockWidgets(frame=block_frame, label=block_label)
+            self._week_meeting_blocks.append(widgets)
+            # Hover tooltip (SDD.md v2.17.2): `<Enter>`/`<Leave>` bound ONCE
+            # per slot, right here at construction, never rebound per-render
+            # -- see `_WeekMeetingBlockWidgets.tooltip_text`'s own docstring
+            # for why that's safe (the closure captures the stable `widgets`
+            # object, not any per-render meeting data). A slot with an empty
+            # `tooltip_text` (unused slot or the aggregate chip) simply shows
+            # nothing on hover.
+            block_frame.bind("<Enter>", lambda e, w=widgets: self._show_week_tooltip(w, e))
+            block_frame.bind("<Leave>", self._hide_week_tooltip)
+            block_label.bind("<Enter>", lambda e, w=widgets: self._show_week_tooltip(w, e))
+            block_label.bind("<Leave>", self._hide_week_tooltip)
+
+        # Shared hover-tooltip overlay (SDD.md v2.17.2) for the block pool
+        # above: one `Toplevel`, built once, eagerly, right here -- never
+        # destroyed/recreated -- same "single long-lived overlay, just
+        # repositioned/reconfigured" precedent as `_week_now_line`/
+        # `_week_now_dot`. Starts withdrawn; `_show_week_tooltip`/
+        # `_hide_week_tooltip` are its only two callers.
+        self._week_tooltip = tk.Toplevel(self.root)
+        self._week_tooltip.withdraw()
+        self._week_tooltip.overrideredirect(True)
+        self._week_tooltip.attributes("-topmost", True)
+        self._week_tooltip_label = tk.Label(
+            self._week_tooltip, bg="#ffffe0", fg="black", justify="left",
+            relief="solid", borderwidth=1, font=(FONT_FAMILY, 9), padx=6, pady=3,
+        )
+        self._week_tooltip_label.pack()
 
         # `_apply_week_now_line` only ever measures ROW 0's cell for a given
         # day column (every row in that column shares its width, see that
@@ -2778,6 +2831,11 @@ class MainWindow:
             # Same reasoning, same fix, for the meeting-block overlay's own
             # independent retry job.
             self._cancel_week_meeting_block_retry()
+            # Same reasoning once more (SDD.md v2.17.2): an open hover
+            # tooltip left dangling on top of whichever view comes next
+            # would be its own version of this exact "stale overlay
+            # survives the view switch" bug.
+            self._hide_week_tooltip()
             # SDD.md v2.11.0: clear on LEAVING week view (not on entering
             # it) -- by the time the user comes back, it's already empty,
             # so no second clear-on-entry call site is needed. Deliberately
@@ -3450,6 +3508,13 @@ class MainWindow:
         `overflow_label`'s own long-standing precedent.
         """
         pool = self._week_meeting_blocks
+        # Every call here means the layout is about to change (fresh data,
+        # a work-week toggle, or a resize) -- see this method's own call
+        # sites -- never a bare per-second/per-minute heartbeat tick, so
+        # unconditionally dismissing any open tooltip up front is always
+        # correct: a slot's position, size, or the meeting it represents
+        # may no longer match what the tooltip is currently showing.
+        self._hide_week_tooltip()
         if self._primary_view != "week" or self._gadget_active:
             # Same reasoning as `_apply_week_now_line`'s identical guard --
             # no widget to place a block onto, and no reschedule, the moment
@@ -3481,6 +3546,7 @@ class MainWindow:
             if slot >= len(visible_blocks):
                 widgets.frame.place_forget()
                 widgets.meeting_id = None
+                widgets.tooltip_text = ""
                 continue
             block = visible_blocks[slot]
             column_width = column_widths[block.day_index]
@@ -3529,6 +3595,21 @@ class MainWindow:
             widgets.frame.place(x=x, y=y, width=block_width, height=height)
 
             widgets.meeting_id = block.meeting_id
+            # Hover tooltip text (SDD.md v2.17.2): the aggregate "+N más"
+            # chip stays non-interactive (same precedent as its click
+            # handlers just below), so it gets no tooltip either -- only a
+            # real block, which always has a `start_dt`/`end_dt`, shows
+            # one. Computed here at render time (not in `app.py`) for the
+            # same reason `_format_week_block_text` already is: it needs
+            # `self.language` for `i18n.format_datetime_display`.
+            if block.is_overflow or block.start_dt is None or block.end_dt is None:
+                widgets.tooltip_text = ""
+            else:
+                widgets.tooltip_text = (
+                    f"{block.title}\n"
+                    f"{i18n.format_datetime_display(block.start_dt, self.language)} - "
+                    f"{block.end_dt.strftime('%H:%M')}"
+                )
             if block.is_overflow:
                 # Non-interactive (SDD.md decision #3, same precedent as
                 # `overflow_label`) -- but this pool slot may have shown a
@@ -3565,6 +3646,33 @@ class MainWindow:
                 widgets.bind_funcids["label_right"] = _rebind(
                     widgets.label, "<Button-3>", right_click, widgets.bind_funcids.get("label_right")
                 )
+
+    def _show_week_tooltip(self, widgets: "_WeekMeetingBlockWidgets", event) -> None:
+        """`<Enter>` handler bound once per pool slot in `_build_week_view`
+        (SDD.md v2.17.2) -- reads `widgets.tooltip_text` fresh on every
+        hover rather than any value captured at bind time, since the same
+        slot is reused for a different meeting (or the aggregate chip, or
+        nothing) across renders. An empty string means "no tooltip for this
+        slot right now" (unused slot or the non-interactive aggregate
+        chip)."""
+        if not widgets.tooltip_text:
+            return
+        self._week_tooltip_label.configure(text=widgets.tooltip_text)
+        # Offset from the actual cursor position (`event.x_root`/`y_root`,
+        # screen coordinates -- the only ones that make sense for an
+        # `overrideredirect` `Toplevel`, unlike `_week_tooltip`'s sibling
+        # overlays above which stay inside `week_view`'s own coordinate
+        # space) so the tooltip never appears directly under the pointer.
+        self._week_tooltip.geometry(f"+{event.x_root + 14}+{event.y_root + 12}")
+        self._week_tooltip.deiconify()
+
+    def _hide_week_tooltip(self, _event=None) -> None:
+        """`<Leave>` handler (SDD.md v2.17.2), also called directly from
+        `_apply_week_meeting_blocks`/`set_active_view` whenever the block
+        layout is about to change or week view is no longer visible --
+        `.withdraw()` is idempotent so calling it on an already-hidden
+        tooltip is harmless."""
+        self._week_tooltip.withdraw()
 
     def _format_week_aggregate_text(self, block: WeekMeetingBlock, available_px: int) -> str:
         """The shared "+N más" chip's text (SDD.md decision #3) -- computed

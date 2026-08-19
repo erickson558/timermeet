@@ -153,6 +153,13 @@ def _assign_cluster_blocks(
             time_text=when.strftime("%H:%M"),
             series_occurrence_count=_series_count(meeting),
             meeting_id=meeting.id,
+            # Full start/end (SDD.md v2.17.2) for the block's hover tooltip
+            # -- `time_text` above is only "HH:MM", not enough to show the
+            # exact date the tooltip needs, and `main_window.py` has no
+            # other way to recover it (`day_index` alone doesn't carry
+            # which real calendar date it refers to).
+            start_dt=when,
+            end_dt=when + timedelta(minutes=meeting.durationMinutes),
         )
 
     real_concurrency = len(lane_end_hour)
@@ -1247,7 +1254,7 @@ class TimerMeetApp:
                 (
                     b.day_index, b.column_index, b.column_count, b.start_hour_float, b.duration_minutes,
                     b.color, b.meeting_id, b.title, b.time_text, b.series_occurrence_count,
-                    b.is_overflow, b.overflow_count,
+                    b.is_overflow, b.overflow_count, b.start_dt, b.end_dt,
                 )
                 for b in meeting_blocks
             ),

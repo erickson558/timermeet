@@ -93,7 +93,8 @@ def main() -> None:
     target_exe = ROOT / f"{APP_NAME}.exe"
     shutil.copy2(built_exe, target_exe)
     print(f"Built {target_exe}")
-    print("Remember: assets/audio/ and data/ must stay next to TimerMeet.exe")
+    print("Remember: the assets/ folder (audio/, pingpong_loading.gif) and data/")
+    print("must stay next to TimerMeet.exe")
     print("(they're read as loose files at runtime, not bundled into the .exe).")
 
 

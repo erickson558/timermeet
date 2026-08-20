@@ -502,6 +502,14 @@ class TimerMeetApp:
         # and mainloop() starting, so whatever geometry is set first is what
         # actually gets painted).
         settings = storage.load_settings()
+        # Stashed on `self` (not just a local) because the splash-animation
+        # split (v2.21.0) moved the rest of this constructor's body into
+        # `_finish_startup`, which -- unlike a plain local -- runs from a
+        # separate `root.after(...)` callback and can't see this function's
+        # locals; only its one remaining read (the "companies" migration
+        # check below) needs it, so it's read back once there and not kept
+        # around any longer than that.
+        self._startup_settings = settings
         saved_language = settings.get("language")
         self.language = saved_language if saved_language in i18n.translations else i18n.DEFAULT_LANGUAGE
         self.gadget_mode = bool(settings.get("gadgetMode", False))
@@ -539,6 +547,11 @@ class TimerMeetApp:
         # visible if the app is resuming into gadget mode.
         self.root.after(0, self._force_show_window)
 
+        # Tracked unconditionally (not just inside the try/except below) so
+        # `_finish_startup` can always safely check/destroy it regardless of
+        # which branch below actually ran.
+        self._splash_label = None
+
         if self.gadget_mode:
             # Skip the full-size splash entirely -- MainWindow builds
             # full_view gridded by default, so leaving root withdrawn until
@@ -546,6 +559,7 @@ class TimerMeetApp:
             # exists) means the large window is never mapped/painted at all.
             self.root.withdraw()
             loading_label = None
+            self._finish_startup(loading_label)
         else:
             self.root.geometry("1180x760")
             self.root.minsize(960, 640)
@@ -564,6 +578,77 @@ class TimerMeetApp:
             # keeps this paint-only flush cheap.
             self.root.update_idletasks()
 
+            # Animated splash (v2.21.0), purely cosmetic on top of the plain
+            # loading_label above. Loading the gif's frames is cheap (a few
+            # hundred KB decoded once) but must never be allowed to block
+            # startup if the asset is missing/corrupt -- caught broadly and
+            # logged, falling straight through to `_finish_startup` exactly
+            # as if this whole block didn't exist. Frame playback below uses
+            # ONLY `root.after(...)` re-scheduling, one frame per callback,
+            # never a blocking loop/sleep and never `.update()`/
+            # `.update_idletasks()` -- see the "Do NOT add a synchronous
+            # root.update()" comment further down for why that specific call
+            # would reintroduce the v2.1.0 startup freeze.
+            try:
+                gif_path = storage.base_dir() / "assets" / "pingpong_loading.gif"
+                frames: List[tk.PhotoImage] = []
+                index = 0
+                while True:
+                    try:
+                        frames.append(tk.PhotoImage(file=str(gif_path), format=f"gif -index {index}"))
+                    except tk.TclError:
+                        break
+                    index += 1
+                if not frames:
+                    raise RuntimeError("no frames decoded from startup splash gif")
+                # Kept as a `self.` attribute (not a local) so nothing
+                # garbage-collects these PhotoImage objects mid-animation --
+                # a classic Tkinter gotcha where a dropped reference blanks
+                # the image even though the Label widget itself is still alive.
+                self._splash_frames = frames
+                self._splash_label = tk.Label(self.root, image=self._splash_frames[0], bg="#1a1a1a")
+                self._splash_label.place(relx=0.5, rely=0.42, anchor="center")
+                # Only re-placed (nudged down) once the animation actually
+                # exists to sit above it -- on any failure below, the
+                # untouched `loading_label.place(...)` call above is left as
+                # the last word on its position.
+                loading_label.place(relx=0.5, rely=0.58, anchor="center")
+                self._splash_interval_ms = max(1, round(1200 / len(self._splash_frames)))
+                # Frame 0 is already showing (the Label's own construction
+                # above), so scheduling starts at index 1 -- but only if a
+                # second frame actually exists. A degenerate single-frame
+                # gif (a truncated OneDrive sync landing mid-write is a
+                # plausible way to get exactly one valid frame, same failure
+                # class the top-level `if not frames: raise` above guards
+                # against for zero frames) must not schedule
+                # `_advance_splash_frame(1, ...)` unconditionally: that
+                # callback indexes `self._splash_frames[1]`, which would
+                # raise an uncaught IndexError *inside* a `root.after()`
+                # callback -- outside this try/except, so it can't fall
+                # back to `_finish_startup()` -- permanently hanging
+                # startup on a frozen splash instead of degrading
+                # gracefully. One frame is already fully "shown"; there is
+                # nothing left to animate, so finish startup immediately.
+                if len(self._splash_frames) > 1:
+                    self.root.after(self._splash_interval_ms, self._advance_splash_frame, 1, loading_label)
+                else:
+                    self._finish_startup(loading_label)
+            except Exception as exc:
+                logger.warning("Could not load startup splash animation: %s", exc)
+                self._finish_startup(loading_label)
+
+    def _advance_splash_frame(self, index: int, loading_label) -> None:
+        """Steps the startup splash gif forward one frame via `root.after(...)`
+        re-scheduling -- never a blocking loop/sleep, never `.update()` --
+        so mainloop() keeps servicing normal events between frames. The last
+        frame hands off to `_finish_startup`, which builds the real UI."""
+        self._splash_label.configure(image=self._splash_frames[index])
+        if index + 1 < len(self._splash_frames):
+            self.root.after(self._splash_interval_ms, self._advance_splash_frame, index + 1, loading_label)
+        else:
+            self._finish_startup(loading_label)
+
+    def _finish_startup(self, loading_label) -> None:
         self.work_filter = "all"
         # Which primary view is showing ("list"/"calendar") -- mirrors
         # MainWindow's own `_primary_view`, but this copy is what
@@ -596,11 +681,12 @@ class TimerMeetApp:
         # re-derived from meetings.json on later launches, or an explicit
         # removal would silently come back the next time that name is still
         # used by an existing meeting.
-        if "companies" in settings:
+        if "companies" in self._startup_settings:
             self.companies: List[str] = storage.load_companies()
         else:
             self.companies = sorted({m.workName for m in self.meetings if m.workName}, key=str.lower)
             storage.save_companies(self.companies)
+        del self._startup_settings  # done with it; nothing after this needs it
         # Per-company manual color overrides and the week view's "now" line
         # color -- both machine-local settings.json UI preferences, same
         # home as `self.companies` just above, loaded together with it.
@@ -708,6 +794,8 @@ class TimerMeetApp:
         # "Not Responding" during startup.
         if loading_label is not None:
             loading_label.destroy()
+        if self._splash_label is not None:
+            self._splash_label.destroy()
 
         # Run on a background thread rather than blocking startup on it:
         # warm_cache() only touches the filesystem/MCI, never a Tkinter

@@ -342,11 +342,19 @@ def save_companies(companies: List[str]) -> None:
     save_settings(settings)
 
 
-_HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+_HEX_COLOR_RE = re.compile(r"#[0-9a-fA-F]{6}")
 
 
 def _is_hex_color(value: object) -> bool:
-    return isinstance(value, str) and bool(_HEX_COLOR_RE.match(value))
+    # fullmatch, not match() with a "^...$" pattern: "$" matches just before
+    # a trailing "\n" as well as true end-of-string, so a value like
+    # "#ffffff\n" used to pass this check and then raise deep inside Tk when
+    # actually applied as a color (Tk's own color parser has no such
+    # leniency) -- exactly the crash this validation exists to prevent (see
+    # load_now_line_color's docstring). fullmatch() requires the whole
+    # string to match, trailing newline included, with no anchor-escaping
+    # footgun.
+    return isinstance(value, str) and bool(_HEX_COLOR_RE.fullmatch(value))
 
 
 def load_now_line_color(default: str) -> str:

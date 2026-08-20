@@ -441,7 +441,7 @@ def _color_for_work_name(name: str) -> str:
 _GOLDEN_ANGLE_DEGREES = 137.508
 
 
-def _build_work_color_map(work_names) -> Dict[str, str]:
+def _build_work_color_map(work_names, overrides: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     """Assigns every distinct, non-blank name in `work_names` its own color,
     spaced by `_GOLDEN_ANGLE_DEGREES` around the hue wheel in sorted-name
     order -- guarantees every company CURRENTLY present in the data reads as
@@ -450,11 +450,28 @@ def _build_work_color_map(work_names) -> Dict[str, str]:
     unlike a pure hash, a company's color can shift if the overall set of
     saved company names changes (one added/removed/renamed) -- acceptable
     here since every render path rebuilds this map fresh from the current
-    `self.meetings` on every heartbeat tick anyway, so it's never stale."""
+    `self.meetings` on every heartbeat tick anyway, so it's never stale.
+
+    `overrides` (settings.json's `companyColors`, see
+    `storage.load_company_colors`) lets a user pin a specific company to a
+    specific color. A name with a valid override skips the golden-angle
+    assignment entirely -- and, critically, does NOT consume a slot in the
+    angle sequence, so the auto-assigned colors among the REMAINING
+    (non-overridden) names stay exactly as separated from each other as if
+    the overridden names didn't exist. Without that exclusion, overriding
+    one company out of five would shift every other company's hue by
+    1/5th of the wheel for no reason the user asked for."""
+    overrides = overrides or {}
     ordered = sorted({name for name in work_names if name})
     colors: Dict[str, str] = {}
-    for index, name in enumerate(ordered):
-        hue = (index * _GOLDEN_ANGLE_DEGREES) % 360
+    auto_index = 0
+    for name in ordered:
+        override = overrides.get(name)
+        if override:
+            colors[name] = override
+            continue
+        hue = (auto_index * _GOLDEN_ANGLE_DEGREES) % 360
+        auto_index += 1
         red, green, blue = colorsys.hls_to_rgb(hue / 360, 0.74, 0.70)
         colors[name] = "#{:02x}{:02x}{:02x}".format(int(red * 255), int(green * 255), int(blue * 255))
     return colors
@@ -584,6 +601,11 @@ class TimerMeetApp:
         else:
             self.companies = sorted({m.workName for m in self.meetings if m.workName}, key=str.lower)
             storage.save_companies(self.companies)
+        # Per-company manual color overrides and the week view's "now" line
+        # color -- both machine-local settings.json UI preferences, same
+        # home as `self.companies` just above, loaded together with it.
+        self.company_colors: Dict[str, str] = storage.load_company_colors()
+        self.now_line_color: str = storage.load_now_line_color(default=main_window.NOW_LINE_COLOR)
         purged_at_startup = self._apply_meetings(retention.purge_stale_meetings(self.meetings)[0])
         self.storage_ok = True
         self._dirty = bool(purged_at_startup)
@@ -633,10 +655,14 @@ class TimerMeetApp:
             on_edit_series=self.handle_edit_series,
             on_set_app_theme=self.handle_set_app_theme,
             on_gadget_resize=self.handle_gadget_resize,
+            on_set_now_line_color=self._handle_set_now_line_color,
+            on_set_company_color=self._handle_set_company_color,
+            on_reset_company_color=self._handle_reset_company_color,
         )
         self.view = MainWindow(self.root, callbacks)
         self.view.apply_translations(self.language)
-        self.view.update_company_options(self.companies)
+        self._sync_company_ui()
+        self.view.set_now_line_color(self.now_line_color)
         self.view.set_week_column_mode(self.week_column_mode)
         # Applied BEFORE `set_gadget_mode` below (v2.14.0) so gadget mode's
         # own initial entry -- which internally calls `apply_gadget_skin`
@@ -910,7 +936,7 @@ class TimerMeetApp:
         # `_refresh_calendar`/`_refresh_week` below, rather than threading a
         # shared value through) -- see `_build_work_color_map`'s docstring
         # for why this guarantees distinct colors instead of a raw hash.
-        work_colors = _build_work_color_map(work_names)
+        work_colors = _build_work_color_map(work_names, self.company_colors)
 
         cards = [
             MeetingCardData(
@@ -996,7 +1022,7 @@ class TimerMeetApp:
         # Same redundant-but-cheap "compute fresh from self.meetings" pattern
         # `series_sizes` above already uses, applied to colors -- see
         # `_build_work_color_map`'s docstring.
-        work_colors = _build_work_color_map(self._work_names())
+        work_colors = _build_work_color_map(self._work_names(), self.company_colors)
         # "Today" is only highlighted while the *visible* month is the real
         # current month (see SDD.md) -- comparing bare dates would wrongly
         # highlight a leading/trailing padding cell that happens to literally
@@ -1124,7 +1150,7 @@ class TimerMeetApp:
         # Same redundant-but-cheap "compute fresh from self.meetings" pattern
         # `series_sizes` above already uses, applied to colors -- see
         # `_build_work_color_map`'s docstring.
-        work_colors = _build_work_color_map(self._work_names())
+        work_colors = _build_work_color_map(self._work_names(), self.company_colors)
 
         # Full-color meeting-block layer (SDD.md v2.16.0, replaces v2.15.0's
         # thin decorative bar): computed per VISIBLE day from ALL of that
@@ -1603,6 +1629,20 @@ class TimerMeetApp:
 
     # -- company list ---------------------------------------------------------
 
+    def _sync_company_ui(self) -> None:
+        """Pushes both the current company NAME list and their resolved
+        (override-or-auto) colors to the view together -- every caller that
+        changes `self.companies` or `self.company_colors` goes through this
+        single method instead of calling `update_company_options`/
+        `set_company_colors` separately, so the two can never drift out of
+        sync (e.g. a color pushed for a company the view doesn't know about
+        yet). `update_company_options` first, then `set_company_colors`:
+        the view's color-row rebuild reads `self._companies` (see
+        `MainWindow.set_company_colors`'s docstring), so it must run after
+        the name list is already current."""
+        self.view.update_company_options(self.companies)
+        self.view.set_company_colors(_build_work_color_map(self.companies, self.company_colors))
+
     def _register_company(self, name: str) -> None:
         name = name.strip()
         if not name or any(c.lower() == name.lower() for c in self.companies):
@@ -1610,7 +1650,7 @@ class TimerMeetApp:
         self.companies.append(name)
         self.companies.sort(key=str.lower)
         storage.save_companies(self.companies)
-        self.view.update_company_options(self.companies)
+        self._sync_company_ui()
 
     def handle_add_company(self, name: str) -> None:
         name = security.clamp_text(name, security.MAX_WORK_NAME_LENGTH)
@@ -1623,7 +1663,7 @@ class TimerMeetApp:
         self.companies.append(name)
         self.companies.sort(key=str.lower)
         storage.save_companies(self.companies)
-        self.view.update_company_options(self.companies)
+        self._sync_company_ui()
         self.view.show_toast(i18n.t("companyAddedToast", self.language))
 
     def handle_remove_company(self, name: str) -> None:
@@ -1631,8 +1671,23 @@ class TimerMeetApp:
         self.companies = [c for c in self.companies if c.lower() != name.lower()]
         if len(self.companies) != before:
             storage.save_companies(self.companies)
-            self.view.update_company_options(self.companies)
+            self._sync_company_ui()
             self.view.show_toast(i18n.t("companyRemovedToast", self.language))
+
+    def _handle_set_now_line_color(self, color: str) -> None:
+        self.now_line_color = color
+        storage.save_now_line_color(color)
+        self.view.set_now_line_color(color)
+
+    def _handle_set_company_color(self, name: str, color: str) -> None:
+        self.company_colors[name] = color
+        storage.save_company_colors(self.company_colors)
+        self._sync_company_ui()
+
+    def _handle_reset_company_color(self, name: str) -> None:
+        if self.company_colors.pop(name, None) is not None:
+            storage.save_company_colors(self.company_colors)
+            self._sync_company_ui()
 
     # -- gadget mode ------------------------------------------------------------
 

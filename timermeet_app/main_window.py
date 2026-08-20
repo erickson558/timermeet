@@ -20,6 +20,7 @@ CustomTkinter design; see MEMORY/SDD for the tradeoff this was worth making.
 from __future__ import annotations
 
 import tkinter as tk
+import tkinter.colorchooser as colorchooser
 import tkinter.font as tkfont
 import tkinter.messagebox as messagebox
 import webbrowser
@@ -1156,6 +1157,14 @@ class Callbacks:
     # decision, rather than two callbacks that could independently drift.
     on_set_app_theme: Callable[[str], None]
     on_gadget_resize: Callable[[int, int], None]
+    # The week view's live "now" line/dot color, and per-company block color
+    # overrides -- both settings.json-backed (see `storage.py`'s
+    # `now_line_color`/`company_colors` functions), both surfaced from the
+    # same "manage companies" dialog (see `_open_manage_companies`) rather
+    # than a new settings screen.
+    on_set_now_line_color: Callable[[str], None]
+    on_set_company_color: Callable[[str, str], None]
+    on_reset_company_color: Callable[[str], None]
 
 
 def _button(
@@ -1445,6 +1454,15 @@ class MainWindow:
         self._companies: List[str] = []
         self._company_dialog = None
         self._company_listbox: Optional[tk.Listbox] = None
+        # Resolved (override-or-auto) per-company colors, pushed down from
+        # app.py's `_build_work_color_map` result via `set_company_colors`
+        # -- used only to paint the "manage companies" dialog's color-swatch
+        # rows (see `_refresh_company_color_rows`); the week/month/list
+        # views get their own colors straight from app.py's render calls,
+        # never from this cached copy.
+        self._company_colors: Dict[str, str] = {}
+        self._company_color_rows_container: Optional[tk.Frame] = None
+        self._now_line_swatch: Optional[tk.Button] = None
         self._gadget_active = False
         self._pre_gadget_geometry: Optional[str] = None
         self._gadget_drag_offset_x = 0
@@ -1478,6 +1496,19 @@ class MainWindow:
         # `.place()`d/`.place_forget()`'d together with it from
         # `_apply_week_now_line`, never destroyed/recreated.
         self._week_now_dot: Optional[tk.Canvas] = None
+        # `_week_now_dot`'s single `create_oval` item id (see
+        # `_build_week_view`) -- kept so `set_now_line_color` can recolor
+        # the already-drawn oval via `itemconfig` instead of needing to
+        # delete/recreate it.
+        self._week_now_dot_item: Optional[int] = None
+        # User-configurable "now" line/dot color (settings.json
+        # `nowLineColor`, see `storage.load_now_line_color`/
+        # `set_now_line_color`) -- `NOW_LINE_COLOR` remains the shipped
+        # default; app.py overwrites this right after construction with
+        # whatever was persisted, same "module constant is the default,
+        # instance attribute is the live value" pattern as
+        # `_week_column_mode` just above.
+        self._now_line_color: str = NOW_LINE_COLOR
         self._week_live_state: Tuple[Optional[int], int, int] = (None, 0, 0)
         self._week_live_retry_job: Optional[str] = None
         self._week_live_retry_count = 0
@@ -2598,7 +2629,7 @@ class MainWindow:
         # `.place_forget()`s it (see SDD.md decision #3) -- it's a real
         # pixel coordinate, not a grid cell, so `.grid()` is never used on
         # it at all, and it's never destroyed/recreated.
-        self._week_now_line = tk.Frame(grid_frame, bg=NOW_LINE_COLOR, height=NOW_LINE_HEIGHT_PX)
+        self._week_now_line = tk.Frame(grid_frame, bg=self._now_line_color, height=NOW_LINE_HEIGHT_PX)
 
         # The "now" dot: same lifecycle as the line above (built once here,
         # only ever `.place()`d/`.place_forget()`'d afterwards -- see that
@@ -2615,7 +2646,9 @@ class MainWindow:
         self._week_now_dot = tk.Canvas(
             grid_frame, width=dot_d, height=dot_d, bg=WINDOW_BG, highlightthickness=0,
         )
-        self._week_now_dot.create_oval(0, 0, dot_d, dot_d, fill=NOW_LINE_COLOR, outline=NOW_LINE_COLOR)
+        self._week_now_dot_item = self._week_now_dot.create_oval(
+            0, 0, dot_d, dot_d, fill=self._now_line_color, outline=self._now_line_color,
+        )
 
         # Meeting-block pool (SDD.md v2.16.0, replaces v2.15.0's bare-`Frame`
         # duration-bar pool): `WEEK_MAX_DURATION_BLOCKS_PER_DAY` x
@@ -3124,6 +3157,16 @@ class MainWindow:
         else:
             widgets.overflow_label.grid_remove()
 
+    def set_now_line_color(self, color: str) -> None:
+        """Applies a new "now" line/dot color both to `self._now_line_color`
+        (so the next `_build_week_view` construction -- there's only ever
+        one, at startup -- and every future render keep using it) and to
+        the two already-built widgets directly, since neither is ever
+        destroyed/recreated afterward (see their own docstrings)."""
+        self._now_line_color = color
+        self._week_now_line.configure(bg=color)
+        self._week_now_dot.itemconfig(self._week_now_dot_item, fill=color, outline=color)
+
     def update_week_live_indicators(
         self, today_index: Optional[int], hour: int, minute: int, scroll_to_now: bool = False,
     ) -> None:
@@ -3386,6 +3429,17 @@ class MainWindow:
         self._week_now_dot.place(
             x=x - dot_radius, y=y + (NOW_LINE_HEIGHT_PX / 2) - dot_radius,
         )
+        # Tk stacks `.place()`-managed siblings in creation order and never
+        # reorders them on a later `.place()` call -- `_week_now_line`/
+        # `_week_now_dot` are built in `_build_week_view` BEFORE the meeting-
+        # block pool, so without this, any block placed on top of the "now"
+        # row after this point permanently hides the line/dot behind it.
+        # `.lift()` on every placement (not just once at construction) is
+        # what keeps the marker on top regardless of render order. (See
+        # `_lift_week_now_dot`'s own docstring for why the dot needs that
+        # helper instead of a plain `.lift()` call.)
+        self._week_now_line.lift()
+        self._lift_week_now_dot()
 
         if self._week_scroll_to_now_pending:
             self._week_scroll_to_now_pending = False
@@ -3682,6 +3736,31 @@ class MainWindow:
                 widgets.bind_funcids["label_right"] = _rebind(
                     widgets.label, "<Button-3>", right_click, widgets.bind_funcids.get("label_right")
                 )
+
+        # Re-assert the "now" line/dot's stacking order after every block
+        # re-render (not just when the line itself is placed, see
+        # `_apply_week_now_line`'s matching comment): a block placed here
+        # AFTER the line was last raised would otherwise re-cover it, since
+        # `.place()` never changes Tk's creation-order stacking on its own.
+        # Harmless no-op if the line/dot are currently `.place_forget()`'d.
+        self._week_now_line.lift()
+        self._lift_week_now_dot()
+
+    def _lift_week_now_dot(self) -> None:
+        """Raises `_week_now_dot` (a `tk.Canvas`) above its `.place()`
+        siblings in Tk's stacking order -- deliberately NOT a plain
+        `self._week_now_dot.lift()` call. CPython's own `tkinter.Canvas`
+        class overrides `lift`/`tkraise` to alias `tag_raise` (a CANVAS-ITEM
+        stacking command, `<path> raise tagOrId ?aboveThis?`) instead of
+        leaving the generic widget-stacking `Misc.lift()` in place -- every
+        other widget class in this file inherits the real one, only
+        `Canvas` shadows it. Calling `.lift()` directly on this specific
+        widget therefore invokes `tag_raise()` with no tag argument and
+        raises `_tkinter.TclError: wrong # args`, confirmed empirically (the
+        bug this helper fixes). Explicitly qualifying to `tk.Misc.lift`
+        bypasses Canvas's override and performs the intended widget-level
+        raise."""
+        tk.Misc.lift(self._week_now_dot)
 
     def _show_week_tooltip(self, widgets: "_WeekMeetingBlockWidgets", event) -> None:
         """`<Enter>` handler bound once per pool slot in `_build_week_view`
@@ -4313,6 +4392,17 @@ class MainWindow:
         self.work_entry["values"] = self._companies
         self._refresh_company_listbox()
 
+    def set_company_colors(self, colors: Dict[str, str]) -> None:
+        """Caches the resolved (override-or-auto) color for every company
+        currently in `self._companies`, and repaints the "manage companies"
+        dialog's color-swatch rows if that dialog happens to be open --
+        app.py always calls this right after `update_company_options`
+        whenever the company list OR any color override changes (see
+        `TimerMeetApp._sync_company_ui`), so `self._companies` is already
+        up to date by the time this runs."""
+        self._company_colors = dict(colors)
+        self._refresh_company_color_rows()
+
     def _open_manage_companies(self) -> None:
         if self._company_dialog is not None:
             self._company_dialog.lift()
@@ -4322,16 +4412,43 @@ class MainWindow:
         dialog = tk.Toplevel(self.root)
         dialog.title(i18n.t("manageCompaniesTitle", self.language))
         dialog.configure(bg=PANEL_BG)
-        dialog.geometry("360x420")
+        dialog.geometry("380x600")
         dialog.transient(self.root)
         dialog.grab_set()
         dialog.protocol("WM_DELETE_WINDOW", self._close_manage_companies)
         self._company_dialog = dialog
 
         tk.Label(
-            dialog, text=i18n.t("manageCompaniesHint", self.language), wraplength=320, justify="left",
+            dialog, text=i18n.t("manageCompaniesHint", self.language), wraplength=340, justify="left",
             bg=PANEL_BG, fg=MUTED, font=(FONT_FAMILY, 10),
         ).pack(anchor="w", padx=14, pady=(14, 8))
+
+        # "Now" line color (near the top, per its own settings.json key --
+        # unrelated to the per-company rows further down, but surfaced from
+        # this same dialog rather than a whole new settings screen).
+        now_line_row = tk.Frame(dialog, bg=PANEL_BG)
+        now_line_row.pack(fill="x", padx=14, pady=(0, 10))
+        tk.Label(
+            now_line_row, text=i18n.t("nowLineColorLabel", self.language),
+            bg=PANEL_BG, fg=TEXT, font=(FONT_FAMILY, 10),
+        ).pack(side="left")
+
+        def _pick_now_line_color() -> None:
+            result = colorchooser.askcolor(
+                color=self._now_line_color, title=i18n.t("nowLineColorLabel", self.language)
+            )
+            picked = result[1] if result else None
+            if picked:
+                self.callbacks.on_set_now_line_color(picked)
+                if self._now_line_swatch is not None:
+                    self._now_line_swatch.configure(bg=picked)
+
+        now_line_swatch = tk.Button(
+            now_line_row, bg=self._now_line_color, width=3, relief="flat", borderwidth=0,
+            cursor="hand2", command=_pick_now_line_color,
+        )
+        now_line_swatch.pack(side="right")
+        self._now_line_swatch = now_line_swatch
 
         add_row = tk.Frame(dialog, bg=PANEL_BG)
         add_row.pack(fill="x", padx=14)
@@ -4371,7 +4488,7 @@ class MainWindow:
                 self.callbacks.on_remove_company(name)
 
         bottom_row = tk.Frame(dialog, bg=PANEL_BG)
-        bottom_row.pack(fill="x", padx=14, pady=(0, 14))
+        bottom_row.pack(fill="x", padx=14, pady=(0, 10))
         _button(
             bottom_row, i18n.t("removeCompanyButton", self.language), _remove_selected, DANGER, DANGER_FG, DANGER_HOVER
         ).pack(side="left")
@@ -4379,13 +4496,36 @@ class MainWindow:
             bottom_row, i18n.t("closeButton", self.language), self._close_manage_companies, GHOST_BG, GHOST_FG, GHOST_HOVER
         ).pack(side="right")
 
+        # Second section (SDD.md-style addition, does NOT touch the
+        # listbox/remove flow above): one row per company with a
+        # color-swatch button (opens the same `colorchooser.askcolor` the
+        # "now" line swatch above uses) and a small reset control that
+        # drops any manual override, reverting that company to its
+        # auto-assigned golden-angle color (see
+        # `app.py::_build_work_color_map`). `list_frame` above is the only
+        # `expand=True` slave in this dialog, so it's the one that shrinks
+        # to make room for this section rather than the other way around
+        # (Tk's `pack` gives non-expanding slaves their full requested size
+        # first, splitting only genuinely left-over space among `expand`
+        # slaves, regardless of packing order).
+        tk.Label(
+            dialog, text=i18n.t("companyColorsSectionLabel", self.language),
+            bg=PANEL_BG, fg=MUTED, font=(FONT_FAMILY, 10),
+        ).pack(anchor="w", padx=14, pady=(0, 4))
+        rows_container = tk.Frame(dialog, bg=PANEL_BG)
+        rows_container.pack(fill="x", padx=14, pady=(0, 14))
+        self._company_color_rows_container = rows_container
+
         self._refresh_company_listbox()
+        self._refresh_company_color_rows()
 
     def _close_manage_companies(self) -> None:
         if self._company_dialog is not None:
             self._company_dialog.destroy()
             self._company_dialog = None
             self._company_listbox = None
+            self._company_color_rows_container = None
+            self._now_line_swatch = None
 
     def _refresh_company_listbox(self) -> None:
         listbox = self._company_listbox
@@ -4399,6 +4539,54 @@ class MainWindow:
         else:
             listbox.insert("end", i18n.t("noCompaniesYet", self.language))
             listbox.configure(state="disabled")
+
+    def _refresh_company_color_rows(self) -> None:
+        """Rebuilds every row in the "manage companies" dialog's color
+        section from `self._companies` (row set) + `self._company_colors`
+        (resolved fill for each row's swatch) -- called whenever either
+        changes, see `set_company_colors`'s docstring. No-op if the dialog
+        isn't currently open (`_company_color_rows_container` is `None`,
+        same guard `_refresh_company_listbox` uses for its own widget)."""
+        container = self._company_color_rows_container
+        if container is None:
+            return
+        # Full rebuild rather than a diff/patch: this dialog is rarely open
+        # and the company count is always small (a manually-curated list,
+        # see `load_companies`'s own docstring), so the simplicity of
+        # "destroy every row, redraw every row" outweighs the cost of a
+        # more careful incremental update here.
+        for child in container.winfo_children():
+            child.destroy()
+        if not self._companies:
+            tk.Label(
+                container, text=i18n.t("noCompaniesYet", self.language),
+                bg=PANEL_BG, fg=MUTED, font=(FONT_FAMILY, 10),
+            ).pack(anchor="w")
+            return
+        for name in self._companies:
+            row = tk.Frame(container, bg=PANEL_BG)
+            row.pack(fill="x", pady=2)
+            tk.Label(
+                row, text=name, bg=PANEL_BG, fg=TEXT, font=(FONT_FAMILY, 10), anchor="w",
+            ).pack(side="left", fill="x", expand=True)
+
+            def _pick(_event=None, company_name=name) -> None:
+                current = self._company_colors.get(company_name, "#d4d4d8")
+                result = colorchooser.askcolor(color=current, title=company_name)
+                picked = result[1] if result else None
+                if picked:
+                    self.callbacks.on_set_company_color(company_name, picked)
+
+            swatch = tk.Button(
+                row, bg=self._company_colors.get(name, "#d4d4d8"), width=3, relief="flat",
+                borderwidth=0, cursor="hand2", command=_pick,
+            )
+            swatch.pack(side="left", padx=(4, 4))
+            _button(
+                row, i18n.t("resetColorButton", self.language),
+                lambda company_name=name: self.callbacks.on_reset_company_color(company_name),
+                GHOST_BG, GHOST_FG, GHOST_HOVER, padx=6, pady=2, font_size=9,
+            ).pack(side="left")
 
     @staticmethod
     def _set_entry(entry: tk.Entry, value: str) -> None:
@@ -5095,12 +5283,14 @@ class MainWindow:
             widgets.frame.configure(bg=PANEL_BG, highlightbackground=BORDER)
             widgets.overflow_label.configure(bg=PANEL_BG, fg=MUTED)
         self._week_scroll.apply_bg(WINDOW_BG)
-        # `self._week_now_line`'s `bg` (`NOW_LINE_COLOR`) is deliberately
-        # theme-independent -- see that constant's own module-level comment
-        # ("distinct from every other color in the palette on purpose").
-        # Only the dot's own CANVAS background (not its oval, same fixed
-        # color) needs to track the new `WINDOW_BG` so it doesn't leave a
-        # stale-colored square around the dot.
+        # `self._week_now_line`'s `bg` (`self._now_line_color`, user-
+        # configurable via `set_now_line_color`, defaulting to
+        # `NOW_LINE_COLOR`) is deliberately theme-independent -- see that
+        # constant's own module-level comment ("distinct from every other
+        # color in the palette on purpose"). Only the dot's own CANVAS
+        # background (not its oval, same user color) needs to track the new
+        # `WINDOW_BG` so it doesn't leave a stale-colored square around the
+        # dot.
         self._week_now_dot.configure(bg=WINDOW_BG)
 
         # -- 2g. context menu + ttk style -----------------------------------------

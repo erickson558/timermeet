@@ -42,6 +42,7 @@ def _make_callbacks(**overrides):
         "on_week_today": _no_op, "on_week_slot_click": _no_op, "on_toggle_week_column_mode": _no_op,
         "on_delete_series": _no_op, "on_edit_series": _no_op,
         "on_set_app_theme": _no_op, "on_gadget_resize": _no_op,
+        "on_set_now_line_color": _no_op, "on_set_company_color": _no_op, "on_reset_company_color": _no_op,
     }
     fields.update(overrides)
     return main_window.Callbacks(**fields)

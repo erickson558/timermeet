@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -338,4 +339,60 @@ def save_companies(companies: List[str]) -> None:
     settings.json (never overwrite sibling keys like "language")."""
     settings = load_settings()
     settings["companies"] = list(companies)
+    save_settings(settings)
+
+
+_HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def _is_hex_color(value: object) -> bool:
+    return isinstance(value, str) and bool(_HEX_COLOR_RE.match(value))
+
+
+def load_now_line_color(default: str) -> str:
+    """The user-configurable color of the week view's live "now" line/dot
+    (``main_window.NOW_LINE_COLOR`` is the shipped default). Same
+    machine-local, UI-preference rationale as ``load_companies`` -- lives in
+    settings.json, not synced/merged meeting data. Falls back to ``default``
+    for a missing key or a value that isn't a well-formed ``#rrggbb`` string
+    (e.g. hand-edited settings.json, or a future format change) rather than
+    handing a bad color straight to Tk, which would raise deep inside a
+    render call."""
+    raw = load_settings().get("nowLineColor")
+    return raw if _is_hex_color(raw) else default
+
+
+def save_now_line_color(color: str) -> None:
+    """Persist the "now" line color, merging into whatever else is already
+    in settings.json (see ``save_companies``'s docstring for why this must
+    never be a whole-file overwrite)."""
+    settings = load_settings()
+    settings["nowLineColor"] = color
+    save_settings(settings)
+
+
+def load_company_colors() -> Dict[str, str]:
+    """User-chosen overrides for individual companies' block colors (see
+    ``app.py::_build_work_color_map``), keyed by exact company name. Same
+    machine-local settings.json home as ``load_companies``. Anything that
+    doesn't validate -- a blank/non-string key, or a value that isn't a
+    well-formed ``#rrggbb`` string -- is silently dropped rather than
+    raised, so a hand-edited or partially-corrupt settings.json degrades to
+    "that one company keeps its auto-assigned color" instead of crashing
+    startup."""
+    raw = load_settings().get("companyColors")
+    if not isinstance(raw, dict):
+        return {}
+    colors: Dict[str, str] = {}
+    for name, value in raw.items():
+        if isinstance(name, str) and name.strip() and _is_hex_color(value):
+            colors[name] = value
+    return colors
+
+
+def save_company_colors(colors: Dict[str, str]) -> None:
+    """Persist company color overrides, merging into whatever else is
+    already in settings.json (see ``save_companies``'s docstring)."""
+    settings = load_settings()
+    settings["companyColors"] = dict(colors)
     save_settings(settings)

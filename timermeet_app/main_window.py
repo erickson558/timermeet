@@ -824,6 +824,11 @@ _HEADER_SUBTITLE_SAFETY_MARGIN_PX = 4
 # identical reasoning for the week view's own cold-start delay.
 _HEADER_SUBTITLE_MIN_PLAUSIBLE_WIDTH_PX = 100
 
+_CUSTOM_DAY_LABEL_KEYS = (
+    "calendarWeekdayMon", "calendarWeekdayTue", "calendarWeekdayWed", "calendarWeekdayThu",
+    "calendarWeekdayFri", "calendarWeekdaySat", "calendarWeekdaySun",
+)
+
 _RECURRENCE_LABEL_KEYS = [
     ("none", "recurrenceNone"),
     ("daily", "recurrenceDaily"),
@@ -831,6 +836,7 @@ _RECURRENCE_LABEL_KEYS = [
     ("weekly", "recurrenceWeekly"),
     ("biweekly", "recurrenceBiweekly"),
     ("monthly", "recurrenceMonthly"),
+    ("custom", "recurrenceCustom"),
 ]
 
 
@@ -1449,6 +1455,9 @@ class MainWindow:
         self._sound_id_to_label: Dict[str, str] = {}
         self._sound_label_to_id: Dict[str, str] = {}
         self._recurrence_id_to_label: Dict[str, str] = {}
+        # One BooleanVar per weekday (Mon=0..Sun=6) for the "Días específicos" checkboxes (v2.22.0).
+        self._custom_day_vars: List[tk.BooleanVar] = [tk.BooleanVar(value=False) for _ in range(7)]
+        self._custom_day_checks: List[tk.Checkbutton] = []
         self._recurrence_label_to_id: Dict[str, str] = {}
         self._toast_window = None
         self._companies: List[str] = []
@@ -2114,6 +2123,18 @@ class MainWindow:
         self.occurrence_entry = _entry(occ_col)
         self.occurrence_entry.insert(0, "1")
         self.occurrence_entry.pack(fill="x")
+
+        # Weekday checkboxes, only shown while "Días específicos" is the
+        # chosen repetition (see `_handle_recurrence_change`).
+        self.custom_days_frame = self._track_panel_frame(panel)
+        for index, var in enumerate(self._custom_day_vars):
+            check = tk.Checkbutton(
+                self.custom_days_frame, text="", variable=var, bg=PANEL_BG, fg=TEXT,
+                activebackground=PANEL_BG, activeforeground=TEXT, selectcolor=FIELD_BG,
+                font=(FONT_FAMILY, 9), bd=0, highlightthickness=0,
+            )
+            check.grid(row=0, column=index, padx=(0, 2))
+            self._custom_day_checks.append(check)
 
         self.recurrence_hint_label = tk.Label(
             panel, text="", font=(FONT_FAMILY, 9), bg=PANEL_BG, fg=MUTED, wraplength=300, justify="left"
@@ -4323,6 +4344,7 @@ class MainWindow:
             "durationMinutes": self.duration_entry.get().strip(),
             "soundProfile": self._sound_label_to_id.get(self._sound_profile_var.get(), "soft"),
             "recurrenceType": self._recurrence_label_to_id.get(self._recurrence_var.get(), "none"),
+            "weekdays": ",".join(str(i) for i, var in enumerate(self._custom_day_vars) if var.get()),
             "occurrenceCount": self.occurrence_entry.get().strip(),
             "teamsUrl": self.url_entry.get().strip(),
             "notes": self.notes_text.get("1.0", "end").strip(),
@@ -4348,6 +4370,12 @@ class MainWindow:
             current_count = int(self.occurrence_entry.get().strip())
         except ValueError:
             current_count = 0
+
+        if recurrence_id == "custom":
+            if not self.custom_days_frame.winfo_ismapped():
+                self.custom_days_frame.pack(anchor="w", padx=10, before=self.recurrence_hint_label)
+        else:
+            self.custom_days_frame.pack_forget()
 
         if recurrence_id == "none":
             self._set_entry(self.occurrence_entry, "1")
@@ -4634,6 +4662,9 @@ class MainWindow:
         self._sound_profile_var.set(self._sound_label_for(meeting.soundProfile))
         self._recurrence_var.set(self._recurrence_label_for(meeting.recurrenceType))
         self._set_entry(self.occurrence_entry, "1")
+        selected_days = {int(d) for d in models.normalize_weekdays(meeting.weekdays).split(",") if d}
+        for index, var in enumerate(self._custom_day_vars):
+            var.set(index in selected_days)
         self._set_entry(self.url_entry, meeting.teamsUrl)
         self.notes_text.delete("1.0", "end")
         self.notes_text.insert("1.0", meeting.notes)
@@ -4650,7 +4681,11 @@ class MainWindow:
             self.date_entry.configure(state="disabled")
             self._recurrence_menu_widget.configure(state="disabled")
             self.occurrence_entry.configure(state="disabled")
+            for check in self._custom_day_checks:
+                check.configure(state="disabled")
         else:
+            for check in self._custom_day_checks:
+                check.configure(state="normal")
             self.save_button.configure(text=i18n.t("updateButton", self.language))
 
     def clear_form(self) -> None:
@@ -4666,6 +4701,10 @@ class MainWindow:
         self.notes_text.delete("1.0", "end")
         self._sound_profile_var.set(self._sound_label_for("soft"))
         self._recurrence_var.set(self._recurrence_label_for("none"))
+        for var in self._custom_day_vars:
+            var.set(False)
+        for check in self._custom_day_checks:
+            check.configure(state="normal")
         self.save_button.configure(text=i18n.t("saveButton", self.language))
         self.form_feedback_label.configure(text="")
         self._handle_recurrence_change(self._recurrence_var.get())
@@ -4981,6 +5020,8 @@ class MainWindow:
         self.recurrence_label.configure(text=tr("repeatLabel"))
         self.occurrence_label.configure(text=f"{tr('occurrenceCountLabel')} ({tr('occurrenceCountSuffix')})")
         self.recurrence_hint_label.configure(text=tr("recurrenceHint"))
+        for check, key in zip(self._custom_day_checks, _CUSTOM_DAY_LABEL_KEYS):
+            check.configure(text=tr(key))
 
         self.url_label.configure(text=tr("urlLabel"))
         self.notes_label.configure(text=tr("notesLabel"))
@@ -5201,6 +5242,10 @@ class MainWindow:
         self.occurrence_label.configure(bg=PANEL_BG, fg=TEXT)
         self._restyle_entry(self.occurrence_entry)
         self.recurrence_hint_label.configure(bg=PANEL_BG, fg=MUTED)
+        for check in self._custom_day_checks:
+            check.configure(
+                bg=PANEL_BG, fg=TEXT, activebackground=PANEL_BG, activeforeground=TEXT, selectcolor=FIELD_BG
+            )
         self.url_label.configure(bg=PANEL_BG, fg=TEXT)
         self._restyle_entry(self.url_entry)
         self.notes_label.configure(bg=PANEL_BG, fg=TEXT)

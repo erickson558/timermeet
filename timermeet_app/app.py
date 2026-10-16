@@ -387,6 +387,7 @@ _RECURRENCE_TEXT_KEYS = {
     "weekly": "recurrenceWeekly",
     "biweekly": "recurrenceBiweekly",
     "monthly": "recurrenceMonthly",
+    "custom": "recurrenceCustom",
 }
 
 
@@ -1474,6 +1475,7 @@ class TimerMeetApp:
         existing.teamsUrl = security.clamp_text(payload.get("teamsUrl"), security.MAX_TEAMS_URL_LENGTH)
         existing.notes = security.clamp_text(payload.get("notes"), security.MAX_NOTES_LENGTH)
         existing.recurrenceType = recurrence_type
+        existing.weekdays = models.normalize_weekdays(payload.get("weekdays")) if recurrence_type == "custom" else ""
         existing.reminderSent = False
         existing.startSent = False
         existing.updatedAt = models.now_iso()
@@ -1554,10 +1556,15 @@ class TimerMeetApp:
             occurrence_count = max(1, min(52, int(float(payload.get("occurrenceCount") or 1))))
         series_id = models.new_id() if recurrence_type != "none" else ""
         base_date = datetime.strptime(composed_datetime, "%Y-%m-%dT%H:%M")
+        weekdays = models.normalize_weekdays(payload.get("weekdays")) if recurrence_type == "custom" else ""
+        if weekdays:
+            # First occurrence lands on the first selected day on/after the
+            # chosen date, so picking e.g. a Sunday with Mon/Wed starts Monday.
+            base_date = recurrence.first_custom_day_on_or_after(base_date, weekdays)
 
         created = []
         for index in range(occurrence_count):
-            occurrence_date = recurrence.add_recurrence_to_date(base_date, recurrence_type, index)
+            occurrence_date = recurrence.add_recurrence_to_date(base_date, recurrence_type, index, weekdays)
             created.append(
                 models.normalize_meeting(
                     {
@@ -1570,6 +1577,7 @@ class TimerMeetApp:
                         "teamsUrl": payload.get("teamsUrl"),
                         "notes": payload.get("notes"),
                         "recurrenceType": recurrence_type,
+                        "weekdays": weekdays,
                         "seriesId": series_id,
                         "occurrenceIndex": index + 1,
                         "seriesSize": occurrence_count,

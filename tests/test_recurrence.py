@@ -235,3 +235,40 @@ class MostRecentFridayEodTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CustomDaysTests(unittest.TestCase):
+    def test_normalize_weekdays_sorts_dedups_and_drops_invalid(self):
+        self.assertEqual(models.normalize_weekdays("4,0,0,9,x,2"), "0,2,4")
+        self.assertEqual(models.normalize_weekdays([6, 1]), "1,6")
+        self.assertEqual(models.normalize_weekdays(None), "")
+
+    def test_steps_follow_selected_days(self):
+        fri = datetime(2026, 8, 7, 9, 0)  # Friday
+        self.assertEqual(recurrence.add_recurrence_to_date(fri, "custom", 1, "0,2,4"), datetime(2026, 8, 10, 9, 0))
+        mon = datetime(2026, 8, 3, 9, 0)
+        self.assertEqual(recurrence.add_recurrence_to_date(mon, "custom", 2, "0,2,4"), datetime(2026, 8, 7, 9, 0))
+
+    def test_first_day_on_or_after_shifts_unselected_start(self):
+        sun = datetime(2026, 8, 2, 9, 0)
+        self.assertEqual(recurrence.first_custom_day_on_or_after(sun, "0,2"), datetime(2026, 8, 3, 9, 0))
+        self.assertEqual(recurrence.first_custom_day_on_or_after(datetime(2026, 8, 3, 9, 0), "0,2"),
+                         datetime(2026, 8, 3, 9, 0))
+
+    def test_validation_requires_a_day(self):
+        payload = {"workName": "A", "title": "B", "date": "2026-08-03", "time": "09:00",
+                   "durationMinutes": 30, "reminderMinutes": 15, "occurrenceCount": 4,
+                   "recurrenceType": "custom", "weekdays": ""}
+        self.assertEqual(models.validate_meeting(payload), "validationCustomDays")
+        payload["weekdays"] = "0,2"
+        self.assertIsNone(models.validate_meeting(payload))
+
+    def test_renewal_keeps_custom_days(self):
+        meeting = models.normalize_meeting({
+            "datetime": "2026-08-03T09:00", "recurrenceType": "custom", "weekdays": "0,2",
+            "seriesId": "s1", "workName": "A", "title": "B"})
+        series = [meeting]
+        created = recurrence.extend_series_if_needed(series, datetime(2026, 8, 3, 8, 0), datetime(2026, 8, 10, 0, 0))
+        self.assertEqual(created, 2)
+        self.assertEqual([m.datetime for m in series], ["2026-08-03T09:00", "2026-08-05T09:00", "2026-08-10T09:00"])
+        self.assertTrue(all(m.weekdays == "0,2" for m in series))

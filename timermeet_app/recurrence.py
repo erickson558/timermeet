@@ -58,9 +58,43 @@ def add_weekday_recurrence_to_date(base: datetime, step_index: int) -> datetime:
     return current
 
 
-def add_recurrence_to_date(base: datetime, recurrence_type: str, step_index: int) -> datetime:
+def _weekday_set(weekdays) -> List[int]:
+    return [int(day) for day in models.normalize_weekdays(weekdays).split(",") if day != ""]
+
+
+def first_custom_day_on_or_after(base: datetime, weekdays) -> datetime:
+    """First date at/after ``base`` (same time of day) that falls on one of
+    the selected ``weekdays`` (Mon=0..Sun=6). Returns ``base`` unchanged if
+    no valid day is selected."""
+    days = _weekday_set(weekdays)
+    if not days:
+        return base
+    current = base
+    while current.weekday() not in days:
+        current += timedelta(days=1)
+    return current
+
+
+def add_custom_days_to_date(base: datetime, weekdays, step_index: int) -> datetime:
+    """Advance ``step_index`` occurrences along the selected weekdays, e.g.
+    Mon/Wed/Fri: Fri +1 -> next Mon, Mon +2 -> Fri."""
+    days = _weekday_set(weekdays)
+    if not days:
+        return base
+    current = base
+    remaining = step_index
+    while remaining > 0:
+        current += timedelta(days=1)
+        if current.weekday() in days:
+            remaining -= 1
+    return current
+
+
+def add_recurrence_to_date(base: datetime, recurrence_type: str, step_index: int, weekdays="") -> datetime:
     """Port of ``addRecurrenceToDate()`` — advance ``base`` by ``step_index``
-    units of ``recurrence_type``."""
+    units of ``recurrence_type`` (``weekdays`` only matters for "custom")."""
+    if recurrence_type == "custom":
+        return add_custom_days_to_date(base, weekdays, step_index)
     if recurrence_type == "weekdays":
         return add_weekday_recurrence_to_date(base, step_index)
     if step_index == 0 or recurrence_type == "none":
@@ -140,7 +174,7 @@ def extend_series_if_needed(
     safety = 0
     while cursor_time < lookahead_target and safety < RENEWAL_MAX_STEPS_PER_SERIES:
         safety += 1
-        cursor_time = add_recurrence_to_date(cursor_time, latest.recurrenceType, 1)
+        cursor_time = add_recurrence_to_date(cursor_time, latest.recurrenceType, 1, latest.weekdays)
 
         # Only materialize occurrences that land today or later — the cursor
         # still advances through any already-past steps so weekday/monthly
@@ -162,6 +196,7 @@ def extend_series_if_needed(
                     "teamsUrl": latest.teamsUrl,
                     "notes": latest.notes,
                     "recurrenceType": latest.recurrenceType,
+                    "weekdays": latest.weekdays,
                     "seriesId": latest.seriesId,
                     "occurrenceIndex": last_created.occurrenceIndex + 1,
                     "seriesSize": last_created.seriesSize + 1,

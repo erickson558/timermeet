@@ -16,7 +16,7 @@ from typing import Optional
 
 from . import security
 
-RECURRENCE_TYPES = ("none", "daily", "weekdays", "weekly", "biweekly", "monthly")
+RECURRENCE_TYPES = ("none", "daily", "weekdays", "weekly", "biweekly", "monthly", "custom")
 SOUND_PROFILES = ("soft", "urgent", "alarm", "siren", "fire")
 
 DEFAULT_REMINDER_MINUTES = 15
@@ -50,6 +50,10 @@ class Meeting:
     teamsUrl: str = ""
     notes: str = ""
     recurrenceType: str = DEFAULT_RECURRENCE_TYPE
+    # Selected weekdays for recurrenceType == "custom" (v2.22.0), stored as a
+    # sorted comma list of Python weekday numbers ("0,2,4" = Mon, Wed, Fri).
+    # Empty for every other recurrence type.
+    weekdays: str = ""
     seriesId: str = ""
     occurrenceIndex: int = 1
     seriesSize: int = 1
@@ -79,6 +83,26 @@ def normalize_sound_profile(value) -> str:
 def normalize_recurrence_type(value) -> str:
     text = str(value or "").strip().lower()
     return text if text in RECURRENCE_TYPES else DEFAULT_RECURRENCE_TYPE
+
+
+def normalize_weekdays(value) -> str:
+    """Coerce a list/tuple/"0,2,4" string of weekday numbers (Mon=0..Sun=6)
+    into a sorted, de-duplicated comma string; anything invalid is dropped."""
+    if isinstance(value, str):
+        parts = value.split(",")
+    elif isinstance(value, (list, tuple, set)):
+        parts = list(value)
+    else:
+        parts = []
+    days = set()
+    for part in parts:
+        try:
+            number = int(str(part).strip())
+        except ValueError:
+            continue
+        if 0 <= number <= 6:
+            days.add(number)
+    return ",".join(str(day) for day in sorted(days))
 
 
 def _as_int(value, default: int) -> int:
@@ -127,6 +151,11 @@ def normalize_meeting(data: dict) -> Meeting:
         teamsUrl=teams_url,
         notes=security.clamp_text(data.get("notes"), security.MAX_NOTES_LENGTH),
         recurrenceType=normalize_recurrence_type(data.get("recurrenceType")),
+        weekdays=(
+            normalize_weekdays(data.get("weekdays"))
+            if normalize_recurrence_type(data.get("recurrenceType")) == "custom"
+            else ""
+        ),
         seriesId=str(data.get("seriesId") or "").strip(),
         occurrenceIndex=max(1, _as_int(data.get("occurrenceIndex"), 1)),
         seriesSize=max(1, _as_int(data.get("seriesSize"), 1)),
@@ -178,6 +207,9 @@ def validate_meeting(payload: dict) -> Optional[str]:
     recurrence_type = normalize_recurrence_type(payload.get("recurrenceType"))
     if recurrence_type == "weekdays" and parsed.weekday() >= 5:  # Mon=0 ... Sat=5, Sun=6
         return "validationWeekdayStart"
+
+    if recurrence_type == "custom" and not normalize_weekdays(payload.get("weekdays")):
+        return "validationCustomDays"
 
     try:
         reminder_minutes = float(payload.get("reminderMinutes"))

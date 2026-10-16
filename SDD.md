@@ -1526,3 +1526,18 @@ Continuación directa de `v2.16.1`: esa versión rediseñó la superficie visual
 - Permitir "pausar" o cancelar explícitamente una serie recurrente completa sin borrar todas sus ocurrencias.
 - Limitación conocida: una serie `diaria` abandonada por más de ~60 días no se autocorrige en una sola pasada del motor de renovación (tope de seguridad heredado de la versión original; ver `tests/test_recurrence.py::test_safety_cap_is_a_known_limit_for_a_daily_series_stale_beyond_it`).
 - Limitación conocida y diferida a propósito (`v2.9.0`, confirmada preexistente -- ver "Ronda 3" de su sección de ajuste de responsividad): tras un único salto grande de tamaño de ventana (ej. Snap de Windows saltando `1920x900` → `960x640`), el canvas de `_ScrollablePanel` del panel de lista de reuniones puede quedar atascado en su ancho anterior sin encogerse; el encabezado maneja el mismo escenario correctamente. Causa raíz real en la propagación de geometría de Tk (`canvas.bind("<Configure>", ...)`/`_update_canvas_width`) aún sin investigar.
+
+## v2.22.0: repetición en días específicos de la semana (checkboxes)
+
+**Pedido del usuario:** poder crear reuniones solo ciertos días de la semana, eligiéndolos con checkboxes.
+
+**Diseño:** nuevo `recurrenceType == "custom"` ("Días específicos") más un campo nuevo `Meeting.weekdays` (string ordenado "0,2,4", Lun=0..Dom=6, vacío para los demás tipos; `models.normalize_weekdays` lo sanea). Compatible hacia atrás: registros sin el campo cargan con `""`.
+- `recurrence.py`: `first_custom_day_on_or_after`, `add_custom_days_to_date`; `add_recurrence_to_date` gana el parámetro opcional `weekdays`. `extend_series_if_needed` copia `weekdays` y lo usa, así la renovación semanal respeta los días elegidos.
+- `app.py::_save_new`: la primera ocurrencia se mueve al primer día marcado en/después de la fecha elegida; `_save_edit` guarda `weekdays` al editar una sola ocurrencia. Editar serie completa sigue sin tocar el patrón (campos bloqueados, incluidos los checkboxes).
+- `main_window.py`: fila de 7 `tk.Checkbutton` plano (sin toolkit extra), visible solo con "Días específicos"; se re-tematiza y traduce con el resto del formulario.
+- `models.validate_meeting`: error `validationCustomDays` si no hay ningún día marcado. i18n es/en: `recurrenceCustom`, `validationCustomDays`.
+
+**Fuera de alcance:** combinar días con "cada N semanas"; editar los días de una serie ya creada.
+
+Tests nuevos en `tests/test_recurrence.py::CustomDaysTests`.
+

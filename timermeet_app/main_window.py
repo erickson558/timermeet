@@ -1458,6 +1458,8 @@ class MainWindow:
         # One BooleanVar per weekday (Mon=0..Sun=6) for the "Días específicos" checkboxes (v2.22.0).
         self._custom_day_vars: List[tk.BooleanVar] = [tk.BooleanVar(value=False) for _ in range(7)]
         self._custom_day_checks: List[tk.Checkbutton] = []
+        # Calendar + week views are built lazily (v2.22.1) on first use; see `_ensure_secondary_views`.
+        self._secondary_views_built = False
         self._recurrence_label_to_id: Dict[str, str] = {}
         self._toast_window = None
         self._companies: List[str] = []
@@ -1753,8 +1755,22 @@ class MainWindow:
         self._build_summary(body)
 
         self._build_gadget_view()
+        # Calendar/week views (~0.75s of widget creation) are built on first
+        # use instead -- see `_ensure_secondary_views`.
+
+    def _ensure_secondary_views(self) -> None:
+        """Builds the monthly-calendar and weekly views the first time one is
+        needed (v2.22.1), instead of eagerly at startup. Both are then
+        brought up to date with the language/theme/column-mode/now-line color
+        that were set while they didn't exist yet."""
+        if self._secondary_views_built:
+            return
+        self._secondary_views_built = True
         self._build_calendar_view()
         self._build_week_view()
+        self.apply_translations(self.language)
+        self.apply_theme(self._app_theme)
+        self.set_week_column_mode(self._week_column_mode)
 
     def _build_header(self, parent, view_buttons: List[Tuple[str, str]]) -> _HeaderWidgets:
         """Builds one full copy of the header (title/version/storage chips +
@@ -2834,8 +2850,10 @@ class MainWindow:
         # `.grid_remove()`'d below the instant "work week" mode is toggled
         # on -- clear first, unconditionally, rather than only when the
         # selected entry actually happens to be in Sat/Sun.
-        self.clear_week_selection()
         self._week_column_mode = mode
+        if not self._secondary_views_built:
+            return  # applied by `_ensure_secondary_views` once the week view exists
+        self.clear_week_selection()
         show_weekend = mode != "work"
         for offset in _WEEKEND_COLUMN_INDICES:
             # Day-header row: columns are offset by 1 there (column 0 is the
@@ -2926,6 +2944,8 @@ class MainWindow:
             # docstring -- which is exactly why a gadget round trip
             # preserves the selection, per SDD.md's explicit decision).
             self.clear_week_selection()
+        if view in ("calendar", "week"):
+            self._ensure_secondary_views()
         self._primary_view_frame().grid_remove()
         self._primary_view = view
         self._primary_view_frame().grid(row=0, column=0, sticky="nsew")
@@ -2938,6 +2958,7 @@ class MainWindow:
         calendar is the active view (see `_refresh_calendar`), so a month
         navigation click or a heartbeat tick while some other view is
         showing never reaches here at all."""
+        self._ensure_secondary_views()
         self.calendar_month_label.configure(text=month_label)
         for label_widget, text in zip(self._calendar_weekday_labels, weekday_labels):
             label_widget.configure(text=text)
@@ -3071,6 +3092,7 @@ class MainWindow:
         instead (Nivel B) -- mixing the two would reintroduce the exact
         Tcl-command-leak class already found and fixed twice in this
         codebase (see module-map.md)."""
+        self._ensure_secondary_views()
         self.week_range_label.configure(text=week_range_label)
         for label_widget, text in zip(self._week_day_header_labels, day_header_texts):
             label_widget.configure(text=text)
@@ -3185,6 +3207,8 @@ class MainWindow:
         the two already-built widgets directly, since neither is ever
         destroyed/recreated afterward (see their own docstrings)."""
         self._now_line_color = color
+        if not self._secondary_views_built:
+            return  # `_build_week_view` reads `self._now_line_color` when it is built
         self._week_now_line.configure(bg=color)
         self._week_now_dot.itemconfig(self._week_now_dot_item, fill=color, outline=color)
 
@@ -3215,6 +3239,7 @@ class MainWindow:
         must survive until that geometry resolves, not scroll against
         garbage or silently no-op.
         """
+        self._ensure_secondary_views()
         for index, label in enumerate(self._week_day_header_labels):
             if index == today_index:
                 label.configure(bg=ACCENT, fg=ACCENT_FG)
@@ -3567,6 +3592,7 @@ class MainWindow:
         geometry the same way a fresh `update_week_live_indicators` call
         resets `_week_live_retry_count`: a fresh render is a fresh attempt,
         not penalized by retries an earlier, unrelated call already spent."""
+        self._ensure_secondary_views()
         self._week_meeting_block_data = blocks
         self._week_meeting_block_retry_count = 0
         self._cancel_week_meeting_block_retry()
@@ -4975,30 +5001,30 @@ class MainWindow:
         self.gadget_close_button.configure(text=tr("gadgetCloseButton"))
         self.gadget_skin_button.configure(text=tr("gadgetSkinButtonGlyph"))
 
-        self.calendar_prev_button.configure(text=tr("calendarPrevMonthButton"))
-        self.calendar_next_button.configure(text=tr("calendarNextMonthButton"))
-        self.calendar_today_button.configure(text=tr("calendarTodayButton"))
+        if self._secondary_views_built:
+            self.calendar_prev_button.configure(text=tr("calendarPrevMonthButton"))
+            self.calendar_next_button.configure(text=tr("calendarNextMonthButton"))
+            self.calendar_today_button.configure(text=tr("calendarTodayButton"))
 
-        self.week_prev_button.configure(text=tr("weekPrevButton"))
-        self.week_next_button.configure(text=tr("weekNextButton"))
-        self.week_today_button.configure(text=tr("weekTodayButton"))
-        # Re-derives its own label from the *current* mode rather than a
-        # bare fixed key, same reason `language_button` above isn't a plain
-        # `tr("...")` either -- its text announces the state a click leads
-        # to, and that depends on `self._week_column_mode`, not just which
-        # language is active.
-        self.week_column_toggle_button.configure(
-            text=tr("weekViewFullWeekButton" if self._week_column_mode == "work" else "weekViewWorkWeekButton")
-        )
-        # Action toolbar (SDD.md v2.11.0) -- "Editar"/"Eliminar" reuse the
-        # same `edit`/`delete` keys the meeting cards and context menu
-        # already use (no semantic divergence to protect, see SDD.md); only
-        # "Agregar" gets its own key since `addCompanyButton` means
-        # something semantically different despite matching text today.
-        self.week_add_button.configure(text=tr("weekToolbarAddButton"))
-        self.week_edit_button.configure(text=tr("edit"))
-        self.week_delete_button.configure(text=tr("delete"))
-
+            self.week_prev_button.configure(text=tr("weekPrevButton"))
+            self.week_next_button.configure(text=tr("weekNextButton"))
+            self.week_today_button.configure(text=tr("weekTodayButton"))
+            # Re-derives its own label from the *current* mode rather than a
+            # bare fixed key, same reason `language_button` above isn't a plain
+            # `tr("...")` either -- its text announces the state a click leads
+            # to, and that depends on `self._week_column_mode`, not just which
+            # language is active.
+            self.week_column_toggle_button.configure(
+                text=tr("weekViewFullWeekButton" if self._week_column_mode == "work" else "weekViewWorkWeekButton")
+            )
+            # Action toolbar (SDD.md v2.11.0) -- "Editar"/"Eliminar" reuse the
+            # same `edit`/`delete` keys the meeting cards and context menu
+            # already use (no semantic divergence to protect, see SDD.md); only
+            # "Agregar" gets its own key since `addCompanyButton` means
+            # something semantically different despite matching text today.
+            self.week_add_button.configure(text=tr("weekToolbarAddButton"))
+            self.week_edit_button.configure(text=tr("edit"))
+            self.week_delete_button.configure(text=tr("delete"))
         self.form_eyebrow.configure(text=tr("formEyebrow"))
         self.form_title_label.configure(text=tr("formTitle"))
         self.form_hint_label.configure(text=tr("formHint"))
@@ -5281,63 +5307,63 @@ class MainWindow:
         # to do for cards here.
 
         # -- 2e. monthly calendar ------------------------------------------------
-        self._restyle_button(self.calendar_prev_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
-        self.calendar_month_label.configure(bg=PANEL_BG, fg=TEXT)
-        self._restyle_button(self.calendar_next_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
-        self._restyle_button(self.calendar_today_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
-        for label in self._calendar_weekday_labels:
-            label.configure(bg=WINDOW_BG, fg=MUTED)
-        for widgets in self._calendar_cells:
-            # `day_label`/`entry_label`s are intentionally left alone here:
-            # both already get a fresh `bg`/`fg` on every REAL render (see
-            # `_update_calendar_cell`), which `handle_set_app_theme`
-            # (app.py) forces to happen on the very next heartbeat tick by
-            # invalidating `_last_rendered_calendar_signature` -- touching
-            # them here too would be redundant, not wrong. `frame`/
-            # `overflow_label` are the two things `_update_calendar_cell`
-            # never revisits after construction, so only those need it here.
-            widgets.frame.configure(bg=PANEL_BG, highlightbackground=BORDER)
-            widgets.overflow_label.configure(bg=PANEL_BG, fg=MUTED)
+        if self._secondary_views_built:
+            self._restyle_button(self.calendar_prev_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
+            self.calendar_month_label.configure(bg=PANEL_BG, fg=TEXT)
+            self._restyle_button(self.calendar_next_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
+            self._restyle_button(self.calendar_today_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
+            for label in self._calendar_weekday_labels:
+                label.configure(bg=WINDOW_BG, fg=MUTED)
+            for widgets in self._calendar_cells:
+                # `day_label`/`entry_label`s are intentionally left alone here:
+                # both already get a fresh `bg`/`fg` on every REAL render (see
+                # `_update_calendar_cell`), which `handle_set_app_theme`
+                # (app.py) forces to happen on the very next heartbeat tick by
+                # invalidating `_last_rendered_calendar_signature` -- touching
+                # them here too would be redundant, not wrong. `frame`/
+                # `overflow_label` are the two things `_update_calendar_cell`
+                # never revisits after construction, so only those need it here.
+                widgets.frame.configure(bg=PANEL_BG, highlightbackground=BORDER)
+                widgets.overflow_label.configure(bg=PANEL_BG, fg=MUTED)
 
-        # -- 2f. weekly calendar --------------------------------------------------
-        self._restyle_button(self.week_prev_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
-        self.week_range_label.configure(bg=PANEL_BG, fg=TEXT)
-        self._restyle_button(self.week_next_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
-        self._restyle_button(self.week_today_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
-        self._restyle_button(self.week_column_toggle_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
-        self._restyle_button(self.week_add_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
-        self._restyle_button(self.week_edit_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
-        self._restyle_button(self.week_delete_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
-        for label in self._week_day_header_labels:
-            # Unconditionally PANEL_BG/TEXT here, same as this label's own
-            # construction default -- app.py's own `handle_set_app_theme`
-            # invalidates `_last_rendered_week_live_state`, so
-            # `update_week_live_indicators` re-applies the real "today"
-            # ACCENT/ACCENT_FG highlight, if any, within at most 1 real
-            # second while the week view is active. A non-today header
-            # very briefly reverting from a highlighted state right after a
-            # theme switch (never more than that one heartbeat tick) is an
-            # acceptable, purely cosmetic tradeoff against duplicating that
-            # method's own "which index is today" logic here.
-            label.configure(bg=PANEL_BG, fg=TEXT)
-        for label in self._week_hour_axis_labels:
-            label.configure(bg=WINDOW_BG, fg=MUTED)
-        for widgets in self._week_cells:
-            # Same reasoning as the monthly calendar cells above --
-            # `entry_label`s refresh naturally on the next real render.
-            widgets.frame.configure(bg=PANEL_BG, highlightbackground=BORDER)
-            widgets.overflow_label.configure(bg=PANEL_BG, fg=MUTED)
-        self._week_scroll.apply_bg(WINDOW_BG)
-        # `self._week_now_line`'s `bg` (`self._now_line_color`, user-
-        # configurable via `set_now_line_color`, defaulting to
-        # `NOW_LINE_COLOR`) is deliberately theme-independent -- see that
-        # constant's own module-level comment ("distinct from every other
-        # color in the palette on purpose"). Only the dot's own CANVAS
-        # background (not its oval, same user color) needs to track the new
-        # `WINDOW_BG` so it doesn't leave a stale-colored square around the
-        # dot.
-        self._week_now_dot.configure(bg=WINDOW_BG)
-
+            # -- 2f. weekly calendar --------------------------------------------------
+            self._restyle_button(self.week_prev_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
+            self.week_range_label.configure(bg=PANEL_BG, fg=TEXT)
+            self._restyle_button(self.week_next_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
+            self._restyle_button(self.week_today_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
+            self._restyle_button(self.week_column_toggle_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
+            self._restyle_button(self.week_add_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
+            self._restyle_button(self.week_edit_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
+            self._restyle_button(self.week_delete_button, GHOST_BG, GHOST_FG, GHOST_HOVER)
+            for label in self._week_day_header_labels:
+                # Unconditionally PANEL_BG/TEXT here, same as this label's own
+                # construction default -- app.py's own `handle_set_app_theme`
+                # invalidates `_last_rendered_week_live_state`, so
+                # `update_week_live_indicators` re-applies the real "today"
+                # ACCENT/ACCENT_FG highlight, if any, within at most 1 real
+                # second while the week view is active. A non-today header
+                # very briefly reverting from a highlighted state right after a
+                # theme switch (never more than that one heartbeat tick) is an
+                # acceptable, purely cosmetic tradeoff against duplicating that
+                # method's own "which index is today" logic here.
+                label.configure(bg=PANEL_BG, fg=TEXT)
+            for label in self._week_hour_axis_labels:
+                label.configure(bg=WINDOW_BG, fg=MUTED)
+            for widgets in self._week_cells:
+                # Same reasoning as the monthly calendar cells above --
+                # `entry_label`s refresh naturally on the next real render.
+                widgets.frame.configure(bg=PANEL_BG, highlightbackground=BORDER)
+                widgets.overflow_label.configure(bg=PANEL_BG, fg=MUTED)
+            self._week_scroll.apply_bg(WINDOW_BG)
+            # `self._week_now_line`'s `bg` (`self._now_line_color`, user-
+            # configurable via `set_now_line_color`, defaulting to
+            # `NOW_LINE_COLOR`) is deliberately theme-independent -- see that
+            # constant's own module-level comment ("distinct from every other
+            # color in the palette on purpose"). Only the dot's own CANVAS
+            # background (not its oval, same user color) needs to track the new
+            # `WINDOW_BG` so it doesn't leave a stale-colored square around the
+            # dot.
+            self._week_now_dot.configure(bg=WINDOW_BG)
         # -- 2g. context menu + ttk style -----------------------------------------
         self._context_menu.configure(
             background=FIELD_BG, foreground=TEXT, activebackground=ACCENT, activeforeground=ACCENT_FG,

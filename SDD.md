@@ -1541,3 +1541,17 @@ Continuación directa de `v2.16.1`: esa versión rediseñó la superficie visual
 
 Tests nuevos en `tests/test_recurrence.py::CustomDaysTests`.
 
+## v2.22.1: arranque más rápido (vistas calendario/semana diferidas)
+
+**Pedido del usuario:** la app tardaba en abrir la GUI.
+
+**Medición (perfil con `cProfile`, sobre una copia de `data/`):** construir la ventana tardaba ~2.8 s, casi todo en crear ~1900 widgets Tk; la vista semanal ~0.55 s y el calendario mensual ~0.2 s, más 1.2 s de animación de carga (v2.21.0).
+
+**Cambio:** `MainWindow._ensure_secondary_views()` construye el calendario y la vista semanal la primera vez que se necesitan (`set_active_view("calendar"|"week")` o cualquier `render_*`/`update_week_live_indicators`), y entonces reaplica idioma, tema, modo de columnas y color de la línea "ahora" que se fijaron mientras no existían. `set_week_column_mode`/`set_now_line_color` solo guardan el valor si aún no existen. Los bloques de `apply_translations`/`apply_theme` que tocan esas vistas quedan protegidos por `_secondary_views_built`. La animación de carga dura ~0.6 s en vez de 1.2 s.
+
+**Resultado:** construcción 2.76 s -> 1.13 s (más 0.6 s menos de animación); la primera apertura de semana/calendario paga ~0.4 s una sola vez.
+
+**Hallazgo no resuelto:** en esta máquina cada widget visible cuesta ~10-14 ms al mostrarse (baseline de 300 `tk.Label` planos: ~4 s), y la lista dibuja las ~60 tarjetas (~8 widgets c/u) aunque solo se vean 3-4. Siguiente paso posible: paginar/virtualizar la lista de tarjetas.
+
+`tests/test_header_layout.py` llama a `_ensure_secondary_views()` porque accede a `calendar_header`/`week_header` directamente.
+

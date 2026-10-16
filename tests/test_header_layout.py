@@ -124,6 +124,7 @@ class HeaderActionRowOverflowTests(unittest.TestCase):
         # tests/test_calendar_day_click.py documents for event_generate).
         cls.root.geometry("1180x760+0+0")
         cls.view = main_window.MainWindow(cls.root, _make_callbacks())
+        cls.view._ensure_secondary_views()  # built lazily since v2.22.1
         cls.root.update()
 
     @classmethod
@@ -197,6 +198,7 @@ class HeaderTitleAndSubtitleTests(unittest.TestCase):
             raise unittest.SkipTest(f"No display available for Tk: {exc}")
         cls.root.geometry("1180x760+0+0")
         cls.view = main_window.MainWindow(cls.root, _make_callbacks())
+        cls.view._ensure_secondary_views()  # built lazily since v2.22.1
         cls.root.update()
 
     @classmethod
@@ -269,6 +271,7 @@ class HeaderResizeHysteresisTests(unittest.TestCase):
         root.minsize(960, 640)
         root.geometry(initial_geometry)
         view = main_window.MainWindow(root, _make_callbacks())
+        view._ensure_secondary_views()  # built lazily since v2.22.1
         root.update()
         if final_width is not None:
             root.geometry(f"{final_width}x640+0+0")

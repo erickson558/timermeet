@@ -614,7 +614,7 @@ class TimerMeetApp:
                 # untouched `loading_label.place(...)` call above is left as
                 # the last word on its position.
                 loading_label.place(relx=0.5, rely=0.58, anchor="center")
-                self._splash_interval_ms = max(1, round(1200 / len(self._splash_frames)))
+                self._splash_interval_ms = max(1, round(600 / len(self._splash_frames)))
                 # Frame 0 is already showing (the Label's own construction
                 # above), so scheduling starts at index 1 -- but only if a
                 # second frame actually exists. A degenerate single-frame

@@ -824,6 +824,8 @@ _HEADER_SUBTITLE_SAFETY_MARGIN_PX = 4
 # identical reasoning for the week view's own cold-start delay.
 _HEADER_SUBTITLE_MIN_PLAUSIBLE_WIDTH_PX = 100
 
+CARD_PAGE_SIZE = 20  # meeting cards drawn at once in the list view
+
 _CUSTOM_DAY_LABEL_KEYS = (
     "calendarWeekdayMon", "calendarWeekdayTue", "calendarWeekdayWed", "calendarWeekdayThu",
     "calendarWeekdayFri", "calendarWeekdaySat", "calendarWeekdaySun",
@@ -1487,6 +1489,11 @@ class MainWindow:
         self._card_widgets: Dict[str, _CardWidgets] = {}
         self._card_language: Optional[str] = None
         self._empty_state_frame: Optional[tk.Frame] = None
+        # Meeting-list paging (v2.23.0): only the first `_card_limit` cards are built/shown;
+        # "Mostrar más" raises it by `CARD_PAGE_SIZE`. Each card is ~8 widgets, so this is what keeps startup fast.
+        self._card_limit = CARD_PAGE_SIZE
+        self._show_more_button: Optional[tk.Button] = None
+        self._last_cards: List[MeetingCardData] = []
         # Which of the three *primary* (non-gadget) sibling frames is the
         # logical "current view" -- read by `set_gadget_mode` on exit so
         # leaving gadget mode restores whichever of list/calendar/week was
@@ -4859,15 +4866,23 @@ class MainWindow:
             if self._empty_state_frame is not None:
                 self._empty_state_frame.destroy()
                 self._empty_state_frame = None
+            if self._show_more_button is not None:
+                self._show_more_button.destroy()
+                self._show_more_button = None
 
+        self._last_cards = cards  # full list, so "Mostrar más" can re-render without app.py
+        total_cards = len(cards)
+        cards = cards[: self._card_limit]
         new_ids = {card_data.meeting.id for card_data in cards}
         for meeting_id in list(self._card_widgets.keys()):
             if meeting_id not in new_ids:
                 self._card_widgets.pop(meeting_id).frame.destroy()
 
-        self.meeting_count_label.configure(text=str(len(cards)))
+        self.meeting_count_label.configure(text=str(total_cards))
 
         if not cards:
+            if self._show_more_button is not None:
+                self._show_more_button.grid_remove()
             if self._empty_state_frame is None:
                 empty = tk.Frame(self.meeting_list_frame, bg=PANEL_BG)
                 empty.grid(row=0, column=0, sticky="ew", pady=24)
@@ -4892,6 +4907,23 @@ class MainWindow:
                 widgets = self._create_card(card_data.meeting.id, _CARD_PALETTE)
                 self._card_widgets[card_data.meeting.id] = widgets
             self._update_card(widgets, row_index, card_data, _CARD_PALETTE)
+
+        remaining = total_cards - len(cards)
+        if remaining > 0:
+            if self._show_more_button is None:
+                self._show_more_button = _button(
+                    self.meeting_list_frame, "", self._handle_show_more_cards, GHOST_BG, GHOST_FG, GHOST_HOVER
+                )
+            self._show_more_button.configure(
+                text=i18n.format_text("showMoreButton", self.language, count=remaining)
+            )
+            self._show_more_button.grid(row=len(cards), column=0, sticky="ew", padx=4, pady=(4, 8))
+        elif self._show_more_button is not None:
+            self._show_more_button.grid_remove()
+
+    def _handle_show_more_cards(self) -> None:
+        self._card_limit += CARD_PAGE_SIZE
+        self.render_meeting_list(self._last_cards)
 
     def _create_card(self, meeting_id: str, palette: dict) -> _CardWidgets:
         """Widget construction only -- runs once per meeting's lifetime in

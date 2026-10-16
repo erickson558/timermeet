@@ -46,6 +46,7 @@ TimerMeet nació como un sitio local en PHP y se reescribió por completo en Pyt
 - Splash animado al iniciar (`v2.21.0`): la pantalla de carga ya no es solo el texto "Cargando TimerMeet…" -- ahora reproduce arriba de ese texto una animación GIF corta (`assets/pingpong_loading.gif`, se reproduce una vez en ~1.2 segundos) antes de mostrar la ventana real. Si el archivo faltara o no pudiera leerse, la app arranca igual, sin animación, sin ningún retraso ni error visible. No aplica al modo gadget (ya arranca directo, sin ninguna pantalla de carga, igual que antes).
 - Días específicos con checkboxes (`v2.22.0`): en "Repetición" hay una nueva opción **Días específicos** que muestra casillas Lun–Dom; marca los días (p. ej. lunes, miércoles y viernes) y "Cuántas crear" para generar la serie solo en esos días. Si la fecha inicial no cae en un día marcado, la primera reunión se mueve al siguiente día marcado. La serie se renueva sola respetando esos mismos días.
 - Arranque más rápido (`v2.22.1`): las vistas de calendario y semana se construyen la primera vez que se abren (la ventana principal se crea en ~1.1 s en vez de ~2.8 s) y la animación de carga dura ~0.6 s.
+- Lista paginada (`v2.23.0`): la lista muestra las primeras 20 reuniones y un botón "Mostrar más" carga otras 20, lo que acelera el primer pintado de la ventana. El contador sigue mostrando el total.
 
 ## Instalación y uso
 

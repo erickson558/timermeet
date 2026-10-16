@@ -1555,3 +1555,13 @@ Tests nuevos en `tests/test_recurrence.py::CustomDaysTests`.
 
 `tests/test_header_layout.py` llama a `_ensure_secondary_views()` porque accede a `calendar_header`/`week_header` directamente.
 
+## v2.23.0: lista de reuniones paginada ("Mostrar más")
+
+**Motivo:** seguimiento de v2.22.1 -- cada tarjeta son ~8 widgets y cada widget visible cuesta ~10-14 ms en esta máquina, así que dibujar las ~60 tarjetas era el costo dominante del primer pintado.
+
+**Cambio:** `render_meeting_list` dibuja solo las primeras `CARD_PAGE_SIZE` (20) tarjetas (`_card_limit`); un botón "Mostrar más (N restantes)" al final suma otras 20 y se vuelve a dibujar desde `_last_cards` (la lista completa que app.py ya entregó; no hay callback nuevo). El contador de la cabecera sigue mostrando el total real. El botón se destruye junto con las tarjetas al cambiar idioma/tema y se oculta cuando ya se ven todas. i18n es/en: `showMoreButton`.
+
+**Resultado medido (copia de `data/`, 61 reuniones):** primer pintado ~11.9 s -> ~6.9 s; construcción ~1.35 s.
+
+**Alcance fuera:** el límite no se reinicia al cambiar el filtro de empresa; la selección de semana/calendario no cambia.
+
